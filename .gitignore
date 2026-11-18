@@ -6,3 +6,4 @@ __pycache__/
 *.db
 *.sqlite
 .mypy_cache/
+eval/membench/.cache/
