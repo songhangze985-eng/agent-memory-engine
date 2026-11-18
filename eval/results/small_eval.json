@@ -1,0 +1,215 @@
+{
+  "scale": "small",
+  "seed": 42,
+  "mode": "mock",
+  "model": null,
+  "meaningful_as_quality": false,
+  "note": "本次为 mock 模式：未使用语言模型，数字来自确定性规则与检索基线，不能当作记忆质量分数。",
+  "scale_config": {
+    "noise_tokens": 12000,
+    "n_facts": 4,
+    "gap_rounds": 10,
+    "reinforce": 6,
+    "post_change_gap": 1,
+    "n_scenarios": 2,
+    "hop_gap": 16,
+    "n_casual": 10,
+    "n_traps": 10
+  },
+  "system_has_router": {
+    "naive_rag": false,
+    "crud_baseline": false,
+    "variant_c": true,
+    "full_system": true
+  },
+  "systems": {
+    "naive_rag": {
+      "test1_accuracy": 1.0,
+      "test1_correct": 4,
+      "test1_n": 4,
+      "test2_accuracy": 0.0,
+      "test2_correct": 0,
+      "test2_n": 1,
+      "test3_accuracy": 0.0,
+      "test3_correct": 0,
+      "test3_n": 4,
+      "test4_router_accuracy": null,
+      "test4_router_correct": 0,
+      "test4_router_n": 20,
+      "test4_hallucination_rate": 0.2,
+      "test4_hallucinations": 2,
+      "test4_trap_n": 10,
+      "context_compression": 0.9049130800598084,
+      "timeline_node_reduction": null,
+      "timeline_events": 0,
+      "timeline_nodes": 0,
+      "p95_retrieval_ms_casual": null,
+      "p95_retrieval_ms_task": 0.17898920000334317,
+      "casual_n": 0,
+      "task_n": 29,
+      "llm_fallback_count": 0,
+      "failures": [
+        {
+          "test": "test2",
+          "kind": "accuracy",
+          "query": "这周的周会安排在什么时候？",
+          "response": "本周周会改到周五上午十点。\n团队每周三下午三点开周会。\n团队每周三下午三点开周会。\n团队每周三下午三点开周会。\n团队每周三下午三点开周会。"
+        },
+        {
+          "test": "test3",
+          "kind": "accuracy",
+          "query": "张敏这次出行的预算是多少？",
+          "response": "供应商会谈的预算改为4500元。\n供应商会谈的预算改为1200元。\n供应商会谈的预算为2000元。\n设计评审的预算改为3000元。\n设计评审的预算为5000元。"
+        },
+        {
+          "test": "test3",
+          "kind": "accuracy",
+          "query": "在第二次修改预算之前，张敏这次出行的预算是多少？",
+          "response": "供应商会谈的预算为2000元。\n设计评审的预算改为3000元。\n设计评审的预算为5000元。\n供应商会谈的预算改为4500元。\n供应商会谈的预算改为1200元。"
+        },
+        {
+          "test": "test3",
+          "kind": "accuracy",
+          "query": "李楠这次出行的预算是多少？",
+          "response": "供应商会谈的预算改为4500元。\n供应商会谈的预算改为1200元。\n供应商会谈的预算为2000元。\n设计评审的预算改为3000元。\n设计评审的预算为5000元。"
+        },
+        {
+          "test": "test3",
+          "kind": "accuracy",
+          "query": "在第二次修改预算之前，李楠这次出行的预算是多少？",
+          "response": "供应商会谈的预算为2000元。\n设计评审的预算改为3000元。\n设计评审的预算为5000元。\n供应商会谈的预算改为4500元。\n供应商会谈的预算改为1200元。"
+        },
+        {
+          "test": "test4",
+          "kind": "hallucination",
+          "query": "市面上常见的食品添加剂有哪些",
+          "response": "老周对苯甲酸钠过敏，不能食用含该防腐剂的食品。\n仓库备用钥匙放在绿色铁盒。\n苏晚的门禁密码是7341。\n北岛项目的内部代号是青柠。\n团队每周三下午三点开周会。"
+        },
+        {
+          "test": "test4",
+          "kind": "hallucination",
+          "query": "门锁坏了怎么办",
+          "response": "本周周会改到周五上午十点。\n老周对苯甲酸钠过敏，不能食用含该防腐剂的食品。\n仓库备用钥匙放在绿色铁盒。\n苏晚的门禁密码是7341。\n张敏将前往京都参加设计评审。"
+        }
+      ],
+      "per_test_utterances": {
+        "test1": 139,
+        "test2": 8,
+        "test3": 104,
+        "test4": 11
+      }
+    },
+    "crud_baseline": {
+      "test1_accuracy": 1.0,
+      "test1_correct": 4,
+      "test1_n": 4,
+      "test2_accuracy": 1.0,
+      "test2_correct": 1,
+      "test2_n": 1,
+      "test3_accuracy": 0.5,
+      "test3_correct": 2,
+      "test3_n": 4,
+      "test4_router_accuracy": null,
+      "test4_router_correct": 0,
+      "test4_router_n": 20,
+      "test4_hallucination_rate": 0.0,
+      "test4_hallucinations": 0,
+      "test4_trap_n": 10,
+      "context_compression": 0.8302045948317711,
+      "timeline_node_reduction": null,
+      "timeline_events": 0,
+      "timeline_nodes": 0,
+      "p95_retrieval_ms_casual": null,
+      "p95_retrieval_ms_task": 0.009643400017012025,
+      "casual_n": 0,
+      "task_n": 29,
+      "llm_fallback_count": 0,
+      "failures": [
+        {
+          "test": "test3",
+          "kind": "accuracy",
+          "query": "在第二次修改预算之前，张敏这次出行的预算是多少？",
+          "response": "张敏将前往京都参加设计评审。设计评审的预算改为3000元。"
+        },
+        {
+          "test": "test3",
+          "kind": "accuracy",
+          "query": "在第二次修改预算之前，李楠这次出行的预算是多少？",
+          "response": "李楠将前往青岛参加供应商会谈。供应商会谈的预算改为1200元。"
+        }
+      ],
+      "per_test_utterances": {
+        "test1": 139,
+        "test2": 8,
+        "test3": 104,
+        "test4": 11
+      }
+    },
+    "variant_c": {
+      "test1_accuracy": 1.0,
+      "test1_correct": 4,
+      "test1_n": 4,
+      "test2_accuracy": 1.0,
+      "test2_correct": 1,
+      "test2_n": 1,
+      "test3_accuracy": 1.0,
+      "test3_correct": 4,
+      "test3_n": 4,
+      "test4_router_accuracy": 0.25,
+      "test4_router_correct": 5,
+      "test4_router_n": 20,
+      "test4_hallucination_rate": 0.0,
+      "test4_hallucinations": 0,
+      "test4_trap_n": 10,
+      "context_compression": 0.9776780337041173,
+      "timeline_node_reduction": 0.0,
+      "timeline_events": 280,
+      "timeline_nodes": 280,
+      "p95_retrieval_ms_casual": null,
+      "p95_retrieval_ms_task": 5.527827200148749,
+      "casual_n": 0,
+      "task_n": 29,
+      "llm_fallback_count": 0,
+      "failures": [],
+      "per_test_utterances": {
+        "test1": 139,
+        "test2": 8,
+        "test3": 104,
+        "test4": 11
+      }
+    },
+    "full_system": {
+      "test1_accuracy": 1.0,
+      "test1_correct": 4,
+      "test1_n": 4,
+      "test2_accuracy": 1.0,
+      "test2_correct": 1,
+      "test2_n": 1,
+      "test3_accuracy": 1.0,
+      "test3_correct": 4,
+      "test3_n": 4,
+      "test4_router_accuracy": 1.0,
+      "test4_router_correct": 20,
+      "test4_router_n": 20,
+      "test4_hallucination_rate": 0.0,
+      "test4_hallucinations": 0,
+      "test4_trap_n": 10,
+      "context_compression": 0.9776780337041173,
+      "timeline_node_reduction": 0.969811320754717,
+      "timeline_events": 265,
+      "timeline_nodes": 8,
+      "p95_retrieval_ms_casual": 0.14460249992680474,
+      "p95_retrieval_ms_task": 6.203143999971417,
+      "casual_n": 15,
+      "task_n": 14,
+      "llm_fallback_count": 0,
+      "failures": [],
+      "per_test_utterances": {
+        "test1": 139,
+        "test2": 8,
+        "test3": 104,
+        "test4": 11
+      }
+    }
+  }
+}
