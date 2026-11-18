@@ -135,11 +135,11 @@ python3 -m eval.run_eval --scale full --out eval/results/full_eval.json
 ```bash
 python3 -m eval.membench.run --sample 20 --mode mock
 
-export LLM_BASE_URL=https://your-endpoint/v1
+export LLM_BASE_URL=https://api.deepseek.com/v1
 export LLM_API_KEY=sk-...          # 或 OPENAI_API_KEY
-export LLM_MODEL=Qwen2.5-7B-Instruct
-python3 -m eval.membench.run --sample 20 --mode live --model Qwen2.5-7B-Instruct \
-  --out eval/results/membench/sample20_live.json
+export LLM_MODEL=deepseek-chat
+python3 -m eval.membench.run --sample 20 --mode live --model deepseek-chat --concurrency 4 \
+  --out eval/results/membench/sample20_deepseek.json
 ```
 
 `--sample` 是每一大类的条数（参与/观察 × 事实/反思）。缺的官方 JSON 会下载到 `eval/membench/.cache/MemData/`，也可以用 `--data-dir` 指向已经解压的 `MemData`。
@@ -156,16 +156,16 @@ python3 -m eval.membench.run --sample 20 --mode live --model Qwen2.5-7B-Instruct
 
 ### 本次抽样实测
 
-模式：**mock**。环境里没有 LLM API key。80 条（每类 20，种子 42）。估计 token 443058，接口没有返回费用，`cost_usd` 为空。这些数字不能当作质量分数，也不能和上一张 Sub-dataset 1 的表比高低。
+模式：**mock**。环境里没有 LLM API key。80 条（每类 20，种子 42）。作答头是词面重叠，引擎写入是英文整句落成孤立行。这些数字不能当作质量分数，也不能和上一张 Sub-dataset 1 的表比高低。`cost_usd` 为空。
 
 | 系统 | 参与·事实 | 参与·反思 | 观察·事实 | 观察·反思 | 总体准确率 | Recall@10 | 写入 ms/次 | 读取 ms/次 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 引擎 answer() | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | — | 0.987 | 0.645 |
-| 引擎检索 + 同一作答头 | 15.0% | 35.0% | 25.0% | 20.0% | 23.8% | 0.0% | 0.987 | 0.645 |
+| 引擎 answer() | 30.0% | 35.0% | 50.0% | 25.0% | 35.0% | — | 7.319 | 22.131 |
+| 引擎检索 + 同一作答头 | 30.0% | 35.0% | 50.0% | 25.0% | 35.0% | 56.7% | 7.319 | 22.131 |
 | 无记忆基线 | 15.0% | 35.0% | 25.0% | 20.0% | 23.8% | — | — | — |
 | 全上下文基线 | 30.0% | 35.0% | 50.0% | 25.0% | 35.0% | — | — | — |
 
-这次 mock 运行里，80 道英文选择题全部被规则路由判成闲聊旁路，检索上下文为空，Recall@10 为 0。因此「引擎检索 + 同一作答头」和无记忆基线逐题相同（空上下文时选择器固定选 A，总体 23.8% 就是标准答案为 A 的比例）。`answer()` 的离线回复里没有 A–D，严格字母准确率是 0。全上下文选择器看得到原对话，总体 35.0%。按写入 token 把同一作答头分成三段，准确率是 15.4% / 26.9% / 28.6%（26、26、28 条）；因为检索是空的，这三段只是「答案恰好为 A」的比例，不是容量曲线上的记忆效果。
+选择题进入任务态。引擎检索的 Recall@10 是 56.7%。`answer()` 和「检索 + 同一作答头」总体 35.0%，无记忆基线 23.8%。参与·反思这一列两边都是 35.0%，其余三类引擎更高。mock 下全上下文选择器与引擎打成相同的 35.0%，因为离线作答头看到的证据文本和整段对话里的答案字符串重叠方式接近。
 
 原始结果：`eval/results/membench/sample20_mock.json`、`eval/results/membench/sample20_mock.md`。
 

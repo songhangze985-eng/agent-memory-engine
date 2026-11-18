@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from eval.membench.catalog import (
@@ -240,7 +241,29 @@ def _markdown(payload: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path) -> dict:
+def _evaluate_all(items, client, mock: bool, concurrency: int) -> list[dict]:
+    rows: list[dict | None] = [None] * len(items)
+    if concurrency <= 1:
+        for index, item in enumerate(items):
+            print(f"[{index + 1}/{len(items)}] {item['category']} {item['subtype']} tid={item['tid']}", flush=True)
+            rows[index] = _eval_item(item, client, mock)
+        return rows  # type: ignore[return-value]
+    workers = min(concurrency, len(items))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_eval_item, item, client, mock): index for index, item in enumerate(items)
+        }
+        finished = 0
+        for future in as_completed(futures):
+            index = futures[future]
+            rows[index] = future.result()
+            finished += 1
+            item = items[index]
+            print(f"[{finished}/{len(items)}] {item['category']} {item['subtype']} tid={item['tid']}", flush=True)
+    return rows  # type: ignore[return-value]
+
+
+def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path, concurrency: int = 1) -> dict:
     if mode == "mock":
         client, resolved, resolved_model = MockLLMClient(), "mock", None
     elif mode == "live":
@@ -253,15 +276,16 @@ def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path) ->
         client.model = model
         resolved_model = model
     items = load_sample(sample, seed, data_dir)
-    rows = []
-    for index, item in enumerate(items, start=1):
-        print(f"[{index}/{len(items)}] {item['category']} {item['subtype']} tid={item['tid']}", flush=True)
-        rows.append(_eval_item(item, client, resolved != "live"))
+    rows = _evaluate_all(items, client, resolved != "live", concurrency)
     prompt_tokens = sum(row["prompt_tokens"] + row["question_tokens"] + row["ingest_tokens"] for row in rows)
+    usage = getattr(client, "usage_totals", None) or {}
     note = (
         "本次为 mock 模式：作答头是确定性的词面重叠选择器，引擎 answer() 走离线规则。这些数字不是记忆质量分数。"
         if resolved != "live"
-        else f"本次作答调用了 OpenAI 兼容接口，模型 {resolved_model}。引擎的写入和检索仍是本地代码。"
+        else (
+            f"本次引擎、无记忆基线和全上下文基线使用同一个接口，模型 {resolved_model}，"
+            f"地址 {getattr(client, 'base_url', '')}。费用未按 DeepSeek 价目折算，cost_usd 为空。"
+        )
     )
     return {
         "benchmark": "MemBench",
@@ -278,7 +302,11 @@ def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path) ->
         "requested_model": model,
         "meaningful_as_quality": resolved == "live",
         "note": note,
+        "concurrency": concurrency,
+        "llm_base_url": getattr(client, "base_url", None),
         "tokens_estimated": prompt_tokens,
+        "llm_prompt_tokens": int(usage.get("prompt_tokens") or 0) if resolved == "live" else None,
+        "llm_completion_tokens": int(usage.get("completion_tokens") or 0) if resolved == "live" else None,
         "cost_usd": None,
         "systems": _category_table(rows),
         "capacity_bins": capacity_bins(rows),
@@ -293,12 +321,15 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mode", choices=["auto", "mock", "live"], default="auto")
     parser.add_argument("--model", default=None, help="Model name for a live OpenAI-compatible endpoint. Ignored in mock mode.")
+    parser.add_argument("--concurrency", type=int, default=1, help="How many trajectories to score at once. Live DeepSeek runs can use 4.")
     parser.add_argument("--data-dir", default=str(DEFAULT_CACHE), help="Directory of official MemData files. Missing files are downloaded.")
     parser.add_argument("--out", default=str(ROOT / "eval" / "results" / "membench" / "sample_mock.json"))
     args = parser.parse_args()
     if args.sample < 1:
         raise SystemExit("--sample must be >= 1")
-    payload = run(args.sample, args.seed, args.mode, args.model, Path(args.data_dir))
+    if args.concurrency < 1:
+        raise SystemExit("--concurrency must be >= 1")
+    payload = run(args.sample, args.seed, args.mode, args.model, Path(args.data_dir), args.concurrency)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

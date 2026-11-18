@@ -61,9 +61,14 @@ def test_mock_item_scores_full_context_and_leaves_native_unscored(tmp_path):
     )
     assert "Reply with only one letter" in format_question(item)
     row = _eval_item(item, client=None, mock=True)
+    assert row["route"] == "TASK_POISON_CIRCLE"
     assert row["full_context_correct"] is True
     assert row["no_memory_choice"] == "A"
     assert row["no_memory_correct"] is False
-    assert row["native_correct"] is False
+    assert row["native_response"].rstrip().endswith("B")
+    assert row["native_correct"] is True
+    assert row["same_head_correct"] is True
+    assert row["same_head_choice"] != row["no_memory_choice"]
+    assert row["recall_at_10"] == 1.0
     assert row["n_turns"] == 1
     assert row["ingest_tokens"] > 0

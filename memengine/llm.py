@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import urllib.request
 
 from memengine.policy import decide_layout, decide_origin, plan_answer
@@ -56,6 +57,8 @@ class OpenAICompatibleClient:
         self.api_key = api_key or os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
         self.model = model or os.environ.get("LLM_MODEL") or "Qwen2.5-7B-Instruct"
         self.timeout = timeout
+        self.usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+        self._usage_lock = threading.Lock()
 
     def complete(self, prompt: str) -> str:
         if not self.api_key:
@@ -77,6 +80,10 @@ class OpenAICompatibleClient:
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        usage = payload.get("usage") or {}
+        with self._usage_lock:
+            self.usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+            self.usage_totals["completion_tokens"] += int(usage.get("completion_tokens") or 0)
         return payload["choices"][0]["message"]["content"]
 
 

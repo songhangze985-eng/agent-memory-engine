@@ -23,6 +23,9 @@ def parse_choice(text: str | None) -> str | None:
     raw = (text or "").strip()
     if not raw:
         return None
+    last = raw.splitlines()[-1].strip()
+    if re.fullmatch(r"[ABCD]", last):
+        return last
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError:

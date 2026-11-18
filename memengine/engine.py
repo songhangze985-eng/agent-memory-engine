@@ -6,8 +6,9 @@ import time
 from typing import Callable
 
 from memengine.distance import asymptotic_distance, compute_raw_dist
-from memengine.extract import extract_facts, is_greeting
+from memengine.extract import english_entity_keys, extract_facts, is_greeting
 from memengine.llm import MockLLMClient, loads_json_object
+from memengine.mcq import end_with_choice
 from memengine.notebook import apply_write_op, format_fact_line, render_block
 from memengine.policy import decide_layout, decide_origin, plan_answer
 from memengine.prompts import render_prompt
@@ -86,6 +87,8 @@ class CognitiveMemoryEngine:
         now = self._now()
         self.store.append_ingest(text or "", now)
         facts = extract_facts(text or "")
+        if not facts and not self._using_mock() and not is_greeting(text or ""):
+            facts = self._llm_extract(text or "")
         job = {"text": text or "", "facts": facts, "ts": now, "noise": False, "ops": []}
         if facts:
             candidates = self._candidate_blocks(facts)
@@ -188,6 +191,8 @@ class CognitiveMemoryEngine:
             self.epsilon,
         )
         outer, inner = _split_zones(collapsed)
+        outer = _rank_by_overlap(outer, query)
+        inner = _rank_by_overlap(inner, query)
         if _is_time_travel(query):
             line_ids = []
             seen = set()
@@ -256,12 +261,49 @@ class CognitiveMemoryEngine:
             "verification_status": str(trace.get("verification_status") or "PARTIAL_INFO"),
         }
         public = {key: retrieved[key] for key in retrieved if key != "context"}
+        reply = end_with_choice(query, str(data.get("final_response") or ""))
         return {
             **public,
-            "response": str(data.get("final_response") or ""),
+            "response": reply,
             "reasoning": safe_trace,
             "llm_fallback": used_fallback,
         }
+
+    def _using_mock(self) -> bool:
+        return isinstance(self.llm, MockLLMClient)
+
+    def _llm_extract(self, text: str) -> list[dict]:
+        """Minimal fact list for Prompt 3. Used only with a live client."""
+        prompt = (
+            "Extract objective facts from the utterance. "
+            'Return JSON {"facts":[{"text":"...","zkeys":["person:Name","entity:token"],'
+            '"attribute":"...","value":"...","topic":"dialogue","isolated":true}]}. '
+            'If there is no objective fact, return {"facts":[]}.\n'
+            f"Utterance:\n{text[:4000]}"
+        )
+        try:
+            data = loads_json_object(self.llm.complete(prompt))
+        except Exception:
+            return []
+        facts = []
+        for item in data.get("facts") or []:
+            if not isinstance(item, dict) or not str(item.get("text") or "").strip():
+                continue
+            zkeys = [str(key) for key in (item.get("zkeys") or []) if key]
+            if not zkeys:
+                zkeys = english_entity_keys(str(item.get("text")))
+            facts.append(
+                {
+                    "text": str(item.get("text")).strip(),
+                    "zkeys": zkeys,
+                    "attribute": str(item.get("attribute") or "fact"),
+                    "value": str(item.get("value") or ""),
+                    "topic": str(item.get("topic") or "dialogue"),
+                    "isolated": bool(item.get("isolated", True)),
+                    "is_greeting": False,
+                }
+            )
+        return facts
 
     def timeline_stats(self) -> dict:
         reduction = self.timeline.reduction()
@@ -456,6 +498,17 @@ def _split_zones(collapsed: list[dict]) -> tuple[list[dict], list[dict]]:
             else:
                 inner.append(fact)
     return outer, inner
+
+
+def _rank_by_overlap(facts: list[dict], query: str) -> list[dict]:
+    if len(facts) < 2:
+        return facts
+    query_grams = char_bigrams(query)
+    return sorted(
+        facts,
+        key=lambda fact: jaccard(query_grams, char_bigrams(fact.get("text") or "")),
+        reverse=True,
+    )
 
 
 def _context_blob(outer: list[dict], inner: list[dict]) -> str:
