@@ -37,7 +37,7 @@ def test_temporal_and_revision_policy_share_ordinals():
     assert travel_revision("before the second revision") == "previous"
 
 
-def test_twelfth_budget_edit_is_not_the_original_row():
+def test_before_nth_budget_edit_uses_that_revision():
     engine = CognitiveMemoryEngine(db_path=":memory:")
     engine.add("设计评审的预算为1000元。", timestamp=100)
     for step, value in enumerate((2000, 3000, 4000, 5000), start=1):
@@ -47,8 +47,16 @@ def test_twelfth_budget_edit_is_not_the_original_row():
     assert "2000" in second["response"], second["response"]
     assert "1000" not in second["response"]
 
+    fourth = engine.answer("在第四次修改预算之前", timestamp=900)
+    assert "4000" in fourth["response"], fourth["response"]
+    assert "5000" not in fourth["response"]
+
+    fifth = engine.answer("在第五次修改预算之前", timestamp=900)
+    assert "5000" in fifth["response"], fifth["response"]
+    assert "4000" not in fifth["response"]
+
     twelfth = engine.answer("在第十二次修改预算之前", timestamp=900)
     assert twelfth["temporal_intent"]["rev_index"] == 11
-    # Five stored revisions, 0 through 4. Index 11 falls back to the newest superseded row.
-    assert "4000" in twelfth["response"], twelfth["response"]
+    assert "5000" in twelfth["response"], twelfth["response"]
+    assert "4000" not in twelfth["response"]
     assert "1000" not in twelfth["response"]
