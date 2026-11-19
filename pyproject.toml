@@ -1,0 +1,21 @@
+[project]
+name = "memengine"
+version = "0.1.0"
+description = "认知记忆引擎：规则路由、渐近原点毒圈、平行 Z 轴坍缩与 3D 笔记本。"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["memengine*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
