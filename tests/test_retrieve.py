@@ -8,7 +8,7 @@ from memengine.categories import (
 from memengine.engine import CognitiveMemoryEngine
 from memengine.llm import MockLLMClient
 from memengine.queryparse import normalize_parsed_query, parse_query_rules
-from memengine.vector import weighted_rrf
+from memengine.vector import HashedTfidfEmbedder, weighted_rrf
 
 
 def test_category_enum_is_the_fixed_twelve():
@@ -67,15 +67,17 @@ def test_weighted_rrf_prefers_vector_ranks_by_default():
 
 
 def test_unrelated_query_does_not_fall_back_to_recent_facts():
-    engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient())
+    engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient(), vector=HashedTfidfEmbedder())
     try:
         engine.add("[step 0] user: I really dig the movie Ran\nagent: Nice.", timestamp=1.0)
         assert engine.has_facts()
-        engine.vector = type("NoVectorMatch", (), {"search": lambda self, query, facts, top_n: []})()
-        retrieved = engine.search("What should I pack for a ski trip tomorrow?")
+        query = "What should I pack for a ski trip tomorrow?"
+        retrieved = engine.search(query, timestamp=1_700_000_000)
         texts = [fact.get("text") or "" for fact in list(retrieved.get("hits") or []) + list(retrieved.get("outer") or []) + list(retrieved.get("inner") or [])]
         assert not texts
         assert retrieved["empty_retrieval"] is True
+        answered = engine.answer(query, timestamp=1_700_000_000, retrieved=retrieved)
+        assert "Ran" not in (answered.get("response") or "")
     finally:
         engine.store.close()
 

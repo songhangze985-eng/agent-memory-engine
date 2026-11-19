@@ -11,6 +11,7 @@ from typing import Protocol
 import numpy as np
 
 from memengine.categories import map_categories
+from memengine.distance import MIN_REL
 from memengine.router import match_entities
 from memengine.textutil import strip_step_tags, tokenize_for_fts
 
@@ -58,6 +59,46 @@ def tokenize(text: str) -> list[str]:
         if len(compact) >= width:
             tokens.extend(compact[i : i + width] for i in range(len(compact) - width + 1))
     return tokens
+
+
+_LATIN_TOKEN = re.compile(r"[a-z0-9_.\-/]+")
+
+
+def hashed_content_terms(text: str) -> set[str]:
+    """Tokens written into the hashed TF-IDF vector, without char-trigram features."""
+    return {term for term in tokenize_for_fts(strip_step_tags(text or "")).split()
+            if term not in _QUERY_STOP and len(term) >= 2}
+
+
+def shares_hashed_content(query_terms: set[str], text: str) -> bool:
+    """True when ``text`` contains a content term already extracted from the query."""
+    if not query_terms:
+        return False
+    cleaned = strip_step_tags(text or "").lower()
+    han = [term for term in query_terms if "\u3400" <= term[0] <= "\u9fff"]
+    if any(term in cleaned for term in han):
+        return True
+    latin = query_terms.difference(han)
+    if not latin:
+        return False
+    for token in _LATIN_TOKEN.findall(cleaned):
+        token = token.strip(".-/")
+        if token in latin and any(char.isalnum() for char in token):
+            return True
+    return False
+
+
+def keep_hashed_dense_hit(score: float, query_terms: set[str], text: str, *, floor: float = MIN_REL) -> bool:
+    """Keep a hashed cosine hit that clears ``floor`` or shares a content term.
+
+    Bucket collisions are a small positive cosine with no shared term. A real
+    overlap can also sit under the floor, so the shared term keeps it.
+    """
+    if score <= 0:
+        return False
+    if score > floor:
+        return True
+    return shares_hashed_content(query_terms, text)
 
 
 def _bucket(token: str, dim: int) -> tuple[int, float]:

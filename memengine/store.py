@@ -14,7 +14,7 @@ import numpy as np
 
 from memengine.textutil import (ensure_step_tags, estimate_tokens, merge_step_ids, normalize_entity,
                                 step_ids_in, strip_step_tags, tokenize_for_fts)
-from memengine.vector import HashedTfidfEmbedder, normalize_vectors
+from memengine.vector import HashedTfidfEmbedder, hashed_content_terms, keep_hashed_dense_hit, normalize_vectors
 
 DEFAULT_SCOPE = ("default", "default", "default")
 _IDS = "SELECT value FROM json_each(?)"
@@ -480,13 +480,14 @@ class Store:
             return []
         scope = (user_id, agent_id, session_id)
         where, args = _scope_where(scope, "f.")
-        rows = self.conn.execute(f"""SELECT v.* FROM fact_vectors v JOIN facts f ON f.id=v.fact_id
+        rows = self.conn.execute(f"""SELECT v.*, f.plain FROM fact_vectors v JOIN facts f ON f.id=v.fact_id
              WHERE v.user_id=? AND v.agent_id=? AND {where} AND {self._searchable(include_superseded)} ORDER BY v.fact_id""",
                                  (user_id, agent_id, *args)).fetchall()
         groups = {}
         for row in rows:
             groups.setdefault((row["model_name"], row["dim"]), []).append(row)
         hits = []
+        query_terms = hashed_content_terms(query)
         for backend in {self.fallback_embedder.model_name: self.fallback_embedder, self.embedder.model_name: self.embedder}.values():
             selected = [(size, values) for (model, size), values in groups.items() if model == backend.model_name]
             if not selected:
@@ -495,12 +496,19 @@ class Store:
                 encoded = normalize_vectors(backend.encode([query]))[0]
             except (OSError, ValueError, TypeError, KeyError, HTTPException):
                 continue
+            hashed = isinstance(backend, HashedTfidfEmbedder)
             for dim, values in selected:
                 if dim != len(encoded):
                     continue
                 matrix = np.frombuffer(b"".join(row["vec"] for row in values), dtype="<f4").reshape(-1, dim)
-                hits.extend({"id": row["fact_id"], "vector_score": float(score)}
-                            for row, score in zip(values, matrix @ encoded) if score > 0)
+                for row, score in zip(values, matrix @ encoded):
+                    score = float(score)
+                    if hashed:
+                        if not keep_hashed_dense_hit(score, query_terms, row["plain"]):
+                            continue
+                    elif score <= 0:
+                        continue
+                    hits.append({"id": row["fact_id"], "vector_score": score})
         hits.sort(key=lambda fact: (-fact["vector_score"], fact["id"]))
         return self._search_results(hits[:top_n], scope, ids_only)
 
