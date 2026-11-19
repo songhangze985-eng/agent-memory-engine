@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 
+from memengine.categories import attach_dual_zkeys
 from memengine.textutil import split_sentences
 
 _GREETING = re.compile(
@@ -33,9 +34,10 @@ def is_greeting(text: str) -> bool:
 
 
 def _fact(text, zkeys, attribute, value, topic, isolated) -> dict:
+    body = text.strip()
     return {
-        "text": text.strip(),
-        "zkeys": list(zkeys),
+        "text": body,
+        "zkeys": attach_dual_zkeys(zkeys, body),
         "attribute": attribute,
         "value": str(value),
         "topic": topic,

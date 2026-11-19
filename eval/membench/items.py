@@ -111,3 +111,24 @@ def format_question(item: dict) -> str:
         lines.append(f"{letter}. {text}")
     lines.append("Reply with only one letter: A, B, C, or D.")
     return "\n".join(lines)
+
+
+_CHOICE_LINE = re.compile(r"(?m)^\s*[ABCD][\.\)]\s+.*$")
+_REPLY_LETTER = re.compile(r"(?im)^\s*Reply with only one letter:.*$")
+_TIME_PREFIX = re.compile(r"^\(current time is [^)]*\)\s*")
+
+
+def strip_mcq_options(text: str) -> str:
+    """Drop A/B/C/D choice lines and the letter-instruction, keep the stem."""
+    raw = _REPLY_LETTER.sub("", text or "")
+    raw = _CHOICE_LINE.sub("", raw)
+    raw = _TIME_PREFIX.sub("", raw.strip())
+    lines = [line.rstrip() for line in raw.splitlines() if line.strip()]
+    return "\n".join(lines).strip()
+
+
+def question_stem(item: dict | str) -> str:
+    """Question text only: never includes multiple-choice options."""
+    if isinstance(item, dict):
+        return str(item.get("question") or "").strip()
+    return strip_mcq_options(str(item))

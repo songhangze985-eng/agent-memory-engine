@@ -53,6 +53,17 @@ def latin_tokens(text: str) -> set[str]:
     return {tok.lower() for tok in _LATIN.findall(text or "") if tok.lower() not in _STOP}
 
 
+def _token_forms(token: str) -> set[str]:
+    """Light plural folding so ``movies`` matches ``movie``."""
+    folded = (token or "").lower()
+    forms = {folded}
+    if len(folded) > 4 and folded.endswith("ies"):
+        forms.add(folded[:-3] + "y")
+    if len(folded) > 3 and folded.endswith("s") and not folded.endswith("ss"):
+        forms.add(folded[:-1])
+    return forms
+
+
 def _name_matches(name: str, query: str, query_tokens: set[str]) -> bool:
     if not name:
         return False
@@ -61,8 +72,10 @@ def _name_matches(name: str, query: str, query_tokens: set[str]) -> bool:
     parts = latin_tokens(name)
     if not parts:
         folded = re.sub(r"[^a-z0-9]+", "", name.lower())
-        return len(folded) >= 3 and folded in query_tokens
-    return parts <= query_tokens
+        query_forms = set().union(*(_token_forms(tok) for tok in query_tokens)) if query_tokens else set()
+        return len(folded) >= 3 and (folded in query_tokens or folded in query_forms)
+    query_forms = set().union(*(_token_forms(tok) for tok in query_tokens)) if query_tokens else set()
+    return all(_token_forms(part) & query_forms for part in parts)
 
 
 def entity_hit(query: str, entity_keys) -> bool:

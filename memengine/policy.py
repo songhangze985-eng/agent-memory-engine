@@ -13,6 +13,11 @@ from memengine.textutil import char_bigrams, jaccard, parse_cn_number
 
 REFUSAL = "根据现有记忆，没有足够的直接关联可以确认这一点。"
 
+def _specific_zkeys(keys) -> set[str]:
+    """Identity keys used for overwrite and reachability; categories are too coarse."""
+    return {str(key) for key in (keys or []) if str(key) and not str(key).startswith("类目:")}
+
+
 _ORDINAL = re.compile(r"第([0-9]+|[一二两三四五六七八九十])次")
 
 
@@ -75,13 +80,13 @@ def _find_match(flat, fact):
     attribute = fact.get("attribute") or ""
     if not attribute:
         return None
-    keys = set(fact.get("zkeys") or [])
+    keys = _specific_zkeys(fact.get("zkeys") or [])
     if not keys:
         return None
     for block, line in flat:
         if (line.get("attribute") or "") != attribute:
             continue
-        if keys.intersection(line.get("zkeys") or []):
+        if keys.intersection(_specific_zkeys(line.get("zkeys") or [])):
             return block, line
     return None
 
@@ -165,7 +170,7 @@ def _reachable(facts: list[dict], query: str) -> tuple[list[dict], list[str]]:
                 break
     frontier = set()
     for fact in seeds:
-        frontier.update(fact.get("zkeys") or [])
+        frontier.update(_specific_zkeys(fact.get("zkeys") or []))
     reachable_ids: set[str] = set()
     changed = True
     while changed:
@@ -173,10 +178,10 @@ def _reachable(facts: list[dict], query: str) -> tuple[list[dict], list[str]]:
         for fact in facts:
             if fact["id"] in reachable_ids:
                 continue
-            if frontier.intersection(fact.get("zkeys") or []):
+            if frontier.intersection(_specific_zkeys(fact.get("zkeys") or [])):
                 reachable_ids.add(fact["id"])
                 before = len(frontier)
-                frontier.update(fact.get("zkeys") or [])
+                frontier.update(_specific_zkeys(fact.get("zkeys") or []))
                 if len(frontier) != before:
                     changed = True
     kept = [fact for fact in facts if fact["id"] in reachable_ids]

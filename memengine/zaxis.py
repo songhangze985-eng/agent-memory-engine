@@ -17,8 +17,14 @@ def expand_entities(z_index: dict, seeds, hops: int = 2) -> list[str]:
     for _ in range(max(0, hops)):
         extra: set[str] = set()
         for key in keys:
+            # Controlled categories are too coarse to use as graph edges;
+            # walking them would glue unrelated entities together.
+            if str(key).startswith("类目:"):
+                continue
             for fact in z_index.get(key, []):
-                extra.update(fact.get("zkeys") or [])
+                for zkey in fact.get("zkeys") or []:
+                    if not str(zkey).startswith("类目:"):
+                        extra.add(zkey)
         keys |= extra
     return sorted(keys)
 

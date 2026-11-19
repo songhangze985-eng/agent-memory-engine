@@ -124,3 +124,58 @@ def test_noop_does_not_change_lines():
         alias={},
     )
     assert store.active_snapshot() == before
+
+
+def test_overwrite_keeps_all_source_step_ids():
+    store = Store(":memory:")
+    alias = {}
+    line_id = apply_write_op(
+        store,
+        _op("INSERT_ISOLATED_LINE", "NEW:ISO", formatted="[step 0] like Ran", zkeys=["entity:movie"]),
+        topic="dialogue",
+        attribute="turn:0",
+        value="Ran",
+        plain="[step 0] I really dig the movie Ran",
+        timestamp=10,
+        alias=alias,
+    )
+    apply_write_op(
+        store,
+        _op(
+            "OVERWRITE_SAME_LINE",
+            alias["NEW:ISO"],
+            line=line_id,
+            formatted="[step 3] also Glory",
+            zkeys=["entity:movie"],
+        ),
+        topic="dialogue",
+        attribute="turn:3",
+        value="Glory",
+        plain="[step 3] I also enjoy Glory",
+        timestamp=20,
+        alias=alias,
+    )
+    active = [line for block in store.active_snapshot() for line in block["lines"]]
+    assert active[0]["source_step_ids"] == [0, 3]
+    retrieved = store.z_index()["entity:movie"][0]["text"]
+    assert "[step 0]" in retrieved
+    assert "[step 3]" in retrieved
+
+
+def test_empty_layout_zkeys_fall_back_to_fact_keys():
+    store = Store(":memory:")
+    line_id = apply_write_op(
+        store,
+        _op("INSERT_ISOLATED_LINE", "NEW:ISO", formatted="kept", zkeys=[]),
+        topic="dialogue",
+        attribute="turn:0",
+        value="Ran",
+        plain="[step 0] I really dig the movie Ran",
+        timestamp=10,
+        alias={},
+        fact_zkeys=["entity:movie", "person:Ran"],
+    )
+    assert line_id
+    index = store.z_index()
+    assert "entity:movie" in index
+    assert "person:Ran" in index

@@ -6,6 +6,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from memengine.textutil import ensure_step_tags, merge_step_ids, step_ids_in
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS blocks (
@@ -28,7 +30,8 @@ CREATE TABLE IF NOT EXISTS lines (
   revision INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
-  active INTEGER NOT NULL DEFAULT 1
+  active INTEGER NOT NULL DEFAULT 1,
+  source_step_ids TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS line_zkeys (
   line_id TEXT NOT NULL,
@@ -46,7 +49,8 @@ CREATE TABLE IF NOT EXISTS line_history (
   surprise REAL,
   layout TEXT,
   t_start REAL,
-  t_end REAL
+  t_end REAL,
+  source_step_ids TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS timeline (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +103,19 @@ class Store:
         self.set_meta(f"seq_{prefix}", str(current))
         return f"{prefix}{current}"
 
+    def _parse_step_ids(self, raw) -> list[int]:
+        if isinstance(raw, list):
+            return merge_step_ids(raw)
+        if not raw:
+            return []
+        try:
+            return merge_step_ids(json.loads(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return step_ids_in(str(raw))
+
+    def _dump_step_ids(self, ids) -> str:
+        return json.dumps(merge_step_ids(ids), ensure_ascii=False)
+
     def create_block(self, topic: str, timestamp: float) -> str:
         block_id = self.next_id("b")
         self.conn.execute(
@@ -118,15 +135,16 @@ class Store:
         ).fetchone()
         return None if row is None else dict(row)
 
-    def insert_line(self, *, block_id, formatted, plain, attribute, value, surprise, raw_dist, layout, isolated, zkeys, timestamp) -> str:
+    def insert_line(self, *, block_id, formatted, plain, attribute, value, surprise, raw_dist, layout, isolated, zkeys, timestamp, source_step_ids=None) -> str:
         line_id = self.next_id("l")
         seq = self.conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM lines WHERE block_id = ?", (block_id,)).fetchone()["n"]
+        steps = merge_step_ids(source_step_ids, step_ids_in(plain or ""), step_ids_in(formatted or ""))
         self.conn.execute(
             """
             INSERT INTO lines(
               id, block_id, seq, formatted, plain, attribute, value, surprise, raw_dist,
-              layout, isolated, revision, created_at, updated_at, active
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1)
+              layout, isolated, revision, created_at, updated_at, active, source_step_ids
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, ?)
             """,
             (
                 line_id,
@@ -142,6 +160,7 @@ class Store:
                 1 if isolated else 0,
                 float(timestamp),
                 float(timestamp),
+                self._dump_step_ids(steps),
             ),
         )
         self._replace_zkeys(line_id, zkeys)
@@ -154,14 +173,15 @@ class Store:
         data = dict(row)
         data["isolated"] = bool(data["isolated"])
         data["zkeys"] = self._zkeys_for(line_id)
+        data["source_step_ids"] = self._parse_step_ids(data.get("source_step_ids"))
         return data
 
     def archive_line(self, line: dict, t_end: float) -> None:
         self.conn.execute(
             """
             INSERT INTO line_history(
-              line_id, revision, formatted, plain, attribute, value, zkeys, surprise, layout, t_start, t_end
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              line_id, revision, formatted, plain, attribute, value, zkeys, surprise, layout, t_start, t_end, source_step_ids
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 line["id"],
@@ -175,15 +195,17 @@ class Store:
                 line.get("layout"),
                 line.get("updated_at"),
                 float(t_end),
+                self._dump_step_ids(line.get("source_step_ids") or step_ids_in(line.get("plain") or "")),
             ),
         )
 
-    def update_line(self, line_id, *, formatted, plain, attribute, value, surprise, raw_dist, layout, isolated, zkeys, timestamp) -> None:
+    def update_line(self, line_id, *, formatted, plain, attribute, value, surprise, raw_dist, layout, isolated, zkeys, timestamp, source_step_ids=None) -> None:
+        steps = merge_step_ids(source_step_ids, step_ids_in(plain or ""), step_ids_in(formatted or ""))
         self.conn.execute(
             """
             UPDATE lines
                SET formatted = ?, plain = ?, attribute = ?, value = ?, surprise = ?, raw_dist = ?,
-                   layout = ?, isolated = ?, revision = revision + 1, updated_at = ?
+                   layout = ?, isolated = ?, revision = revision + 1, updated_at = ?, source_step_ids = ?
              WHERE id = ?
             """,
             (
@@ -196,6 +218,7 @@ class Store:
                 layout,
                 1 if isolated else 0,
                 float(timestamp),
+                self._dump_step_ids(steps),
                 line_id,
             ),
         )
@@ -248,6 +271,7 @@ class Store:
                         "surprise": row["surprise"],
                         "revision": row["revision"],
                         "updated_at": row["updated_at"],
+                        "source_step_ids": self._parse_step_ids(row["source_step_ids"] if "source_step_ids" in row.keys() else "[]"),
                     }
                 )
             blocks.append({"id": block["id"], "topic": block["topic"], "lines": lines})
@@ -266,9 +290,11 @@ class Store:
         ).fetchall()
         for row in rows:
             zkeys = self._zkeys_for(row["id"])
+            source_ids = self._parse_step_ids(row["source_step_ids"] if "source_step_ids" in row.keys() else "[]")
+            source_ids = merge_step_ids(source_ids, step_ids_in(row["plain"] or ""), step_ids_in(row["formatted"] or ""))
             fact = {
                 "id": row["id"],
-                "text": row["plain"],
+                "text": ensure_step_tags(row["plain"], source_ids),
                 "formatted": row["formatted"],
                 "raw_dist": row["raw_dist"] if row["raw_dist"] is not None else 0.5,
                 "surprise": row["surprise"] if row["surprise"] is not None else 0.5,
@@ -282,6 +308,7 @@ class Store:
                 "block_id": row["block_id"],
                 "topic": row["topic"],
                 "historical": False,
+                "source_step_ids": source_ids,
             }
             for key in zkeys:
                 index.setdefault(key, []).append(dict(fact))
@@ -303,11 +330,14 @@ class Store:
         versions = []
         for row in rows:
             zkeys = json.loads(row["zkeys"] or "[]")
+            keys = row.keys()
+            source_ids = self._parse_step_ids(row["source_step_ids"] if "source_step_ids" in keys else "[]")
+            source_ids = merge_step_ids(source_ids, step_ids_in(row["plain"] or ""), step_ids_in(row["formatted"] or ""))
             versions.append(
                 {
                     "id": f"{row['line_id']}#{row['revision']}",
                     "line_id": row["line_id"],
-                    "text": row["plain"],
+                    "text": ensure_step_tags(row["plain"], source_ids),
                     "formatted": row["formatted"],
                     "raw_dist": 0.8,
                     "surprise": 0.8 if row["surprise"] is None else row["surprise"],
@@ -319,6 +349,7 @@ class Store:
                     "layout": row["layout"] or "OVERWRITE_SAME_LINE",
                     "isolated": False,
                     "historical": True,
+                    "source_step_ids": source_ids,
                 }
             )
         return versions
@@ -366,6 +397,7 @@ class Store:
                         "layout": line["layout"],
                         "topic": block["topic"],
                         "formatted": line["formatted"],
+                        "source_step_ids": list(line.get("source_step_ids") or step_ids_in(line.get("plain") or line.get("text") or "")),
                     }
                 )
             if rendered:

@@ -22,7 +22,8 @@ def test_meeting_and_budget_patterns():
     change = extract_facts("本周周会改到周五上午十点。")
     assert habit[0]["attribute"] == "周会时间"
     assert change[0]["attribute"] == "周会时间"
-    assert habit[0]["zkeys"] == change[0]["zkeys"] == ["事件:周会"]
+    assert habit[0]["zkeys"] == change[0]["zkeys"]
+    assert "事件:周会" in habit[0]["zkeys"]
     assert habit[0]["value"] != change[0]["value"]
     initial = extract_facts("设计评审的预算为5000元。")
     revised = extract_facts("设计评审的预算改为8000元。")

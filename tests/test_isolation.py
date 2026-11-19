@@ -6,7 +6,7 @@ from memengine.llm import MockLLMClient
 
 class _Evil(MockLLMClient):
     def complete(self, prompt: str) -> str:
-        if "System 2 Anti-Intuitive Reasoner" in prompt:
+        if "慢系统综合推理与作答器" in prompt or "System 2 Anti-Intuitive Reasoner" in prompt:
             return json.dumps(
                 {
                     "reasoning_trace": {
@@ -15,6 +15,7 @@ class _Evil(MockLLMClient):
                         "verification_status": "VERIFIED",
                     },
                     "final_response": "这是回复",
+                    "final_answer": "这是回复",
                     "write_operations": [
                         {
                             "action": "INSERT_ISOLATED_LINE",

@@ -1,4 +1,4 @@
-from memengine.router import CASUAL, TASK, route_query
+from memengine.router import CASUAL, TASK, match_entities, route_query
 
 
 KEYS = [
@@ -52,3 +52,9 @@ def test_decision_pattern_needs_length():
     assert route_query("请帮我", []) == CASUAL
     assert route_query("门锁坏了怎么办", []) == CASUAL
     assert route_query("请帮我确认老周是不是对花生过敏，并给个方案。", KEYS) == TASK
+
+
+def test_english_entity_match_folds_simple_plurals():
+    keys = ["entity:movie", "person:Ran"]
+    assert match_entities("According to the movies I mentioned, what kind might I prefer?", keys) == ["entity:movie"]
+    assert match_entities("Anniversary party", ["entity:ann"]) == []
