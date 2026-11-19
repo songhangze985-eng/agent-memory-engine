@@ -61,7 +61,7 @@ def test_overwrite_archives_the_previous_value_and_updates_zkeys():
     alias = {}
     line_id = apply_write_op(
         store,
-        _op("INSERT_ISOLATED_LINE", "NEW:ISO", formatted="旧", zkeys=["人物:老周", "禁忌:花粉"], surprise=0.9),
+        _op("INSERT_ISOLATED_LINE", "NEW:ISO", formatted="- [1970-01-01] 老周对花粉过敏", zkeys=["人物:老周", "禁忌:花粉"], surprise=0.9),
         topic="健康禁忌",
         attribute="过敏",
         value="花粉",
@@ -75,7 +75,7 @@ def test_overwrite_archives_the_previous_value_and_updates_zkeys():
             "OVERWRITE_SAME_LINE",
             alias["NEW:ISO"],
             line=line_id,
-            formatted="新",
+            formatted="- [1970-01-01] 老周对苯甲酸钠过敏",
             zkeys=["人物:老周", "禁忌:苯甲酸钠"],
             surprise=0.86,
         ),

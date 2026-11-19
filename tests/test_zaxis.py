@@ -2,19 +2,18 @@ from memengine.policy import decide_origin
 from memengine.zaxis import collapse_and_scan_z_axis, expand_entities, order_far_to_near
 
 
-def test_reverse_scan_isolates_buckets_and_dedups():
+def test_far_to_near_scan_isolates_buckets_and_dedups():
     index = {
         "人物:近": [
-            {"id": "a", "raw_dist": 0.1, "text": "near only"},
-            {"id": "s", "raw_dist": 0.2, "text": "shared"},
+            {"id": "a", "raw_dist": 0.1, "text": "near only", "entity_anchor": True},
+            {"id": "s", "raw_dist": 0.2, "text": "shared", "entity_anchor": True},
         ],
         "人物:远": [
-            {"id": "b", "raw_dist": 0.9, "text": "far only"},
-            {"id": "s", "raw_dist": 0.2, "text": "shared"},
+            {"id": "b", "raw_dist": 0.9, "text": "far only", "entity_anchor": True, "isolated": True},
+            {"id": "s", "raw_dist": 0.2, "text": "shared", "entity_anchor": True},
         ],
     }
-    # Caller passes near-to-far; the spec function reverses it.
-    collapsed = collapse_and_scan_z_axis(index, ["人物:近", "人物:远"], radius_r=0.45, epsilon=0.05)
+    collapsed = collapse_and_scan_z_axis(index, ["人物:远", "人物:近"], radius_r=0.45, epsilon=0.05)
     assert [bucket["z_bucket"] for bucket in collapsed] == ["人物:远", "人物:近"]
     far_ids = [fact["id"] for fact in collapsed[0]["facts"]]
     near_ids = [fact["id"] for fact in collapsed[1]["facts"]]
@@ -28,7 +27,7 @@ def test_reverse_scan_isolates_buckets_and_dedups():
 
 
 def test_raw_zero_becomes_epsilon_inside_the_circle():
-    index = {"人物:甲": [{"id": "z", "raw_dist": 0, "text": "touch"}]}
+    index = {"人物:甲": [{"id": "z", "raw_dist": 0, "text": "touch", "vector_score": 1.0}]}
     collapsed = collapse_and_scan_z_axis(index, ["人物:甲"], radius_r=0.45, epsilon=0.05)
     fact = collapsed[0]["facts"][0]
     assert fact["d_asymp"] == 0.05

@@ -170,7 +170,7 @@ def test_search_falls_back_when_question_names_no_entities():
 
     engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient())
     engine.add("[step 0] user: I really dig the movie Ran\nagent: Nice.", timestamp=1.0)
-    retrieved = engine.search("What type might I prefer?")
+    retrieved = engine.search("What type of movies might I prefer?")
     try:
         assert retrieved["entity_fallback"] is True
         texts = " ".join(fact.get("text") or "" for fact in (retrieved["outer"] + retrieved["inner"]))

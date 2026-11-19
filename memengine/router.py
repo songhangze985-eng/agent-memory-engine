@@ -29,7 +29,6 @@ _DECISION_EN = re.compile(
     re.IGNORECASE,
 )
 _QUESTION_EN = re.compile(r"\b(what|which|who|whom|whose|when|where|why|how)\b", re.IGNORECASE)
-_MCQ_LINE = re.compile(r"(?m)^\s*[ABCD][\.\)]\s+\S")
 _LATIN = re.compile(r"[A-Za-z0-9]{3,}")
 _STOP = frozenset(
     "the and for are was were you your that this with from have has had not can but".split()
@@ -117,7 +116,6 @@ def route_query(query: str, entity_keys) -> str:
     query = query or ""
     tokenize(query)  # spec tokenization step; matching itself is boundary-aware
     hit = entity_hit(query, entity_keys)
-    mcq = len(_MCQ_LINE.findall(query)) >= 2
     question = len(query) > 12 and bool(_QUESTION_EN.search(query))
     syntax_hit = bool(
         _zh_trigger(_MUTATION_ZH, query)
@@ -126,7 +124,6 @@ def route_query(query: str, entity_keys) -> str:
         or _MUTATION_EN.search(query)
         or _TEMPORAL_EN.search(query)
         or (len(query) > 12 and _DECISION_EN.search(query))
-        or mcq
         or question
     )
     if hit or syntax_hit:

@@ -16,18 +16,23 @@ from eval.generate import build_all
 from eval.metrics import answer_correct, percentile, trap_hallucinated
 from memengine.engine import CognitiveMemoryEngine
 from memengine.llm import MockLLMClient, build_llm_from_env
+from memengine.vector import HashedTfidfEmbedder
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _systems(llm):
+    def vector():
+        return HashedTfidfEmbedder() if isinstance(llm, MockLLMClient) else None
+
     def full():
-        return CognitiveMemoryEngine(db_path=":memory:", llm=llm)
+        return CognitiveMemoryEngine(db_path=":memory:", llm=llm, vector=vector())
 
     def variant():
         return CognitiveMemoryEngine(
             db_path=":memory:",
             llm=llm,
+            vector=vector(),
             enable_timeline_buffer=False,
             enable_casual_bypass=False,
         )
@@ -40,7 +45,7 @@ def _systems(llm):
     ]
 
 
-def _eval_system(factory, datasets: dict) -> dict:
+def _eval_system(factory, datasets: dict, has_retrieval: bool) -> dict:
     per_test = {}
     casual_ms: list[float] = []
     task_ms: list[float] = []
@@ -60,7 +65,11 @@ def _eval_system(factory, datasets: dict) -> dict:
         correct = 0
         scored = 0
         for question in dataset["questions"]:
-            result = system.answer(question["query"], timestamp=question["ts"])
+            if has_retrieval:
+                retrieved = system.retrieve(question["query"], timestamp=question["ts"])
+                result = system.answer(question["query"], retrieved=retrieved)
+            else:
+                result = system.answer(question["query"], timestamp=question["ts"])
             route = result.get("route")
             if route == "CASUAL_2D_BYPASS":
                 casual_ms.append(result["retrieval_ms"])
@@ -198,7 +207,7 @@ def _markdown(payload: dict) -> str:
             "",
             "口径：准确率是关键词全中且禁用词不出现；陷阱幻觉率是无否定地断言诱饵，或在零关联问题上吐出受保护的稀有词。",
             "朴素 RAG 的回复是 Top-5 块拼接。CRUD 是按实体键取最新记录并做一层共享键连接，原始窗口只计入上下文 token。",
-            "时间轴节点减少 = 1 - 节点数/记录次数。缓冲规则按规格伪代码比较 `now - t_end`，会话持续有写入时会收成很少的节点。",
+            "时间轴节点减少 = 1 - 节点数/记录次数。节点合并受间隔、时长、事件数与话题/原点变更限制。",
             "P95 只统计检索，不含慢系统生成。mock 延迟不能和规格里的毫秒目标比较。",
             "",
             "规格说明中的目标分数没有抄进本文件。",
@@ -234,7 +243,7 @@ def run(scale: str = "small", seed: int = 42, mode: str = "auto") -> dict:
     }
     for name, factory, has_router in _systems(llm):
         payload["system_has_router"][name] = has_router
-        payload["systems"][name] = _eval_system(factory, bundle["tests"])
+        payload["systems"][name] = _eval_system(factory, bundle["tests"], has_router)
         if not has_router:
             payload["systems"][name]["test4_router_accuracy"] = None
     return payload

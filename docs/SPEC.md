@@ -2,7 +2,7 @@
 
 来源：仓库所有者提供的规格说明（对应 Google Doc
 `https://docs.google.com/document/d/1LEKYBqyd1SHkCChLorU3MOyotBaRUte0hVPLhzL-uZ0/`）。
-实现对照见 [DESIGN.md](DESIGN.md)。文中的目标成绩表是作者验收目标，不是本仓库实测。
+本文件保留原始提案。旧公式、四操作排版、逆序伪代码与 Prompt 示例不是运行时契约；当前实现见 [DESIGN.md](DESIGN.md)。目标成绩表也不是本仓库实测。
 
 ## 一、整体运行思路与五步执行链路
 混合架构：确定性代码（毫秒级规则路由、哈希坍缩、时间区间合并）+ 大模型语义（3D 排版写入、原点决策、慢系统反直觉推理）。

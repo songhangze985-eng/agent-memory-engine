@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 _FILES = {
@@ -10,6 +11,7 @@ _FILES = {
     "reason": "system2_reasoner.txt",
     "layout": "notebook_layout.txt",
     "query": "query_parser.txt",
+    "controller": "query_origin_controller.txt",
 }
 
 
@@ -34,11 +36,14 @@ def load_prompt(name: str) -> str:
 
 def render_prompt(name: str, **kwargs) -> str:
     text = load_prompt(name)
+    if name == "layout":
+        kwargs = {"role": "user", "categories": [], "timestamp": 0, **kwargs}
+    values = {}
     for key, value in kwargs.items():
         if not isinstance(value, str):
             value = json.dumps(value, ensure_ascii=False, indent=2)
         token = "{" + key + "}"
         if token not in text:
             raise KeyError(token)
-        text = text.replace(token, value)
-    return text
+        values[token] = value
+    return re.sub(r"\{[a-z_0-9]+\}", lambda match: values.get(match[0], match[0]), text)

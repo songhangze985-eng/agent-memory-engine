@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import gzip
 import random
+import shutil
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -39,9 +42,19 @@ def ensure_file(relative: str, data_dir: Path) -> Path:
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = f"{RAW_BASE}/{relative}"
-    request = urllib.request.Request(url, headers={"User-Agent": "memengine-membench"})
-    with urllib.request.urlopen(request, timeout=180) as response:
-        dest.write_bytes(response.read())
+    request = urllib.request.Request(url, headers={"User-Agent": "memengine-membench", "Accept-Encoding": "gzip"})
+    with tempfile.NamedTemporaryFile(dir=dest.parent, delete=False) as cache:
+        temporary = Path(cache.name)
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
+            if response.headers.get("Content-Encoding") == "gzip":
+                with gzip.GzipFile(fileobj=response) as decoded:
+                    shutil.copyfileobj(decoded, output)
+            else:
+                shutil.copyfileobj(response, output)
+        temporary.replace(dest)
+    finally:
+        temporary.unlink(missing_ok=True)
     return dest
 
 

@@ -25,6 +25,7 @@ CATEGORY_ENUM = [
 
 CATEGORY_PREFIX = "类目:"
 ENTITY_PREFIX = "实体:"
+GENERAL_CATEGORY = "其他/通用"
 
 # Synonyms that are not in the enum but should collapse onto it.
 _ALIASES = {
@@ -47,6 +48,10 @@ _ALIASES = {
     "city": "地点",
     "person": "人物",
     "people": "人物",
+    "general": GENERAL_CATEGORY,
+    "other": GENERAL_CATEGORY,
+    "其他": GENERAL_CATEGORY,
+    "通用": GENERAL_CATEGORY,
 }
 
 # Keyword -> category, longest-first matching on the raw text.
@@ -248,23 +253,30 @@ def _bare_category(raw: str) -> str:
     return text
 
 
-def normalize_category_key(raw: str) -> str | None:
+def normalize_category_key(raw: str, categories=()) -> str | None:
     """Return a valid ``类目:枚举名`` key, or None if it cannot be mapped."""
     bare = _bare_category(raw)
     if not bare:
         return None
-    if bare in CATEGORY_ENUM:
-        return category_key(bare)
+    allowed = [*CATEGORY_ENUM, GENERAL_CATEGORY, *categories]
+    for name in allowed:
+        if bare.casefold() == name.casefold():
+            return category_key(name)
     alias = _ALIASES.get(bare) or _ALIASES.get(bare.lower())
-    if alias in CATEGORY_ENUM:
+    if alias in allowed:
         return category_key(alias)
     return None
 
 
-def map_categories(text: str, limit: int = 3) -> list[str]:
+def map_categories(text: str, limit: int = 3, *, categories=()) -> list[str]:
     """Deterministic keyword map used by the mock/rule path and as fallback."""
     raw = text or ""
     found: list[str] = []
+    for name in categories:
+        if re.search(r"(?<![a-z])" + re.escape(name) + r"(?![a-z])", raw, re.I):
+            found.append(category_key(name))
+            if len(found) >= limit:
+                return found
     for pattern, cat in _KEYWORD_RE:
         key = category_key(cat)
         if key in found:
@@ -276,17 +288,17 @@ def map_categories(text: str, limit: int = 3) -> list[str]:
     return found
 
 
-def validate_category_keys(keys, fallback_text: str = "", limit: int = 3) -> list[str]:
+def validate_category_keys(keys, fallback_text: str = "", limit: int = 3, *, categories=()) -> list[str]:
     """Drop labels outside the enum; fill from the keyword map if nothing valid remains."""
     valid: list[str] = []
     for raw in keys or []:
-        key = normalize_category_key(str(raw))
+        key = normalize_category_key(str(raw), categories)
         if key and key not in valid:
             valid.append(key)
         if len(valid) >= limit:
             return valid
     if not valid:
-        for key in map_categories(fallback_text, limit=limit):
+        for key in map_categories(fallback_text, limit=limit, categories=categories):
             if key not in valid:
                 valid.append(key)
     return valid[:limit]
@@ -311,16 +323,24 @@ def attach_dual_zkeys(
     text: str,
     extra_entity_keys=None,
     extra_category_keys=None,
-    default_category: str | None = "兴趣习惯",
+    default_category: str | None = GENERAL_CATEGORY,
+    *, categories=(),
 ) -> list[str]:
     """Keep prior keys, add ``实体:`` / ``类目:`` keys, guarantee one enum category on write."""
     keys: list[str] = []
+    supplied_categories = list(extra_category_keys or [])
     for raw in list(existing or []) + list(extra_entity_keys or []):
         item = str(raw).strip()
+        if item.startswith(CATEGORY_PREFIX):
+            supplied_categories.append(item)
+            continue
         if not item or item in keys:
             continue
         keys.append(item)
-    cats = validate_category_keys(extra_category_keys, fallback_text=text)
+    inferred = map_categories(text, categories=categories)
+    cats = validate_category_keys(supplied_categories + inferred, fallback_text=text, categories=categories)
+    if inferred and category_key(GENERAL_CATEGORY) in cats:
+        cats.remove(category_key(GENERAL_CATEGORY))
     if not cats and default_category:
         cats = [category_key(default_category)]
     for key in cats:

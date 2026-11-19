@@ -1,7 +1,7 @@
 """Deterministic policies used by the offline mock and as parse fallback.
 
 These implement the three prompt contracts without calling a model:
-origin placement, four-way notebook layout, and read-only system-2 selection.
+origin placement, five-way notebook layout, and read-only System 2 selection.
 """
 
 from __future__ import annotations
@@ -9,13 +9,14 @@ from __future__ import annotations
 import re
 
 from memengine.notebook import format_fact_line
+from memengine.store import key_type
 from memengine.textutil import char_bigrams, jaccard, parse_cn_number
 
 REFUSAL = "根据现有记忆，没有足够的直接关联可以确认这一点。"
 
 def _specific_zkeys(keys) -> set[str]:
     """Identity keys used for overwrite and reachability; categories are too coarse."""
-    return {str(key) for key in (keys or []) if str(key) and not str(key).startswith("类目:")}
+    return {str(key) for key in (keys or []) if str(key) and key_type(str(key)) == "entity"}
 
 
 _ORDINAL = re.compile(r"第([0-9]+|[一二两三四五六七八九十])次")
@@ -83,12 +84,19 @@ def _find_match(flat, fact):
     keys = _specific_zkeys(fact.get("zkeys") or [])
     if not keys:
         return None
+    matched = []
     for block, line in flat:
         if (line.get("attribute") or "") != attribute:
             continue
-        if keys.intersection(_specific_zkeys(line.get("zkeys") or [])):
-            return block, line
-    return None
+        if fact.get("delete") and fact.get("value") and str(line.get("value")) != str(fact["value"]):
+            continue
+        line_keys = _specific_zkeys(line.get("zkeys") or [])
+        identities = {key for key in keys if key.startswith(("人物:", "person:"))}
+        if (identities or keys).intersection(line_keys):
+            if not fact.get("delete"):
+                return block, line
+            matched.append((block, line))
+    return matched[0] if len(matched) == 1 else None
 
 
 def decide_layout(candidate_blocks: list, facts: list, timestamp) -> dict:
@@ -100,6 +108,11 @@ def decide_layout(candidate_blocks: list, facts: list, timestamp) -> dict:
             operations.append(_noop())
             continue
         match = _find_match(flat, fact)
+        if fact.get("delete"):
+            operations.append({**_noop(), "action": "DELETE_LINE", "target_line_id": match[1]["id"]} if match else _noop())
+            if match:
+                flat.remove(match)
+            continue
         if match is not None:
             block, line = match
             if str(line.get("value")) == str(fact.get("value")):
@@ -113,6 +126,10 @@ def decide_layout(candidate_blocks: list, facts: list, timestamp) -> dict:
                     "formatted_line": format_fact_line(timestamp, fact["text"]),
                     "z_axis_keys": list(fact.get("zkeys") or []),
                     "surprise_score": 0.86,
+                    "attribute": fact.get("attribute"),
+                    "value": fact.get("value"),
+                    "topic": block["topic"],
+                    "is_conflict_or_override": True,
                 }
             )
             line["value"] = fact.get("value")
@@ -129,11 +146,11 @@ def decide_layout(candidate_blocks: list, facts: list, timestamp) -> dict:
         elif block is not None:
             action = "APPEND_ADJACENT_LINE"
             target = block["id"]
-            surprise = 0.28
+            surprise = 0.25
         else:
             action = "APPEND_ADJACENT_LINE"
             target = f"NEW:{topic}"
-            surprise = 0.28
+            surprise = 0.25
             created = {"id": target, "topic": topic, "lines": []}
             blocks.append(created)
             block = created
@@ -144,6 +161,11 @@ def decide_layout(candidate_blocks: list, facts: list, timestamp) -> dict:
             "formatted_line": format_fact_line(timestamp, fact["text"]),
             "z_axis_keys": list(fact.get("zkeys") or []),
             "surprise_score": surprise,
+            "attribute": fact.get("attribute"),
+            "value": fact.get("value"),
+            "topic": topic,
+            "operation_id": f"pending-{len(operations) + 1}",
+            "is_conflict_or_override": bool(fact.get("is_conflict_or_override")),
         }
         operations.append(op)
         if block is not None and action == "APPEND_ADJACENT_LINE":
@@ -158,35 +180,6 @@ def decide_layout(candidate_blocks: list, facts: list, timestamp) -> dict:
             )
             flat.append((block, block["lines"][-1]))
     return {"write_operations": operations}
-
-
-def _reachable(facts: list[dict], query: str) -> tuple[list[dict], list[str]]:
-    seeds = []
-    for fact in facts:
-        for key in fact.get("zkeys") or []:
-            name = key.split(":", 1)[-1]
-            if name and name in query:
-                seeds.append(fact)
-                break
-    frontier = set()
-    for fact in seeds:
-        frontier.update(_specific_zkeys(fact.get("zkeys") or []))
-    reachable_ids: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        for fact in facts:
-            if fact["id"] in reachable_ids:
-                continue
-            if frontier.intersection(_specific_zkeys(fact.get("zkeys") or [])):
-                reachable_ids.add(fact["id"])
-                before = len(frontier)
-                frontier.update(_specific_zkeys(fact.get("zkeys") or []))
-                if len(frontier) != before:
-                    changed = True
-    kept = [fact for fact in facts if fact["id"] in reachable_ids]
-    rejected = [fact["id"] for fact in facts if fact["id"] not in reachable_ids]
-    return kept, rejected
 
 
 def _guess_attribute(query: str, facts: list[dict]) -> str:
@@ -211,13 +204,13 @@ def _guess_attribute(query: str, facts: list[dict]) -> str:
     return ""
 
 
-def _travel_target(query: str, facts: list[dict]):
+def travel_revision(query: str):
     match = _ORDINAL.search(query or "")
     if match and "之前" in query:
         return parse_cn_number(match.group(1)) - 1
-    if re.search(r"最早|原本|以前", query or ""):
+    if re.search(r"最早|原本|以前|\b(?:originally|original|first)\b", query or "", re.I):
         return 0
-    if re.search(r"之前|上次", query or ""):
+    if re.search(r"之前|上次|\b(?:last time|before|earlier|previously|used to)\b", query or "", re.I):
         return "previous"
     return None
 
@@ -256,85 +249,35 @@ def _select_revision(facts: list[dict], query: str, target) -> list[dict]:
     return _dedupe(chosen)
 
 
-def _better(candidate: dict, incumbent: dict) -> bool:
-    rev_c = int(candidate.get("revision") or 0)
-    rev_i = int(incumbent.get("revision") or 0)
-    if rev_c != rev_i:
-        return rev_c > rev_i
-    outer_c = candidate.get("zone") == "OUTER_ANTI_INTUITIVE"
-    outer_i = incumbent.get("zone") == "OUTER_ANTI_INTUITIVE"
-    if outer_c != outer_i:
-        return outer_c
-    return float(candidate.get("updated_at") or 0) >= float(incumbent.get("updated_at") or 0)
-
-
-def _latest_per_attribute(facts: list[dict]) -> list[dict]:
-    best: dict[str, dict] = {}
-    order: list[str] = []
-    for fact in facts:
-        key = fact.get("attribute") or fact["id"]
-        if key not in best:
-            order.append(key)
-            best[key] = fact
-        elif _better(fact, best[key]):
-            best[key] = fact
-    return [best[key] for key in order]
-
-
-def _refuse(rejected: list[str]) -> dict:
-    return {
-        "reasoning_trace": {
-            "anti_intuitive_overrides": [],
-            "rejected_noise_ids": list(rejected),
-            "verification_status": "PARTIAL_INFO",
-        },
-        "final_response": REFUSAL,
-    }
-
-
-def plan_answer(origin: dict | None, outer: list, inner: list, query: str) -> dict:
+def plan_answer(origin: dict | None, outer: list, inner: list, query: str, query_type="FACTUAL") -> dict:
     """Read-only. Does not accept a store and does not return write operations."""
-    del origin  # the caller already placed facts relative to the origin
-    tagged = []
-    for fact in outer or []:
-        item = dict(fact)
-        item["zone"] = item.get("zone") or "OUTER_ANTI_INTUITIVE"
-        tagged.append(item)
-    for fact in inner or []:
-        item = dict(fact)
-        item["zone"] = item.get("zone") or "INNER_INTUITIVE"
-        tagged.append(item)
-    kept, rejected = _reachable(tagged, query or "")
-    if not kept:
-        return _refuse(rejected)
-    travel = _travel_target(query, kept)
-    overrides: list[str] = []
-    if travel is not None:
-        chosen = _select_revision(kept, query, travel)
-        status = "VERIFIED" if chosen else "PARTIAL_INFO"
-        if chosen:
-            overrides.append("按时间回溯采用修改前的快照，不用当前最新值")
+    facts = list(outer or []) + list(inner or [])
+    kept = [fact for fact in facts if fact.get("topic") != "时事杂讯"]
+    rejected = [fact["id"] for fact in facts if fact.get("topic") == "时事杂讯"]
+    historical = [fact for fact in kept if fact.get("historical")]
+    travel = travel_revision(query)
+    if historical and (travel is not None or query_type == "TIME_TRAVEL"):
+        chosen = _select_revision(historical, query, travel) if isinstance(travel, int) else _dedupe(historical)
     else:
-        live = [fact for fact in kept if not fact.get("historical")] or kept
-        chosen = _latest_per_attribute(live)
-        if any(fact.get("zone") == "OUTER_ANTI_INTUITIVE" for fact in chosen):
-            overrides.append("采用圈外反直觉事实，覆盖同属性的圈内直觉结论")
-        outer_attrs = {fact.get("attribute") for fact in chosen if fact.get("zone") == "OUTER_ANTI_INTUITIVE"}
-        inner_attrs = {fact.get("attribute") for fact in live if fact.get("zone") == "INNER_INTUITIVE"}
-        status = "CONFLICT_RESOLVED" if outer_attrs & inner_attrs else "VERIFIED"
+        chosen = _dedupe([fact for fact in kept if not fact.get("historical")])
+    if query_type != "REFLECTIVE":
+        attribute = _guess_attribute(query, chosen)
+        if attribute:
+            chosen = [fact for fact in chosen if fact.get("attribute") == attribute]
+        anchored = [fact for fact in chosen if fact.get("entity_anchor")]
+        if anchored:
+            chosen = anchored
     parts = []
     for fact in chosen:
         text = (fact.get("text") or "").strip().rstrip("。")
         if text and text not in parts:
             parts.append(text)
-    if not parts:
-        return _refuse(rejected)
+    synthesis = "。".join(parts)
+    outer_ids = {fact["id"] for fact in outer or []}
     return {
-        "reasoning_trace": {
-            "anti_intuitive_overrides": overrides,
-            "rejected_noise_ids": rejected,
-            "verification_status": status,
-        },
-        "final_response": "。".join(parts) + "。",
+        "evidence_synthesis": synthesis,
+        "anti_intuitive_override": any(fact["id"] in outer_ids for fact in chosen),
+        "rejected_noise_ids": rejected,
+        "final_answer": synthesis + "。" if synthesis else REFUSAL,
     }
 

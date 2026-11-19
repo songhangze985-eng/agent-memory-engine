@@ -1,54 +1,36 @@
-# 设计说明
+# 记忆引擎设计
 
-本文把规格里的五步链路对应到代码，并记下规格没有写死、v1 自己选定的做法。规格原文的目标分数只在 README 里作为作者目标列出，不在这里当作实测。
+这是实现契约。`SPEC.md` 是原始提案；其中的伪代码和目标数字不是当前实现或实测结果。
 
-## 步骤对照
+## 写入与 2D 排版
 
-| 规格步骤 | 代码 | 行为 |
-| --- | --- | --- |
-| 1 毫秒级分流 | `memengine/router.py` `route_query` | 实体命中，或状态变更 / 时间回溯正则命中，或问句长于 12 且命中决策词，返回 `TASK_POISON_CIRCLE`；否则 `CASUAL_2D_BYPASS`。正则与规格伪代码一致。 |
-| 2 渐近原点与双层时间轴 | `memengine/distance.py`、`memengine/timeline.py` | `d = max(eps, raw_dist)`，默认 `eps = 0.05`。层 1 记原点，层 2 记圈内 / 圈外条数。间隔 `<= Δt`（默认 10 秒）时合并，并按伪代码 `update` 载荷、把 `t_end` 推到当前时刻。 |
-| 3 Z 轴坍缩与由远及近 | `memengine/zaxis.py` | `collapse_and_scan_z_axis` 按伪代码把输入列表反转后分桶，同一个事实 id 只出现一次，不同实体不进同一个桶。`d_asymp <= R` 为 `INNER_INTUITIVE`，否则为 `OUTER_ANTI_INTUITIVE`。 |
-| 4 慢系统只读推理 | `prompts/system2_reasoner.txt`、`memengine/policy.py` `plan_answer` | 引擎只采用 `final_response` 和 `reasoning_trace`。返回体里若带有写入操作、新原点或新半径，一律丢弃。`answer` 不会把推理结果写回笔记本，也不会改毒圈半径。 |
-| 5 3D 笔记本写入 | `prompts/notebook_layout.txt`、`memengine/notebook.py` | `OVERWRITE_SAME_LINE` 覆盖原行并归档旧值；`APPEND_ADJACENT_LINE` 在同一块内追加，渲染为单个 `\n`；`INSERT_ISOLATED_LINE` 与邻行之间空一行，渲染为 `\n\n`；`NOOP` 不改存储。 |
+`CognitiveMemoryEngine.add` 按 `(user_id, agent_id, session_id)` 查候选段落。相似度最高的 8 个段落各保留最近 5 行，另保留所有命中实体的活跃行（不受这两个上限约束）。Live 只调用一次 `notebook_layout.txt`；原始消息与角色做 HTML 转义后放入 `untrusted_utterance`，候选和原文都标为数据。引擎验证操作类型、允许目标、目标属性和删除意图；不接受模型决定硬删除。提示词隔离是防护的一层，不把模型输出当作权限。
 
-对外接口在 `memengine/engine.py`：`add`、`search`、`answer`。持久化是 SQLite（`memengine/store.py`）。三份提示词在 `prompts/`，占位符与规格相同，由 `memengine/prompts.py` 替换。
+| 操作 | 存储与布局 |
+| --- | --- |
+| `OVERWRITE_SAME_LINE` | 保留行 ID 与行序，事务内归档旧版本、增加修订号、合并来源 step ID。 |
+| `APPEND_ADJACENT_LINE` | 在同一主题追加相邻行。 |
+| `INSERT_ISOLATED_LINE` | 为一次性约束或例外留空行；渲染时与邻行隔开。 |
+| `DELETE_LINE` | 归档并将原行置为 `active=0`，设置 `valid_until`。 |
+| `NOOP` | 不修改笔记本。 |
 
-模型调用只有 `memengine/llm.py` 一个入口。`OpenAICompatibleClient` 读取 `LLM_BASE_URL`、`LLM_API_KEY`（或 `OPENAI_API_KEY`）、`LLM_MODEL`（默认 `Qwen2.5-7B-Instruct`），向 `{base}/chat/completions` 发温度 0 的请求。没有密钥时用 `MockLLMClient`：它读已经填好的提示词，再走同一套确定性策略，方便单测和 CI。解析失败时引擎退回这套策略，并累计 `fallback_count`。
+每个操作自带文本、属性和值，不与另一份事实列表按位置配对。`plain` 来自清洗后的 `formatted`；检索文本可以另加来源 step 标记。Mock 及解析失败的回退用 `extract_facts` 与 `decide_layout`；规则识别不了的长中文杂讯可进入单独新闻桶。默认 12 类加 `其他/通用`；`categories=[...]` 扩展允许列表，默认类目的中英文同义词映射到同一个键。
 
-## 规格留白时的选择
+## 读入、分区与排序
 
-**原点不是数值平面。** 规格要求移动原点 `(x0, y0)`，提示词给出的却是主题、子维度和决策句。v1 把原点存成 `{x_topic, y_subtopic, decision_anchor}`，不建立欧氏坐标。
+1. **路由。** 纯寒暄且无已知实体、疑问或记忆线索时直接返回 `CASUAL_2D_BYPASS`，不调用任何模型，也不触发待写队列。其他输入进入 `query_origin_controller.txt`：一次返回查询类型（`FACTUAL`、`REFLECTIVE`、`TIME_TRAVEL`）、实体、类目、语义扩写、原点和毒圈配置。旧 `query_parser.txt` / `origin_boundary.txt` 保留为兼容模板，不参与主链路。无实体命中时，控制器只看向量预检 Top-10 导出的最多 15 个实体键和有限主题摘要。
+2. **召回。** 单次读取作用域内的活跃行快照。实体键做至多 2-Hop；类目只在没有实体候选时做直接召回，不能当图边，新闻键也不参与扩展。语义扩写 Top-30 与 Z Hash 用 `0.65/0.35` 加权 RRF（`k=60`，用理论最大分归一化）。`TIME_TRAVEL` 可从相关行加入 `line_history` 修订。删除行不进检索，历史仍可显式审计。
+3. **距离与惊奇解耦。** `d_origin = 1 - max(sim(扩写, 事实), sim(原点三元组, 事实))`。远程为截断到 `[0,1]` 的余弦相似度；离线融合 BM25、哈希 TF-IDF 余弦、词元与字粒度匹配；泛类目可用同义归一化辅助离线召回。`d_asymp = max(0.05, d_origin)`；`P_radial = 0.05 / d_asymp`。`S` 仅取结构标签：冲突/历史 `0.95`，孤立行 `0.90`，普通覆写 `0.85`，相邻行 `0.25`，新闻 `0.08`。
+4. **Z 轴坍缩与三态分区。** 直接消费控制器的由远及近顺序；未排到的轴放远侧。同一事实 ID 只分给最先扫到的一个桶。实体图命中、历史回溯、或扩写查询通道的相似度 `> 0.15` 才算有锚点；候选决定的原点只参与距离，不能反过来为自己制造关联。有锚点且显式冲突/历史，或有锚点、`d_asymp > R` 且 `S >= 0.75`，为 `OUTER_ANTI_INTUITIVE`。非孤立、非冲突的行只有在有锚点且 `d_asymp <= R` 时才进 `INNER_INTUITIVE`。其他情况是 `POISONED_DROPPED`；例如圈内、未标冲突的孤立行也不满足两个入选条件。无关文本不会用“最近记忆”兜底。
+5. **排序与配额。** 圈内用 `w_in * (0.6 * RRF_norm + 0.4 * P_radial) + 0.15 * Recency`，圈外用 `w_anti * (0.45 * RRF_norm + 0.55 * S) + 0.15 * Recency`。权重用控制器值，默认 `0.40` 和 `0.90`；半径限制到 `[epsilon, 1]`。`Recency = 2^(-max(0, now-event_time)/30天)`，缺失事件时间时用更新时间。圈外最多 `ceil(top_k*0.4)`，有历史回溯或已标冲突时放宽到 `ceil(top_k*0.6)`。两个区各按分数排序；当两个区都可容纳时，在 Token 预算里为至少一条圈内背景留空间。`token_budget` 约束返回的证据正文估算，不含系统指令或元数据的协议开销。
 
-**`raw_dist` 的算法。** 规格只要求 `d = max(eps, raw_dist)`，没有定义 `raw_dist`。v1 在查询时计算：孤立行（`INSERT_ISOLATED_LINE`）取 `max(0.72, surprise)`，从而落在默认半径 0.45 和回溯半径 0.62 之外；其余行取 `0.5 * (1 - 字符二元组 Jaccard) + 0.5 * surprise`。`surprise` 来自排版策略：孤立 0.90，同行覆写 0.86，紧凑追加 0.28，新闻归档 0.12。字面距离为 0 时原始距离可以为 0，渐近距离仍被抬到 `eps`。
+配置 `EMBEDDING_BASE_URL`（基础路径或完整 `/embeddings` 路径）和 `EMBEDDING_MODEL` 时使用 `OpenAICompatibleEmbedder`；`EMBEDDING_API_KEY` 可选，取决于服务是否要求鉴权。当前行向量在进程内按行 ID、修订和文本摘要缓存（最多 4096），本地硬删除清除对应缓存；无服务或请求失败时整批降级 `HashedTfidfEmbedder`，不混用不同向量空间。远程服务会接收查询和该作用域的记忆文本，接入前需评估数据边界。
 
-**实体命中多认冒号后面的名字。** 伪代码用完整键做子串匹配。库里的键是 `人物:老王` 这种形式，用户只会说「老王」。v1 在完整键之外，也用冒号后的实体名做子串匹配。
+## 隔离、时钟与持久化
 
-**由远及近的两次反转。** 提示词要求控制器输出 far-to-near。伪代码函数会把输入再反转一次。引擎把 far-to-near 先反转成 near-to-far 再交给该函数，扫描顺序仍是由远及近。控制器没排到的键放在远侧。直接命中的实体再沿共享 Z 键扩展两跳，用来接住「人 → 事件 → 预算」这种跨轴事实；新闻桶的键是 `话题:时事杂讯`，个人事实不挂这个键，扩展不会把新闻流卷进来。
-
-**事实抽取不是第四个提示词。** 规格的三份提示词从「已经抽好的客观事实」开始。v1 用 `memengine/extract.py` 的模式完成这一步，不另加模型。寒暄和短句 `NOOP`。够长、又抽不出事实的句子，归档进主题「时事杂讯」，只挂低权重新闻键，这样 2D 平面上确实有噪声流，而 Z 轴检索仍按实体分桶。
-
-**时间旅行靠行修订，不靠时间轴载荷。** 层 1 / 层 2 的载荷按规格只保存原点和圈内外计数，伪代码在窗口内还会用最新载荷覆盖旧载荷。预算这类「第二次修改之前」的原文因此另存在 `line_history`。回溯问句会把这些修订当作圈外事实交给慢系统，按修订号选取：第 N 次修改之前取修订 `N-1`（初次写入是修订 0）。这是为了让覆写之后仍能回答规格里的历史问题。
-
-**异步写入是进程内队列。** `add(..., sync=False)` 先决定排版、把作业放进 `pending`，`drain()` 才落库。默认 `sync=True`，在本轮调用内写完。推理路径不调用 `drain`。v1 没有后台线程。
-
-**闲聊旁路不扫毒圈。** 闲聊路径只做实体名哈希探测。路由已经保证这条路径没有实体命中，因此回复是一句固定短句，不附带记忆正文，也不调用模型。
-
-**权重。** 控制器仍输出 `anti_intuitive_weight = 0.90`、`intuitive_weight = 0.40`。v1 的选择规则是字典序：同一属性上，圈外事实覆盖圈内事实，再比修订号。没有把两个权重乘成一个分数。
-
-**嵌入只给基线 A。** 主路径不走向量。基线 A 使用 MD5 字符二元组哈希向量（`memengine/embeddings.py`），避免 `PYTHONHASHSEED` 导致结果漂移。这不是神经网络嵌入。
-
-**基线 B。** `eval/baselines.py` 的 `CrudMemory` 是为本仓库写的实体键 CRUD：同属性且 Z 键相交就覆盖为最新值，回答时取问句里的实体，并带上一层共享键上的其他记录，另保留 8 轮原始窗口供上下文 token 统计。它不包含 Mem0、Letta 或其他记忆库的代码。
-
-## 规格原文
-
-仓库内 [SPEC.md](SPEC.md) 保留了与所有者 Google Doc 对应的规格正文，便于离线对照。提示词固定在仓库根目录 `prompts/`；`memengine/prompts.py` 会按该布局解析，并兼容将来把同名文件放进包内目录的安装方式。
-
-## 已知缺口
-
-- 抽取器只认识过敏、密码、代号、行程、预算、周会等模式。模式之外的个人事实会进新闻桶，之后按实体问也检索不到。
-- 路由器是字符子串。规格里的 `别` 会命中「特别」，短实体名也会误命中。
-- 时间轴在会话持续有写入时几乎收成一个节点，层 1 只留下会话里最后一次原点。细粒度历史不在时间轴上。
-- 慢系统的离线实现会返回有实体路径的已存事实。问句里的错误谓词（例如把苯甲酸钠问成花生）不会被编造成真，但回复也不一定显式否定这个诱饵。
-- 小规模语料里，罕见词本身就很显眼，朴素 RAG 仍可能把孤立事实排进 Top-5。淹没效果要到更大规模、更多近义噪声才会显现。
-- 没有真正的后台写入线程，没有多用户，也没有主路径上的神经嵌入。
+- `add(text, *, user_id='default', agent_id='default', session_id='default', role='user', timestamp=None, event_time=None, sync=True)`。默认同步落盘；`sync=False` 暂存在当前实例内，任务查询默认先刷对应用户/Agent 的待写作业。纯寒暄和 `read_only=True` 不刷盘；待写队列不跨进程持久化。
+- `retrieve(query, *, user_id='default', agent_id='default', session_id=None, top_k=10, token_budget=2048, timestamp=None, read_only=False, flush_pending=True)`。`search` 为兼容封装。`session_id=None` 跨当前用户/Agent 的会话查记忆；指定会话则只查该会话。控制状态按用户、Agent、会话独立保存；跨会话查询用该租户的默认控制流。`timestamp` 只影响当次调用，不是 SQLite 快照的 as-of 过滤器；时间旅行使用行修订。显式 `set_time` 固定时钟，`reset_clock` 恢复构造时注入的时钟或系统时钟。
+- `delete(line_id, *, hard=False, user_id='default', agent_id='default', timestamp=None)`。硬删除只覆盖本库中的 `lines`、`line_zkeys`、`line_history` 和当前实例向量缓存；独立的原始 ingest 记录、历史备份、其他进程缓存及远程供应商留存不在此契约范围内，不能把它当作端到端的数据擦除。
+- `answer(query, *, user_id='default', agent_id='default', timestamp=None, retrieved=None)`。复用同租户的检索结果，或发起只读检索；不刷盘、不新建时间节点、不移动持久化原点。只使用 `evidence_synthesis`、`anti_intuitive_override`、`rejected_noise_ids`、`final_answer`。选择题适配在 `eval/` 而不在理由生成器。寒暄返回空 `response`，由调用方接管。
+- 文件型 SQLite 使用 WAL、`synchronous=NORMAL`、`busy_timeout=5000`、外键和幂等迁移；`:memory:` 使用 SQLite 内存日志。行、Z 键批量读取，写事务用 `BEGIN IMMEDIATE`，被更新的修订不会丢失旧版本。原始历史 Token 在入库时按用户/Agent 增量累计。
+- 双时间轴分别记录原点移动、写入执行。默认仅在间隔不超过 10 秒、节点时长不超过 300 秒且未满 20 个事件时合并；原点迁移或主题切换新开节点。SQLite 仅追加或更新最后一个节点。

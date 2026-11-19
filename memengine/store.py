@@ -1,86 +1,140 @@
-"""SQLite persistence for lines, Z keys, timeline snapshots, and ingest log."""
+"""Scoped SQLite persistence for the notebook, revisions and dual timeline."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
-from memengine.textutil import ensure_step_tags, merge_step_ids, step_ids_in
+from memengine.textutil import ensure_step_tags, estimate_tokens, merge_step_ids, step_ids_in
 
+DEFAULT_SCOPE = ("default", "default", "default")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS blocks (
-  id TEXT PRIMARY KEY,
-  topic TEXT NOT NULL,
-  created_at REAL NOT NULL
+  id TEXT PRIMARY KEY, topic TEXT NOT NULL, created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS lines (
-  id TEXT PRIMARY KEY,
-  block_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  formatted TEXT NOT NULL,
-  plain TEXT NOT NULL,
-  attribute TEXT,
-  value TEXT,
-  surprise REAL,
-  raw_dist REAL,
-  layout TEXT,
-  isolated INTEGER NOT NULL DEFAULT 0,
-  revision INTEGER NOT NULL DEFAULT 0,
-  created_at REAL NOT NULL,
-  updated_at REAL NOT NULL,
-  active INTEGER NOT NULL DEFAULT 1,
-  source_step_ids TEXT NOT NULL DEFAULT '[]'
+  id TEXT PRIMARY KEY, block_id TEXT NOT NULL REFERENCES blocks(id), seq INTEGER NOT NULL,
+  formatted TEXT NOT NULL, plain TEXT NOT NULL, attribute TEXT, value TEXT, surprise REAL,
+  raw_dist REAL, layout TEXT, isolated INTEGER NOT NULL DEFAULT 0,
+  revision INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1, source_step_ids TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS line_zkeys (
-  line_id TEXT NOT NULL,
-  zkey TEXT NOT NULL
+  line_id TEXT NOT NULL REFERENCES lines(id) ON DELETE CASCADE, zkey TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS line_history (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  line_id TEXT NOT NULL,
-  revision INTEGER NOT NULL,
-  formatted TEXT NOT NULL,
-  plain TEXT NOT NULL,
-  attribute TEXT,
-  value TEXT,
-  zkeys TEXT NOT NULL,
-  surprise REAL,
-  layout TEXT,
-  t_start REAL,
-  t_end REAL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, line_id TEXT NOT NULL REFERENCES lines(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL, formatted TEXT NOT NULL, plain TEXT NOT NULL, attribute TEXT,
+  value TEXT, zkeys TEXT NOT NULL, surprise REAL, layout TEXT, t_start REAL, t_end REAL,
   source_step_ids TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS timeline (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  layer INTEGER NOT NULL,
-  position INTEGER NOT NULL,
-  t_start REAL NOT NULL,
-  t_end REAL NOT NULL,
-  payload TEXT NOT NULL
+  id INTEGER PRIMARY KEY AUTOINCREMENT, layer INTEGER NOT NULL, position INTEGER NOT NULL,
+  t_start REAL NOT NULL, t_end REAL NOT NULL, payload TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS ingest (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  text TEXT NOT NULL,
-  ts REAL
-);
-CREATE TABLE IF NOT EXISTS meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_zkey ON line_zkeys(zkey);
-CREATE INDEX IF NOT EXISTS idx_lines_block ON lines(block_id, seq);
+CREATE TABLE IF NOT EXISTS ingest (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, ts REAL);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
+
+_SCOPE_COLUMNS = {name: "TEXT NOT NULL DEFAULT 'default'" for name in ("user_id", "agent_id", "session_id")}
+_EVENT_COLUMNS = {"event_time": "REAL", "valid_until": "REAL", "is_conflict": "INTEGER NOT NULL DEFAULT 0"}
+_ROLE = {"role": "TEXT NOT NULL DEFAULT 'user'"}
+_STEPS = {"source_step_ids": "TEXT NOT NULL DEFAULT '[]'"}
+
+
+def key_type(key: str) -> str:
+    if key.startswith("类目:"):
+        return "category"
+    if key == "话题:时事杂讯":
+        return "noise"
+    return "entity"
+
+
+def _scope_where(scope, alias=""):
+    where = f"{alias}user_id = ? AND {alias}agent_id = ?"
+    return (where, scope[:2]) if scope[2] is None else (where + f" AND {alias}session_id = ?", scope)
+
+
+def _dump(value):
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _history_key(scope):
+    escaped = [part.replace("%", "%25").replace(":", "%3A") for part in scope[:2]]
+    return "history_tokens:" + ":".join(escaped)
 
 
 class Store:
     def __init__(self, path: str | Path = ":memory:"):
         self.path = str(path)
-        self.conn = sqlite3.connect(self.path)
+        self.conn = sqlite3.connect(self.path, timeout=5)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(_SCHEMA)
-        self.conn.commit()
+        self.conn.executescript("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; "
+                                "PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;" + _SCHEMA)
+        self._migrate()
+
+    def _migrate(self):
+        with self.transaction():
+            for table, additions in {
+                "blocks": {**_SCOPE_COLUMNS, **_EVENT_COLUMNS},
+                "lines": {**_SCOPE_COLUMNS, **_EVENT_COLUMNS, **_ROLE, **_STEPS},
+                "ingest": {**_SCOPE_COLUMNS, **_EVENT_COLUMNS, **_ROLE, "created_at": "REAL"},
+                "timeline": {**_SCOPE_COLUMNS, **_EVENT_COLUMNS, "created_at": "REAL"},
+                "line_history": {**_EVENT_COLUMNS, **_STEPS, **_ROLE},
+                "line_zkeys": {"key_type": "TEXT NOT NULL DEFAULT 'entity'"},
+            }.items():
+                existing = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+                for column, definition in additions.items():
+                    if column not in existing:
+                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                if "event_time" in additions and "event_time" not in existing:
+                    source = {"ingest": "ts", "timeline": "t_start", "line_history": "t_start"}.get(table, "created_at")
+                    self.conn.execute(f"UPDATE {table} SET event_time = {source}")
+                if "created_at" in additions and "created_at" not in existing:
+                    self.conn.execute(f"UPDATE {table} SET created_at = event_time")
+                if table == "line_history" and "valid_until" not in existing:
+                    self.conn.execute("UPDATE line_history SET valid_until = t_end")
+                if table == "line_zkeys" and "key_type" not in existing:
+                    self.conn.execute("""UPDATE line_zkeys SET key_type = CASE WHEN zkey LIKE '类目:%' THEN 'category'
+                                      WHEN zkey = '话题:时事杂讯' THEN 'noise' ELSE 'entity' END""")
+            if self.get_meta("scoped_schema_v1") is None:
+                self.conn.execute("DELETE FROM line_zkeys WHERE rowid NOT IN (SELECT MIN(rowid) FROM line_zkeys GROUP BY line_id, zkey)")
+                totals = {}
+                for row in self.conn.execute("SELECT user_id, agent_id, text FROM ingest"):
+                    key = _history_key((row['user_id'], row['agent_id']))
+                    totals[key] = totals.get(key, 0) + estimate_tokens(row["text"])
+                for key, total in totals.items():
+                    self.set_meta(key, str(total))
+                self.set_meta("scoped_schema_v1", "1")
+            for name, target in {
+                "idx_lines_block": "lines(block_id, seq)",
+                "idx_line_zkeys_line": "line_zkeys(line_id)",
+                "idx_line_zkeys_type_key": "line_zkeys(key_type, zkey)",
+                "idx_line_history_line": "line_history(line_id, revision)",
+                "idx_lines_scope": "lines(user_id, agent_id, active, session_id)",
+                "idx_timeline_scope": "timeline(user_id, agent_id, session_id, layer, position)",
+            }.items():
+                self.conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {target}")
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_line_zkey ON line_zkeys(line_id, zkey)")
+
+    @contextmanager
+    def transaction(self):
+        if self.conn.in_transaction:
+            self.conn.execute("SAVEPOINT memory_write")
+            try:
+                yield
+            except BaseException:
+                self.conn.execute("ROLLBACK TO memory_write")
+                raise
+            finally:
+                self.conn.execute("RELEASE memory_write")
+        else:
+            with self.conn:
+                self.conn.execute("BEGIN IMMEDIATE")
+                yield
 
     def close(self) -> None:
         self.conn.close()
@@ -93,313 +147,201 @@ class Store:
         return None if row is None else row["value"]
 
     def set_meta(self, key: str, value: str) -> None:
-        self.conn.execute(
-            "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
+        self.conn.execute("INSERT INTO meta VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
     def next_id(self, prefix: str) -> str:
-        current = int(self.get_meta(f"seq_{prefix}") or "0") + 1
-        self.set_meta(f"seq_{prefix}", str(current))
-        return f"{prefix}{current}"
+        row = self.conn.execute("""INSERT INTO meta VALUES(?, '1')
+                                   ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+                                   RETURNING value""", (f"seq_{prefix}",)).fetchone()
+        return f"{prefix}{row['value']}"
 
-    def _parse_step_ids(self, raw) -> list[int]:
-        if isinstance(raw, list):
-            return merge_step_ids(raw)
-        if not raw:
-            return []
-        try:
-            return merge_step_ids(json.loads(raw))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return step_ids_in(str(raw))
-
-    def _dump_step_ids(self, ids) -> str:
-        return json.dumps(merge_step_ids(ids), ensure_ascii=False)
-
-    def create_block(self, topic: str, timestamp: float) -> str:
+    def create_block(self, topic: str, timestamp: float, *, scope=DEFAULT_SCOPE, event_time=None, is_conflict=False) -> str:
         block_id = self.next_id("b")
-        self.conn.execute(
-            "INSERT INTO blocks(id, topic, created_at) VALUES(?, ?, ?)",
-            (block_id, topic, float(timestamp)),
-        )
+        self.conn.execute("""INSERT INTO blocks(id, topic, created_at, event_time, user_id, agent_id, session_id, is_conflict)
+                             VALUES(?, ?, ?, ?, ?, ?, ?, ?)""", (block_id, topic, timestamp, event_time if event_time is not None else timestamp, *scope, is_conflict))
         return block_id
 
-    def get_block(self, block_id: str) -> dict | None:
-        row = self.conn.execute("SELECT id, topic, created_at FROM blocks WHERE id = ?", (block_id,)).fetchone()
-        return None if row is None else dict(row)
+    def get_block(self, block_id: str, *, scope=DEFAULT_SCOPE) -> dict | None:
+        where, args = _scope_where(scope)
+        row = self.conn.execute(f"SELECT * FROM blocks WHERE id = ? AND {where}", (block_id, *args)).fetchone()
+        return dict(row) if row is not None else None
 
-    def block_by_topic(self, topic: str) -> dict | None:
-        row = self.conn.execute(
-            "SELECT id, topic, created_at FROM blocks WHERE topic = ? ORDER BY created_at LIMIT 1",
-            (topic,),
-        ).fetchone()
-        return None if row is None else dict(row)
+    def block_by_topic(self, topic: str, *, scope=DEFAULT_SCOPE) -> dict | None:
+        where, args = _scope_where(scope)
+        row = self.conn.execute(f"SELECT * FROM blocks WHERE topic = ? AND {where} ORDER BY created_at LIMIT 1", (topic, *args)).fetchone()
+        return dict(row) if row is not None else None
 
-    def insert_line(self, *, block_id, formatted, plain, attribute, value, surprise, raw_dist, layout, isolated, zkeys, timestamp, source_step_ids=None) -> str:
+    def insert_line(self, *, block_id, formatted, plain, attribute, value, surprise, raw_dist, layout,
+                    isolated, zkeys, timestamp, source_step_ids=None, scope=DEFAULT_SCOPE, role="user",
+                    event_time=None, is_conflict=False) -> str:
         line_id = self.next_id("l")
-        seq = self.conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM lines WHERE block_id = ?", (block_id,)).fetchone()["n"]
-        steps = merge_step_ids(source_step_ids, step_ids_in(plain or ""), step_ids_in(formatted or ""))
-        self.conn.execute(
-            """
-            INSERT INTO lines(
-              id, block_id, seq, formatted, plain, attribute, value, surprise, raw_dist,
-              layout, isolated, revision, created_at, updated_at, active, source_step_ids
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, ?)
-            """,
-            (
-                line_id,
-                block_id,
-                seq,
-                formatted,
-                plain,
-                attribute,
-                value,
-                surprise,
-                raw_dist,
-                layout,
-                1 if isolated else 0,
-                float(timestamp),
-                float(timestamp),
-                self._dump_step_ids(steps),
-            ),
-        )
+        seq = self.conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM lines WHERE block_id = ?", (block_id,)).fetchone()[0]
+        steps = merge_step_ids(source_step_ids, step_ids_in(plain), step_ids_in(formatted))
+        self.conn.execute("""INSERT INTO lines(id, block_id, seq, formatted, plain, attribute, value, surprise, raw_dist,
+                             layout, isolated, created_at, updated_at, source_step_ids, user_id, agent_id, session_id,
+                             role, event_time, is_conflict) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                          (line_id, block_id, seq, formatted, plain, attribute, value, surprise, raw_dist, layout,
+                           isolated, timestamp, timestamp, _dump(steps), *scope, role,
+                           event_time if event_time is not None else timestamp, is_conflict))
         self._replace_zkeys(line_id, zkeys)
         return line_id
 
-    def get_line(self, line_id: str) -> dict | None:
-        row = self.conn.execute("SELECT * FROM lines WHERE id = ? AND active = 1", (line_id,)).fetchone()
+    def get_line(self, line_id: str, *, scope=DEFAULT_SCOPE, include_deleted=False) -> dict | None:
+        where, args = _scope_where(scope)
+        row = self.conn.execute(f"SELECT * FROM lines WHERE id = ? AND {where} AND (active = 1 OR ?)",
+                                (line_id, *args, include_deleted)).fetchone()
         if row is None:
             return None
-        data = dict(row)
-        data["isolated"] = bool(data["isolated"])
-        data["zkeys"] = self._zkeys_for(line_id)
-        data["source_step_ids"] = self._parse_step_ids(data.get("source_step_ids"))
-        return data
+        keys = [key[0] for key in self.conn.execute("SELECT zkey FROM line_zkeys WHERE line_id = ? ORDER BY zkey", (line_id,))]
+        return self._fact(row, keys)
 
     def archive_line(self, line: dict, t_end: float) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO line_history(
-              line_id, revision, formatted, plain, attribute, value, zkeys, surprise, layout, t_start, t_end, source_step_ids
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                line["id"],
-                int(line["revision"]),
-                line["formatted"],
-                line["plain"],
-                line.get("attribute"),
-                line.get("value"),
-                json.dumps(line.get("zkeys") or [], ensure_ascii=False),
-                line.get("surprise"),
-                line.get("layout"),
-                line.get("updated_at"),
-                float(t_end),
-                self._dump_step_ids(line.get("source_step_ids") or step_ids_in(line.get("plain") or "")),
-            ),
-        )
+        self.conn.execute("""INSERT INTO line_history(line_id, revision, formatted, plain, attribute, value, zkeys,
+                             surprise, layout, t_start, t_end, valid_until, source_step_ids, role, event_time, is_conflict)
+                             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                          (line["id"], line["revision"], line["formatted"], line["plain"], line["attribute"], line["value"],
+                           _dump(line["zkeys"]), line["surprise"], line["layout"], line["updated_at"], t_end, t_end,
+                           _dump(line["source_step_ids"]), line["role"], line["event_time"], line["is_conflict"]))
 
-    def update_line(self, line_id, *, formatted, plain, attribute, value, surprise, raw_dist, layout, isolated, zkeys, timestamp, source_step_ids=None) -> None:
-        steps = merge_step_ids(source_step_ids, step_ids_in(plain or ""), step_ids_in(formatted or ""))
-        self.conn.execute(
-            """
-            UPDATE lines
-               SET formatted = ?, plain = ?, attribute = ?, value = ?, surprise = ?, raw_dist = ?,
-                   layout = ?, isolated = ?, revision = revision + 1, updated_at = ?, source_step_ids = ?
-             WHERE id = ?
-            """,
-            (
-                formatted,
-                plain,
-                attribute,
-                value,
-                surprise,
-                raw_dist,
-                layout,
-                1 if isolated else 0,
-                float(timestamp),
-                self._dump_step_ids(steps),
-                line_id,
-            ),
-        )
-        self._replace_zkeys(line_id, zkeys)
+    def update_line(self, line_id, *, formatted, plain, attribute, value, surprise, raw_dist, layout,
+                    isolated=None, zkeys, timestamp, source_step_ids=None, scope=DEFAULT_SCOPE, role="user",
+                    event_time=None, is_conflict=False) -> bool:
+        with self.transaction():
+            current = self.get_line(line_id, scope=scope)
+            if current is None:
+                return False
+            self.archive_line(current, timestamp)
+            steps = merge_step_ids(current["source_step_ids"], source_step_ids, step_ids_in(plain), step_ids_in(formatted))
+            self.conn.execute("""UPDATE lines SET formatted=?, plain=?, attribute=?, value=?, surprise=?, raw_dist=?,
+                                 layout=?, isolated=?, revision=revision+1, updated_at=?, source_step_ids=?, role=?,
+                                 event_time=?, is_conflict=? WHERE id=?""",
+                              (formatted, plain, attribute, value, surprise, raw_dist, layout,
+                               current["isolated"] if isolated is None else isolated, timestamp, _dump(steps), role,
+                               event_time if event_time is not None else timestamp, is_conflict, line_id))
+            self._replace_zkeys(line_id, zkeys)
+            return True
 
-    def _replace_zkeys(self, line_id: str, zkeys) -> None:
+    def delete_line(self, line_id, *, timestamp, hard=False, scope=DEFAULT_SCOPE) -> bool:
+        with self.transaction():
+            line = self.get_line(line_id, scope=scope, include_deleted=hard)
+            if line is None:
+                return False
+            if hard:
+                self.conn.execute("DELETE FROM line_history WHERE line_id = ?", (line_id,))
+                self.conn.execute("DELETE FROM line_zkeys WHERE line_id = ?", (line_id,))
+                self.conn.execute("DELETE FROM lines WHERE id = ?", (line_id,))
+            else:
+                self.archive_line(line, timestamp)
+                self.conn.execute("UPDATE lines SET active=0, valid_until=? WHERE id=?", (timestamp, line_id))
+            return True
+
+    def _replace_zkeys(self, line_id, keys):
         self.conn.execute("DELETE FROM line_zkeys WHERE line_id = ?", (line_id,))
-        self.conn.executemany(
-            "INSERT INTO line_zkeys(line_id, zkey) VALUES(?, ?)",
-            [(line_id, key) for key in zkeys],
-        )
+        self.conn.executemany("INSERT INTO line_zkeys(line_id, zkey, key_type) VALUES(?, ?, ?)",
+                              [(line_id, key, key_type(key)) for key in dict.fromkeys(keys)])
 
-    def _zkeys_for(self, line_id: str) -> list[str]:
-        rows = self.conn.execute(
-            "SELECT zkey FROM line_zkeys WHERE line_id = ? ORDER BY zkey",
-            (line_id,),
-        ).fetchall()
-        return [row["zkey"] for row in rows]
+    def append_ingest(self, text, timestamp, *, scope=DEFAULT_SCOPE, role="user", event_time=None):
+        self.conn.execute("""INSERT INTO ingest(text, ts, created_at, event_time, user_id, agent_id, session_id, role)
+                             VALUES(?, ?, ?, ?, ?, ?, ?, ?)""", (text, timestamp, timestamp, event_time if event_time is not None else timestamp, *scope, role))
+        self.conn.execute("""INSERT INTO meta VALUES(?, ?) ON CONFLICT(key) DO UPDATE
+                             SET value = CAST(value AS INTEGER) + CAST(excluded.value AS INTEGER)""",
+                          (_history_key(scope), str(estimate_tokens(text))))
 
-    def append_ingest(self, text: str, timestamp: float) -> None:
-        self.conn.execute("INSERT INTO ingest(text, ts) VALUES(?, ?)", (text, float(timestamp)))
+    def history_tokens(self, scope=DEFAULT_SCOPE):
+        return int(self.get_meta(_history_key(scope)) or 0)
 
-    def history_text(self) -> str:
-        rows = self.conn.execute("SELECT text FROM ingest ORDER BY id").fetchall()
-        return "\n".join(row["text"] for row in rows)
+    @staticmethod
+    def _fact(row, keys):
+        fact = dict(row)
+        steps = merge_step_ids(json.loads(fact.get("source_step_ids") or "[]"), step_ids_in(fact["plain"]), step_ids_in(fact["formatted"]))
+        return {**fact, "text": ensure_step_tags(fact["plain"], steps), "zkeys": keys,
+                "entity_z_keys": [key for key in keys if key_type(key) == "entity"],
+                "category_z_keys": [key for key in keys if key_type(key) == "category"],
+                "isolated": bool(fact.get("isolated")), "historical": False,
+                "is_conflict_or_override": bool(fact.get("is_conflict")), "source_step_ids": steps}
 
-    def blocks_for_prompt(self) -> list[dict]:
-        blocks = []
-        for block in self.conn.execute("SELECT id, topic FROM blocks ORDER BY created_at, id"):
-            lines = []
-            rows = self.conn.execute(
-                """
-                SELECT * FROM lines
-                 WHERE block_id = ? AND active = 1
-                 ORDER BY seq
-                """,
-                (block["id"],),
-            ).fetchall()
-            for row in rows:
-                lines.append(
-                    {
-                        "id": row["id"],
-                        "text": row["plain"],
-                        "formatted": row["formatted"],
-                        "attribute": row["attribute"] or "",
-                        "value": row["value"] or "",
-                        "zkeys": self._zkeys_for(row["id"]),
-                        "isolated": bool(row["isolated"]),
-                        "layout": row["layout"],
-                        "surprise": row["surprise"],
-                        "revision": row["revision"],
-                        "updated_at": row["updated_at"],
-                        "source_step_ids": self._parse_step_ids(row["source_step_ids"] if "source_step_ids" in row.keys() else "[]"),
-                    }
-                )
-            blocks.append({"id": block["id"], "topic": block["topic"], "lines": lines})
-        return blocks
+    def snapshot(self, *, scope=DEFAULT_SCOPE) -> list[dict]:
+        if not self.conn.in_transaction:
+            with self.conn:
+                self.conn.execute("BEGIN")
+                return self._snapshot_rows(scope)
+        return self._snapshot_rows(scope)
 
-    def z_index(self) -> dict[str, list[dict]]:
-        index: dict[str, list[dict]] = {}
-        rows = self.conn.execute(
-            """
-            SELECT l.*, b.topic AS topic
-              FROM lines l
-              JOIN blocks b ON b.id = l.block_id
-             WHERE l.active = 1
-             ORDER BY l.updated_at, l.id
-            """
-        ).fetchall()
-        for row in rows:
-            zkeys = self._zkeys_for(row["id"])
-            source_ids = self._parse_step_ids(row["source_step_ids"] if "source_step_ids" in row.keys() else "[]")
-            source_ids = merge_step_ids(source_ids, step_ids_in(row["plain"] or ""), step_ids_in(row["formatted"] or ""))
-            fact = {
-                "id": row["id"],
-                "text": ensure_step_tags(row["plain"], source_ids),
-                "formatted": row["formatted"],
-                "raw_dist": row["raw_dist"] if row["raw_dist"] is not None else 0.5,
-                "surprise": row["surprise"] if row["surprise"] is not None else 0.5,
-                "zkeys": zkeys,
-                "attribute": row["attribute"] or "",
-                "value": row["value"] or "",
-                "revision": int(row["revision"]),
-                "updated_at": row["updated_at"],
-                "layout": row["layout"] or "",
-                "isolated": bool(row["isolated"]),
-                "block_id": row["block_id"],
-                "topic": row["topic"],
-                "historical": False,
-                "source_step_ids": source_ids,
-            }
-            for key in zkeys:
-                index.setdefault(key, []).append(dict(fact))
-        return index
-
-    def historical_versions(self, line_ids) -> list[dict]:
-        ids = [line_id for line_id in line_ids if line_id]
+    def _snapshot_rows(self, scope):
+        where, args = _scope_where(scope, "l.")
+        rows = self.conn.execute(f"""SELECT l.*, b.topic FROM lines l JOIN blocks b ON b.id = l.block_id
+                                     WHERE l.active = 1 AND {where} ORDER BY b.created_at, b.id, l.seq""", args).fetchall()
+        ids = {row["id"] for row in rows}
         if not ids:
             return []
-        placeholders = ",".join("?" for _ in ids)
-        rows = self.conn.execute(
-            f"""
-            SELECT * FROM line_history
-             WHERE line_id IN ({placeholders})
-             ORDER BY line_id, revision
-            """,
-            ids,
-        ).fetchall()
+        keys = {}
+        for row in self.conn.execute("SELECT line_id, zkey FROM line_zkeys WHERE line_id IN (SELECT value FROM json_each(?)) ORDER BY zkey", (_dump(list(ids)),)):
+            keys.setdefault(row["line_id"], []).append(row["zkey"])
+        return [self._fact(row, keys.get(row["id"], [])) for row in rows]
+
+    def greeting_keys(self, query, *, scope=DEFAULT_SCOPE):
+        where, args = _scope_where(scope, "l.")
+        rows = self.conn.execute(f"""SELECT DISTINCT k.zkey FROM lines l JOIN line_zkeys k ON k.line_id = l.id
+                                     WHERE l.active=1 AND {where} AND k.key_type='entity'
+                                     AND instr(lower(?), lower(substr(k.zkey, instr(k.zkey, ':') + 1))) > 0""",
+                                 (*args, query))
+        return [row[0] for row in rows]
+
+    def blocks_for_prompt(self, *, scope=DEFAULT_SCOPE, snapshot=None) -> list[dict]:
+        blocks = {}
+        for fact in self.snapshot(scope=scope) if snapshot is None else snapshot:
+            block = blocks.setdefault(fact["block_id"], {"id": fact["block_id"], "topic": fact["topic"], "lines": []})
+            block["lines"].append(fact)
+        return list(blocks.values())
+
+    def z_index(self, *, scope=DEFAULT_SCOPE, snapshot=None) -> dict[str, list[dict]]:
+        index = {}
+        for fact in self.snapshot(scope=scope) if snapshot is None else snapshot:
+            for key in fact["zkeys"]:
+                index.setdefault(key, []).append(fact)
+        return index
+
+    def historical_versions(self, line_ids, *, scope=DEFAULT_SCOPE) -> list[dict]:
+        if not line_ids:
+            return []
+        where, args = _scope_where(scope, "l.")
+        rows = self.conn.execute(f"""SELECT h.*, l.block_id, l.session_id, b.topic FROM line_history h
+                                     JOIN lines l ON l.id = h.line_id JOIN blocks b ON b.id = l.block_id
+                                     WHERE {where} AND h.line_id IN (SELECT value FROM json_each(?))
+                                     ORDER BY h.line_id, h.revision""", (*args, _dump(list(line_ids))))
         versions = []
         for row in rows:
-            zkeys = json.loads(row["zkeys"] or "[]")
-            keys = row.keys()
-            source_ids = self._parse_step_ids(row["source_step_ids"] if "source_step_ids" in keys else "[]")
-            source_ids = merge_step_ids(source_ids, step_ids_in(row["plain"] or ""), step_ids_in(row["formatted"] or ""))
-            versions.append(
-                {
-                    "id": f"{row['line_id']}#{row['revision']}",
-                    "line_id": row["line_id"],
-                    "text": ensure_step_tags(row["plain"], source_ids),
-                    "formatted": row["formatted"],
-                    "raw_dist": 0.8,
-                    "surprise": 0.8 if row["surprise"] is None else row["surprise"],
-                    "zkeys": zkeys,
-                    "attribute": row["attribute"] or "",
-                    "value": row["value"] or "",
-                    "revision": int(row["revision"]),
-                    "updated_at": row["t_end"],
-                    "layout": row["layout"] or "OVERWRITE_SAME_LINE",
-                    "isolated": False,
-                    "historical": True,
-                    "source_step_ids": source_ids,
-                }
-            )
+            fact = self._fact(row, json.loads(row["zkeys"]))
+            versions.append({**fact, "id": f"{row['line_id']}#{row['revision']}", "historical": True,
+                             "updated_at": row["t_start"], "is_conflict_or_override": True})
         return versions
 
-    def replace_timeline(self, layer_no: int, nodes: list[dict]) -> None:
-        self.conn.execute("DELETE FROM timeline WHERE layer = ?", (layer_no,))
-        for position, node in enumerate(nodes):
-            payload = {k: v for k, v in node.items() if k not in ("t_start", "t_end")}
-            self.conn.execute(
-                "INSERT INTO timeline(layer, position, t_start, t_end, payload) VALUES(?, ?, ?, ?, ?)",
-                (
-                    layer_no,
-                    position,
-                    float(node["t_start"]),
-                    float(node["t_end"]),
-                    json.dumps(payload, ensure_ascii=False),
-                ),
-            )
+    def save_timeline_node(self, layer_no, position, node, *, scope=DEFAULT_SCOPE, event_time=None):
+        payload = _dump({key: value for key, value in node.items() if key not in {"t_start", "t_end"}})
+        where, args = _scope_where(scope)
+        conflict = bool(node.get("is_conflict"))
+        updated = self.conn.execute(f"""UPDATE timeline SET t_end=?, payload=?, is_conflict=?
+                                       WHERE {where} AND layer=? AND position=?""",
+                                    (node["t_end"], payload, conflict, *args, layer_no, position))
+        if not updated.rowcount:
+            self.conn.execute("""INSERT INTO timeline(layer, position, t_start, t_end, payload, created_at, event_time,
+                                 user_id, agent_id, session_id, is_conflict) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              (layer_no, position, node["t_start"], node["t_end"], payload, node["t_start"],
+                               event_time if event_time is not None else node["t_start"], *scope, conflict))
 
-    def load_timeline(self, layer_no: int) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT t_start, t_end, payload FROM timeline WHERE layer = ? ORDER BY position, id",
-            (layer_no,),
-        ).fetchall()
-        nodes = []
-        for row in rows:
-            payload = json.loads(row["payload"] or "{}")
-            nodes.append({"t_start": row["t_start"], "t_end": row["t_end"], **payload})
-        return nodes
+    def load_timeline(self, layer_no, *, scope=DEFAULT_SCOPE) -> list[dict]:
+        where, args = _scope_where(scope)
+        rows = self.conn.execute(f"SELECT t_start, t_end, payload FROM timeline WHERE {where} AND layer = ? ORDER BY position, id", (*args, layer_no))
+        return [{"t_start": row["t_start"], "t_end": row["t_end"], **json.loads(row["payload"])} for row in rows]
 
-    def active_snapshot(self) -> list[dict]:
-        snap = []
-        for block in self.blocks_for_prompt():
-            rendered = []
-            for line in block["lines"]:
-                rendered.append(
-                    {
-                        "id": line["id"],
-                        "plain": line["text"],
-                        "attribute": line["attribute"],
-                        "value": line["value"],
-                        "zkeys": list(line["zkeys"]),
-                        "revision": line["revision"],
-                        "isolated": line["isolated"],
-                        "layout": line["layout"],
-                        "topic": block["topic"],
-                        "formatted": line["formatted"],
-                        "source_step_ids": list(line.get("source_step_ids") or step_ids_in(line.get("plain") or line.get("text") or "")),
-                    }
-                )
-            if rendered:
-                snap.append({"block_id": block["id"], "topic": block["topic"], "lines": rendered})
-        return snap
+    def last_timeline_node(self, layer_no, *, scope=DEFAULT_SCOPE):
+        where, args = _scope_where(scope)
+        row = self.conn.execute(f"""SELECT position, t_start, t_end, payload FROM timeline WHERE {where} AND layer = ?
+                                    ORDER BY position DESC, id DESC LIMIT 1""", (*args, layer_no)).fetchone()
+        if row is None:
+            return -1, None
+        return row["position"], {"t_start": row["t_start"], "t_end": row["t_end"], **json.loads(row["payload"])}
+
+    def active_snapshot(self, *, scope=DEFAULT_SCOPE) -> list[dict]:
+        return [{"block_id": block["id"], "topic": block["topic"], "lines": block["lines"]}
+                for block in self.blocks_for_prompt(scope=scope)]
