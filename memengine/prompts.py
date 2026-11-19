@@ -37,7 +37,10 @@ def load_prompt(name: str) -> str:
 def render_prompt(name: str, **kwargs) -> str:
     text = load_prompt(name)
     if name == "layout":
-        kwargs = {"role": "user", "categories": [], "timestamp": 0, **kwargs}
+        kwargs = {"role": "user", "categories": [], "timestamp": 0, "current_date_iso": "1970-01-01",
+                  "recent_turns": [], **kwargs}
+    if name == "reason":
+        kwargs = {"matched_entities": [], **kwargs}
     values = {}
     for key, value in kwargs.items():
         if not isinstance(value, str):

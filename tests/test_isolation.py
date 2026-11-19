@@ -61,7 +61,7 @@ def test_reasoner_output_cannot_write_or_move_the_circle():
     assert after["pending"] == before["pending"]
     assert after == before
     assert engine.radius != 0.01
-    assert engine.radius == 0.45
+    assert engine.radius == 0.25
 
 
 def test_pending_write_stays_queued_through_answer():

@@ -4,14 +4,13 @@ import json
 import pytest
 
 from memengine import engine as engine_module
-from memengine.distance import DROPPED, INNER, OUTER, evaluate_circle, score_fact
+from memengine.distance import BELT, OUTER
 from memengine.embeddings import OpenAICompatibleEmbedder
 from memengine.engine import CognitiveMemoryEngine
 from memengine.llm import MockLLMClient, _labeled_json
 from memengine.notebook import line_body
 from memengine.router import CASUAL, TASK
 from memengine.vector import HashedTfidfEmbedder
-from memengine.zaxis import expand_entities
 
 
 def _op(text, *, keys=(), action="APPEND_ADJACENT_LINE", topic="profile", **extra):
@@ -23,7 +22,6 @@ class ScriptedClient:
     def __init__(self):
         self.prompts = []
         self.ops = []
-        self.anti = 0.90
         self.mock = MockLLMClient()
 
     def complete(self, prompt):
@@ -31,8 +29,6 @@ class ScriptedClient:
         if prompt.startswith("# 无损事实抽取与分类写入器"):
             return json.dumps({"write_operations": self.ops})
         data = json.loads(self.mock.complete(prompt))
-        if prompt.startswith("# 查询与原点控制器"):
-            data["poison_circle"]["anti_intuitive_weight"] = self.anti
         return json.dumps(data)
 
 
@@ -58,8 +54,9 @@ def test_live_single_write_prompt_and_no_positional_alignment():
     assert [row["plain"] for row in rows] == ["Gamma strength", "Alpha durability", "Beta speed"]
     assert all(row["plain"] == line_body(row["formatted"]) and row["source_step_ids"] == [6] for row in rows)
     assert all(row["event_time"] == 18 and row["updated_at"] == 30 and row["role"] == 'user" >' for row in rows)
-    assert rows[0]["category_z_keys"] == ["类目:Infrastructure"]
-    assert rows[2]["category_z_keys"] == ["类目:其他/通用"]
+    assert rows[0]["category_z_keys"] == ["类目:infrastructure"]
+    assert rows[1]["category_z_keys"] == []
+    assert rows[2]["category_z_keys"] == ["类目:not a category"]
 
 
 def test_live_shortlist_pins_every_explicit_entity_row():
@@ -104,7 +101,7 @@ def test_delete_line_soft_then_scoped_hard(original, revocation, query):
     assert [(fact["revision"], fact["valid_until"]) for fact in audit] == [(0, 2)]
     assert engine.delete(line_id, user_id="alice", hard=True, timestamp=3)
     assert all(engine.store.conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
-               for table in ("lines", "line_zkeys", "line_history"))
+               for table in ("facts", "fact_entities", "facts_fts", "fact_vectors"))
 
 
 class FixedSimilarity:
@@ -115,7 +112,7 @@ class FixedSimilarity:
                       key=lambda fact: -fact["vector_score"])[:top_n]
 
 
-def test_circle_collapse_weights_and_radial_gravity_on_main_path(monkeypatch):
+def test_bipolar_collapse_deduplicates_and_scores_belt_on_main_path(monkeypatch):
     client = ScriptedClient()
     engine = CognitiveMemoryEngine(llm=client, vector=FixedSimilarity())
     now = 7 * 86400
@@ -123,8 +120,8 @@ def test_circle_collapse_weights_and_radial_gravity_on_main_path(monkeypatch):
     client.ops = [old]
     engine.add("conflict regarding Alice", timestamp=0)
     client.ops = [_op("exception regarding Alice", keys=["实体:Alice"], action="INSERT_ISOLATED_LINE"),
-                  _op("noise regarding Alice", keys=["实体:Alice"]),
-                  _op("unanchored mutation", keys=["实体:Other"], is_conflict_or_override=True),
+                  _op("noise regarding Alice", topic="时事杂讯"),
+                  _op("unanchored mutation", keys=["实体:Other"]),
                   _op("near context", keys=["实体:Alice"]), _op("background context", keys=["实体:Project"])]
     engine.add("exception and three distinct observations", timestamp=now)
     calls = []
@@ -136,40 +133,29 @@ def test_circle_collapse_weights_and_radial_gravity_on_main_path(monkeypatch):
         return collapsed
 
     monkeypatch.setattr(engine_module, "collapse_and_scan_z_axis", spy)
-    high = engine.retrieve("What about Alice?", timestamp=now, read_only=True, top_k=5)
-    client.anti = 0.15
-    low = engine.retrieve("What about Alice?", timestamp=now, read_only=True, top_k=5)
-    assert len(calls) == 2
-    assert [fact["plain"].split()[0] for fact in high["outer"]] == ["conflict", "exception"]
-    assert [fact["plain"].split()[0] for fact in low["outer"]] == ["exception", "conflict"]
-    assert [fact["zone"] for fact in high["outer"]] == [OUTER, OUTER]
-    assert [fact["surprise"] for fact in high["outer"]] == [0.95, 0.90]
-    closest, second = high["inner"]
-    assert closest["zone"] == INNER and closest["d_origin"] == pytest.approx(0.01)
-    assert closest["d_asymp"] == 0.05 and closest["p_radial"] == 1
-    assert second["p_radial"] == pytest.approx(0.05 / 0.30)
-    equal_rrf = {**second, "rrf_norm": closest["rrf_norm"]}
-    assert score_fact(closest, now, 0.4, 0.9) > score_fact(equal_rrf, now, 0.4, 0.9)
+    result = engine.retrieve("What about Alice?", timestamp=now, read_only=True, top_k=5)
+    assert len(calls) == 1
+    assert result["outer_triggered_count"] == 4 and result["inner_count"] == 0 and result["belt_count"] == 1
+    assert all(fact["zone"] == OUTER and fact["bipolar_weight"] == 1 for fact in result["outer"])
+    assert [fact["score"] for fact in result["ranked"]] == sorted((fact["score"] for fact in result["ranked"]), reverse=True)
     order, buckets = calls[0]
-    assert [bucket["z_bucket"] for bucket in buckets] == order
+    assert [bucket["z_bucket"] for bucket in buckets] == [key for key in order if key in {bucket["z_bucket"] for bucket in buckets}]
     all_facts = [fact for bucket in buckets for fact in bucket["facts"]]
     assert len({fact["id"] for fact in all_facts}) == 6 == len(all_facts)
-    assert {fact["plain"].split()[0] for fact in all_facts if fact["zone"] == DROPPED} == {"noise", "unanchored"}
-    no_anchor = evaluate_circle({"raw_dist": 0.95, "layout": "INSERT_ISOLATED_LINE"}, 0.45)
-    assert no_anchor["zone"] == DROPPED
+    assert {fact["plain"].split()[0] for fact in all_facts if fact["zone"] == BELT} == {"noise"}
 
 
-def test_outside_slot_limit_and_token_budget_reserve_ordinary_context():
+def test_global_slot_limit_and_token_budget_allow_all_outer_facts():
     client = ScriptedClient()
     engine = CognitiveMemoryEngine(llm=client, vector=FixedSimilarity())
     client.ops = [_op(f"exception {index} Alice", keys=["实体:Alice"], action="INSERT_ISOLATED_LINE") for index in range(8)]
     client.ops.extend([_op("near context", keys=["实体:Alice"]), _op("background context", keys=["实体:Alice"])])
     engine.add("Alice related context", timestamp=1)
     limited = engine.retrieve("What about Alice?", top_k=5, token_budget=2048, timestamp=1, read_only=True)
-    assert len(limited["outer"]) == 2 and len(limited["inner"]) == 2
+    assert len(limited["outer"]) == 5 and limited["inner"] == []
     clipped = engine.retrieve("What about Alice?", top_k=5, token_budget=9, timestamp=1, read_only=True)
     assert clipped["context_tokens"] <= 9
-    assert clipped["outer"] and clipped["inner"]
+    assert clipped["outer"] and clipped["inner"] == []
 
 
 def test_category_hub_and_noise_never_expand_as_graph_edges():
@@ -180,27 +166,30 @@ def test_category_hub_and_noise_never_expand_as_graph_edges():
                       category_z_keys=["movie"], topic="影视") for index in range(10)]
     engine.add("Film catalogue", timestamp=1)
     graph = engine.store.z_index()
-    assert len(graph["类目:影视"]) == 10
-    assert expand_entities(graph, ["实体:Alice", "类目:影视", "话题:时事杂讯"]) == ["实体:Alice", "实体:Title0"]
+    assert len(graph["类目:movie"]) == 10
+    assert not engine.store.search_entity_inverted(["类目:影视", "话题:时事杂讯"])
     hashed = engine.search_z_hash(["实体:Alice"], ["类目:影视"])
     assert [hit["plain"] for hit in hashed] == ["Alice starred in film Title0"]
     result = engine.retrieve("Which film did Alice star in?", read_only=True)
-    assert all(f"Title{index}" not in result["context"] for index in range(1, 10))
+    assert result["ranked"][0]["plain"] == "Alice starred in film Title0"
+    assert [fact["plain"] for fact in result["ranked"] if fact["entity_anchor"]] == [hashed[0]["plain"]]
 
 
-def test_weak_preview_origin_does_not_create_a_penetration_anchor():
+def test_origin_hints_do_not_create_entity_anchors_or_sort_by_semantic_distance():
     engine = _engine(enable_casual_bypass=False)
     engine.add("老周对苯甲酸钠过敏，不能食用含该防腐剂的食品。", timestamp=1)
     engine.add("苏晚的门禁密码是7341。", timestamp=2)
     engine.add("仓库备用钥匙放在绿色铁盒。北岛项目的内部代号是青柠。", timestamp=3)
     engine.add("本周周会改到周五上午十点。张敏将前往京都参加设计评审。李楠将前往青岛参加供应商会谈。", timestamp=4)
     for query in ("市面上常见的食品添加剂有哪些", "门锁坏了怎么办"):
-        result = engine.answer(query, timestamp=5)
-        assert result["route"] == TASK and result["empty_retrieval"]
-        assert "苯甲酸钠" not in result["response"] and "7341" not in result["response"]
+        result = engine.retrieve(query, timestamp=5, read_only=True)
+        assert result["route"] == TASK and not result["empty_retrieval"]
+        assert all(not fact["entity_anchor"] for fact in result["ranked"])
+        answer = engine.answer(query, retrieved=result)
+        assert "苯甲酸钠" not in answer["response"] and "7341" not in answer["response"]
 
 
-def test_greeting_zero_calls_and_bounded_controller_fallback():
+def test_greeting_and_task_retrieval_make_no_controller_calls():
     client = ScriptedClient()
     engine = _engine(llm=client)
     client.ops = [_op("电影《午后蓝海》值得再看", keys=["实体:午后蓝海", *[f"实体:人物{index}" for index in range(30)]],
@@ -214,8 +203,7 @@ def test_greeting_zero_calls_and_bounded_controller_fallback():
     question = engine.retrieve("我爱看啥电影？", read_only=True)
     assert question["route"] == TASK and "午后蓝海" in question["context"]
     assert question["parsed_query"]["query_type"] == "REFLECTIVE"
-    assert len(client.prompts) == 1
-    assert len(_labeled_json(client.prompts[0], "候选实体轴：")) == 15
+    assert not client.prompts
 
 
 def test_call_local_clock_and_pending_flush_are_scoped():
@@ -261,7 +249,7 @@ def test_sql_statement_count_constant_and_scope_isolation(tmp_path):
         finally:
             engine.store.conn.set_trace_callback(None)
         assert "7341" in result["context"] and "9821" not in result["context"]
-        return len(queries)
+        return sum(not query.startswith("--") for query in queries)
 
     baseline = traced_search()
     with engine.store.transaction():
@@ -272,7 +260,7 @@ def test_sql_statement_count_constant_and_scope_isolation(tmp_path):
             engine.store.insert_line(block_id=block, formatted=text, plain=text, attribute=f"record-{index}",
                                      value="", surprise=0.25, raw_dist=None, layout="APPEND_ADJACENT_LINE",
                                      isolated=False, zkeys=[f"实体:record{index}"], timestamp=2, scope=scope)
-    assert traced_search() == baseline < 12
+    assert traced_search() == baseline < 25
     assert engine.store.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     for tenant in ({"user_id": "alice", "agent_id": "two"}, {"user_id": "alice", "agent_id": "one", "session_id": "s2"}):
         result = engine.retrieve("苏晚的门禁密码是多少？", **tenant, read_only=True)

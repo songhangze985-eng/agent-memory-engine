@@ -8,15 +8,16 @@ from __future__ import annotations
 
 import re
 
+from memengine.distance import MIN_REL, is_noise, is_override
 from memengine.notebook import format_fact_line
 from memengine.store import key_type
-from memengine.textutil import char_bigrams, jaccard, parse_cn_number
+from memengine.textutil import char_bigrams, jaccard, normalize_entity, parse_cn_number
 
 REFUSAL = "根据现有记忆，没有足够的直接关联可以确认这一点。"
 
 def _specific_zkeys(keys) -> set[str]:
     """Identity keys used for overwrite and reachability; categories are too coarse."""
-    return {str(key) for key in (keys or []) if str(key) and key_type(str(key)) == "entity"}
+    return {normalize_entity(str(key)) for key in (keys or []) if str(key) and key_type(str(key)) == "entity"}
 
 
 _ORDINAL = re.compile(r"第([0-9]+|[一二两三四五六七八九十])次")
@@ -51,7 +52,7 @@ def decide_origin(current_origin: dict | None, notebook_index: list, matched_z: 
         y_sub = best.get("preview_attr") or best.get("block_id") or "总览"
     anchor = (query or "").strip()[:80]
     multi = bool(re.search(r"之前|最早|原本|以前|上次|第[0-9一二两三四五六七八九十]+次|对比", query or ""))
-    radius = 0.62 if multi else 0.45
+    radius = 0.35 if multi else 0.25
 
     def overlap(entity: str) -> float:
         name = entity.split(":", 1)[-1]
@@ -70,8 +71,6 @@ def decide_origin(current_origin: dict | None, notebook_index: list, matched_z: 
         },
         "poison_circle": {
             "radius_r": radius,
-            "anti_intuitive_weight": 0.90,
-            "intuitive_weight": 0.40,
             "z_axis_scan_order_far_to_near": order,
         },
     }
@@ -91,7 +90,7 @@ def _find_match(flat, fact):
         if fact.get("delete") and fact.get("value") and str(line.get("value")) != str(fact["value"]):
             continue
         line_keys = _specific_zkeys(line.get("zkeys") or [])
-        identities = {key for key in keys if key.startswith(("人物:", "person:"))}
+        identities = {normalize_entity(key) for key in fact.get("zkeys", []) if key.startswith(("人物:", "person:"))}
         if (identities or keys).intersection(line_keys):
             if not fact.get("delete"):
                 return block, line
@@ -116,7 +115,7 @@ def decide_layout(candidate_blocks: list, facts: list, timestamp) -> dict:
         if match is not None:
             block, line = match
             if str(line.get("value")) == str(fact.get("value")):
-                operations.append(_noop())
+                operations.append({**_noop(), "target_line_id": line["id"]})
                 continue
             operations.append(
                 {
@@ -249,15 +248,28 @@ def _select_revision(facts: list[dict], query: str, target) -> list[dict]:
     return _dedupe(chosen)
 
 
-def plan_answer(origin: dict | None, outer: list, inner: list, query: str, query_type="FACTUAL") -> dict:
+def plan_answer(facts: list, query: str, query_type="FACTUAL", matched_entities=()) -> dict:
     """Read-only. Does not accept a store and does not return write operations."""
-    facts = list(outer or []) + list(inner or [])
-    kept = [fact for fact in facts if fact.get("topic") != "时事杂讯"]
-    rejected = [fact["id"] for fact in facts if fact.get("topic") == "时事杂讯"]
+    kept, rejected = [], []
+    local = {normalize_entity(key) for key in matched_entities}
+    related_events = {normalize_entity(key) for fact in facts if fact.get("entity_anchor")
+                      for key in fact.get("entity_z_keys") or () if key.startswith(("事件:", "event:"))}
+    for fact in facts:
+        weak_exception = ((is_override(fact) or fact.get("isolated")) and not fact.get("historical")
+                          and not fact.get("entity_anchor") and fact.get("vector_score") is not None
+                          and (fact["vector_score"] <= MIN_REL or not local))
+        if is_noise(fact) or weak_exception:
+            rejected.append(fact["id"])
+        else:
+            kept.append(fact)
     historical = [fact for fact in kept if fact.get("historical")]
     travel = travel_revision(query)
-    if historical and (travel is not None or query_type == "TIME_TRAVEL"):
-        chosen = _select_revision(historical, query, travel) if isinstance(travel, int) else _dedupe(historical)
+    if isinstance(travel, int) and historical:
+        chosen = _select_revision(historical, query, travel)
+    elif any(fact.get("temporal_match") for fact in kept) and query_type == "TIME_TRAVEL":
+        chosen = _dedupe([fact for fact in kept if fact.get("temporal_match")])
+    elif historical and (travel is not None or query_type == "TIME_TRAVEL"):
+        chosen = _dedupe(historical)
     else:
         chosen = _dedupe([fact for fact in kept if not fact.get("historical")])
     if query_type != "REFLECTIVE":
@@ -267,16 +279,21 @@ def plan_answer(origin: dict | None, outer: list, inner: list, query: str, query
         anchored = [fact for fact in chosen if fact.get("entity_anchor")]
         if anchored:
             chosen = anchored
+        elif local and related_events:
+            relevant = [fact for fact in chosen if related_events.intersection(
+                normalize_entity(key) for key in fact.get("entity_z_keys") or ())]
+            if relevant:
+                chosen = relevant
     parts = []
     for fact in chosen:
         text = (fact.get("text") or "").strip().rstrip("。")
         if text and text not in parts:
             parts.append(text)
     synthesis = "。".join(parts)
-    outer_ids = {fact["id"] for fact in outer or []}
     return {
         "evidence_synthesis": synthesis,
-        "anti_intuitive_override": any(fact["id"] in outer_ids for fact in chosen),
+        "anti_intuitive_override": any(fact.get("historical") or fact.get("is_conflict_or_override")
+                                       or fact.get("isolated") for fact in chosen),
         "rejected_noise_ids": rejected,
         "final_answer": synthesis + "。" if synthesis else REFUSAL,
     }

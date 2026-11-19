@@ -4,33 +4,35 @@
 
 ## 写入与 2D 排版
 
-`CognitiveMemoryEngine.add` 按 `(user_id, agent_id, session_id)` 查候选段落。相似度最高的 8 个段落各保留最近 5 行，另保留所有命中实体的活跃行（不受这两个上限约束）。Live 只调用一次 `notebook_layout.txt`；原始消息与角色做 HTML 转义后放入 `untrusted_utterance`，候选和原文都标为数据。引擎验证操作类型、允许目标、目标属性和删除意图；不接受模型决定硬删除。提示词隔离是防护的一层，不把模型输出当作权限。
+`CognitiveMemoryEngine.add` 先写入 `raw_turns`，保存包括空白和外部 step 标签的原文，返回自增 `turn_id`。随后按 `(user_id, agent_id, session_id)` 查候选段落。相似度最高的 8 个段落各保留最近 5 行，另保留所有命中实体的活跃行。Live 通过 `notebook_layout.txt` 一次抽取和排版，提供最近同会话上下文供指代消解，并以当前轮次的 UTC 日期解析相对时间。原始消息与角色做 HTML 转义后放入 `untrusted_utterance`。引擎验证操作类型、允许目标、目标属性和删除意图。硬删除只能通过显式接口触发。
 
 | 操作 | 存储与布局 |
 | --- | --- |
-| `OVERWRITE_SAME_LINE` | 保留行 ID 与行序，事务内归档旧版本、增加修订号、合并来源 step ID。 |
+| `OVERWRITE_SAME_LINE` | 同一块、同一行序生成新事实 ID，继承 `root_fact_id`，以 `supersedes_id` 链接旧版本、增加修订号并对来源 turn ID 和 step ID 分别求并集。旧版本封口为 `superseded`，保留索引。 |
 | `APPEND_ADJACENT_LINE` | 在同一主题追加相邻行。 |
 | `INSERT_ISOLATED_LINE` | 为一次性约束或例外留空行；渲染时与邻行隔开。 |
-| `DELETE_LINE` | 归档并将原行置为 `active=0`，设置 `valid_until`。 |
-| `NOOP` | 不修改笔记本。 |
+| `DELETE_LINE` | 将活跃版本置为 `deleted` 并设置 `valid_until`，整条链从普通检索隐藏。 |
+| `NOOP` | 确认重复事实时，仅给命中版本补充来源 turn ID 和 step ID。 |
 
-每个操作自带文本、属性和值，不与另一份事实列表按位置配对。`plain` 来自清洗后的 `formatted`；检索文本可以另加来源 step 标记。Mock 及解析失败的回退用 `extract_facts` 与 `decide_layout`；规则识别不了的长中文杂讯可进入单独新闻桶。默认 12 类加 `其他/通用`；`categories=[...]` 扩展允许列表，默认类目的中英文同义词映射到同一个键。
+每个操作自带文本、属性和值。`plain` 来自清洗后的 `formatted`，新事实都绑定原文 `turn_id`。Mock 及解析失败的回退用 `extract_facts` 与 `decide_layout`。类目是可选软标签，`categories=[...]` 扩展标签词表，自由实体和未知标签均可保存。
 
 ## 读入、分区与排序
 
-1. **路由。** 纯寒暄且无已知实体、疑问或记忆线索时直接返回 `CASUAL_2D_BYPASS`，不调用任何模型，也不触发待写队列。其他输入进入 `query_origin_controller.txt`：一次返回查询类型（`FACTUAL`、`REFLECTIVE`、`TIME_TRAVEL`）、实体、类目、语义扩写、原点和毒圈配置。旧 `query_parser.txt` / `origin_boundary.txt` 保留为兼容模板，不参与主链路。无实体命中时，控制器只看向量预检 Top-10 导出的最多 15 个实体键和有限主题摘要。
-2. **召回。** 单次读取作用域内的活跃行快照。实体键做至多 2-Hop；类目只在没有实体候选时做直接召回，不能当图边，新闻键也不参与扩展。语义扩写 Top-30 与 Z Hash 用 `0.65/0.35` 加权 RRF（`k=60`，用理论最大分归一化）。`TIME_TRAVEL` 可从相关行加入 `line_history` 修订。删除行不进检索，历史仍可显式审计。
-3. **距离与惊奇解耦。** `d_origin = 1 - max(sim(扩写, 事实), sim(原点三元组, 事实))`。远程为截断到 `[0,1]` 的余弦相似度；离线融合 BM25、哈希 TF-IDF 余弦、词元与字粒度匹配；泛类目可用同义归一化辅助离线召回。`d_asymp = max(0.05, d_origin)`；`P_radial = 0.05 / d_asymp`。`S` 仅取结构标签：冲突/历史 `0.95`，孤立行 `0.90`，普通覆写 `0.85`，相邻行 `0.25`，新闻 `0.08`。
-4. **Z 轴坍缩与三态分区。** 直接消费控制器的由远及近顺序；未排到的轴放远侧。同一事实 ID 只分给最先扫到的一个桶。实体图命中、历史回溯、或扩写查询通道的相似度 `> 0.15` 才算有锚点；候选决定的原点只参与距离，不能反过来为自己制造关联。有锚点且显式冲突/历史，或有锚点、`d_asymp > R` 且 `S >= 0.75`，为 `OUTER_ANTI_INTUITIVE`。非孤立、非冲突的行只有在有锚点且 `d_asymp <= R` 时才进 `INNER_INTUITIVE`。其他情况是 `POISONED_DROPPED`；例如圈内、未标冲突的孤立行也不满足两个入选条件。无关文本不会用“最近记忆”兜底。
-5. **排序与配额。** 圈内用 `w_in * (0.6 * RRF_norm + 0.4 * P_radial) + 0.15 * Recency`，圈外用 `w_anti * (0.45 * RRF_norm + 0.55 * S) + 0.15 * Recency`。权重用控制器值，默认 `0.40` 和 `0.90`；半径限制到 `[epsilon, 1]`。`Recency = 2^(-max(0, now-event_time)/30天)`，缺失事件时间时用更新时间。圈外最多 `ceil(top_k*0.4)`，有历史回溯或已标冲突时放宽到 `ceil(top_k*0.6)`。两个区各按分数排序；当两个区都可容纳时，在 Token 预算里为至少一条圈内背景留空间。`token_budget` 约束返回的证据正文估算，不含系统指令或元数据的协议开销。
+1. **路由。** 纯寒暄且无已知实体、疑问或记忆线索时直接返回 `CASUAL_2D_BYPASS`。任务查询在本地解析意图、扩展语义查询并运行 `parse_temporal_intent`，从候选预览和实体线索计算原点与边界。检索控制全程无需 LLM。
+2. **召回。** 在一个 SQLite 读取快照中，向量、FTS5 BM25、实体倒排和时间四路各最多取 40 条，权重依次为 `0.40 / 0.35 / 0.15 / 0.25`，以 `k=60` 做加权 RRF。向量以 NumPy 批量计算余弦；全文以英文代码词元和 CJK 单字、相邻双字索引；实体键去前缀、去空白、大小写归一后直接查一个倒排桶。时间路仅在识别历史意图或 UTC 时间窗口时启动，用 `event_time_start` 范围和可选修订号查询。候选详情和键集中两条 SQL 加载。普通查询的 `superseded` 版本乘 `0.35` 并加 `[历史已变更]`；历史查询恢复旧版本权重，明确窗口内有匹配时降低窗外候选权重。
+3. **巩固频次坐标。** `c_m = max(1, len(source_step_ids), len(source_turn_ids)) + hit_count`，`c_max` 取当前 RRF 池非杂讯最大频次。新闻主题或仅有新闻 Z 键时，`r_m=0.5`；`c_m=1`、孤立、覆写、冲突或历史修订时，`r_m=1`；其余事实用 `clamp(1 - ln(c_m)/ln(c_max), 0, 0.50)`，`c_max<=1` 时取 `0`。`c_m=c_max=8` 时精确落在 `r_m=0`；`c_m=2, c_max=8` 时被截在 `r_m=0.50`。
+4. **对称引力与三区。** `W(r) = max(eps/max(eps,r), eps/max(eps,1-r))`，两端默认 `eps=0.05`：`W(0)=W(1)=1`，`W(0.5)=0.10`。`R_in=clamp(R,0.15,0.35)`，`R_out=1-R_in`。`r<=R_in` 为 `INNER_INTUITIVE`，`r>=R_out` 为 `OUTER_ANTI_INTUITIVE`，中间为 `POISON_BELT`。由远及近分 Z 桶，同一事实 ID 只分给最先扫到的桶，无分区配额。
+5. **全局排序与夹层软裁剪。** `Rel_norm=RRF/(max_pool_RRF+1e-12)`，`bipolar_score = Rel_norm * (lambda + (1-lambda) * W) + beta`。`bipolar_lambda` 默认 `0.50`；显式冲突或时间旅行历史修订加 `0.05`。按分数降序，同分保持 RRF 顺序。仅裁掉 `bipolar_score < belt_prune_ratio * max_score` 的夹层事实，默认比例 `0.35`，`0` 禁用；按原排序恢复到 `min(min_keep, 候选数)`，`min_keep` 默认 `2`。参数可在构造或单次检索指定。两极不参与软裁剪；全员普通单次时与纯 RRF 同序。
+6. **预算与诊断。** 软裁剪后按 `top_k` 与估算 `token_budget` 截断；正预算下至少保留首条可容纳的事实，若无完整条目可容纳则截短首条。空候选、寒暄或显式零预算仍可能返回空。`ranked` 保留全局顺序，`outer` / `inner` / `belt` 是分区视图；`belt_pruned_count` 单计软裁剪，`belt_compressed_count` 还包括预算或槽位移除的夹层事实。外围计数包含普通单次事实，不等于显式例外数。默认 `lambda=0.50` 时，同等 RRF 相关性的夹层分数是两极的 `55%`，高于 `35%` 裁剪线；高相关夹层因此会保留，这不是强制压缩配额。
 
-配置 `EMBEDDING_BASE_URL`（基础路径或完整 `/embeddings` 路径）和 `EMBEDDING_MODEL` 时使用 `OpenAICompatibleEmbedder`；`EMBEDDING_API_KEY` 可选，取决于服务是否要求鉴权。当前行向量在进程内按行 ID、修订和文本摘要缓存（最多 4096），本地硬删除清除对应缓存；无服务或请求失败时整批降级 `HashedTfidfEmbedder`，不混用不同向量空间。远程服务会接收查询和该作用域的记忆文本，接入前需评估数据边界。
+配置 `EMBEDDING_BASE_URL`（基础路径或完整 `/embeddings` 路径）和 `EMBEDDING_MODEL` 时使用 `OpenAICompatibleEmbedder`，`EMBEDDING_API_KEY` 由服务端要求决定。`fact_vectors` 按版本保存模型名、维度和 L2 归一的 float32 向量。默认使用本地 `HashedTfidfEmbedder`，远程写入编码失败时保存本地向量；查询只对成功编码的同模型同维度向量计算相似度。模型变更后，已存的其他远程模型向量需要重新索引才能进入向量通道。FTS5、实体和时间通道独立可用。
 
 ## 隔离、时钟与持久化
 
-- `add(text, *, user_id='default', agent_id='default', session_id='default', role='user', timestamp=None, event_time=None, sync=True)`。默认同步落盘；`sync=False` 暂存在当前实例内，任务查询默认先刷对应用户/Agent 的待写作业。纯寒暄和 `read_only=True` 不刷盘；待写队列不跨进程持久化。
-- `retrieve(query, *, user_id='default', agent_id='default', session_id=None, top_k=10, token_budget=2048, timestamp=None, read_only=False, flush_pending=True)`。`search` 为兼容封装。`session_id=None` 跨当前用户/Agent 的会话查记忆；指定会话则只查该会话。控制状态按用户、Agent、会话独立保存；跨会话查询用该租户的默认控制流。`timestamp` 只影响当次调用，不是 SQLite 快照的 as-of 过滤器；时间旅行使用行修订。显式 `set_time` 固定时钟，`reset_clock` 恢复构造时注入的时钟或系统时钟。
-- `delete(line_id, *, hard=False, user_id='default', agent_id='default', timestamp=None)`。硬删除只覆盖本库中的 `lines`、`line_zkeys`、`line_history` 和当前实例向量缓存；独立的原始 ingest 记录、历史备份、其他进程缓存及远程供应商留存不在此契约范围内，不能把它当作端到端的数据擦除。
-- `answer(query, *, user_id='default', agent_id='default', timestamp=None, retrieved=None)`。复用同租户的检索结果，或发起只读检索；不刷盘、不新建时间节点、不移动持久化原点。只使用 `evidence_synthesis`、`anti_intuitive_override`、`rejected_noise_ids`、`final_answer`。选择题适配在 `eval/` 而不在理由生成器。寒暄返回空 `response`，由调用方接管。
-- 文件型 SQLite 使用 WAL、`synchronous=NORMAL`、`busy_timeout=5000`、外键和幂等迁移；`:memory:` 使用 SQLite 内存日志。行、Z 键批量读取，写事务用 `BEGIN IMMEDIATE`，被更新的修订不会丢失旧版本。原始历史 Token 在入库时按用户/Agent 增量累计。
-- 双时间轴分别记录原点移动、写入执行。默认仅在间隔不超过 10 秒、节点时长不超过 300 秒且未满 20 个事件时合并；原点迁移或主题切换新开节点。SQLite 仅追加或更新最后一个节点。
+- `add(text, *, user_id='default', agent_id='default', session_id='default', role='user', timestamp=None, event_time=None, sync=True)`。原文同步持久化。`sync=False` 仅将抽取与事实索引加入当前进程队列，非只读任务查询默认先刷对应用户/Agent 的作业。
+- `retrieve(query, *, user_id='default', agent_id='default', session_id=None, top_k=10, token_budget=2048, timestamp=None, read_only=False, flush_pending=True, include_raw_turns=False)`。`search` 是兼容封装。指定 `session_id` 时限定会话。打开 `include_raw_turns` 时，`drilldown_turns` 返回前三条事实所指向原文及同一会话的相邻轮，去重并按 `turn_id` 排序。`timestamp` 是本次调用的时钟参考，历史检索基于事件时间及修订。`set_time` 固定时钟，`reset_clock` 恢复原时钟。
+- `delete(line_id, *, hard=False, user_id='default', agent_id='default', timestamp=None)`。硬删除覆盖整条版本链及其实体、FTS5 和向量索引。独立 `raw_turns` 日志仍可经原文接口读取，数据擦除若涵盖原文、备份或远程留存，需要分别处理。
+- `answer(query, *, user_id='default', agent_id='default', timestamp=None, retrieved=None)`。复用同租户的检索结果，或发起只读检索；不刷盘、不新建时间节点、不移动持久化原点或增加命中次数。System 2 按 `ranked` 接收证据；仍可拒绝新闻及无实体锚点、弱语义关联的冲突或孤立证据，不反写检索结果。选择题适配留在 `eval/`。寒暄返回空 `response`，由调用方接管。
+- 非只读检索批量递增最终选中事实版本的 `hit_count`。`facts` 的两个时间视角分别是 `event_time_start/end` 与 `ingest_time/valid_until`，后者用于记录版本入库和失效。`get_fact_chain` 可按修订顺序审计；`render` 仅看活跃行。
+- 文件型 SQLite 使用 WAL、`synchronous=NORMAL`、`busy_timeout=5000`、外键，写事务使用 `BEGIN IMMEDIATE`。打开旧库时迁移 `ingest`、`lines`、`line_history`、`line_zkeys`，事务内校验并重建索引，使用 `meta.schema_version=2` 记录版本。原始历史 Token 在入库时按用户/Agent 增量累计。
+- `timeline` 仅保留写入审计兼容，默认节点合并间隔 10 秒、时长 300 秒、最多 20 个事件。`observations` 提供按租户插入和读取接口，`add()` 不生成反思。

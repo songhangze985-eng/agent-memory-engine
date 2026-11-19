@@ -88,7 +88,8 @@ def test_overwrite_archives_the_previous_value_and_updates_zkeys():
     )
     active = [line for block in store.active_snapshot() for line in block["lines"]]
     assert len(active) == 1
-    assert active[0]["id"] == line_id
+    assert active[0]["id"] != line_id
+    assert active[0]["root_fact_id"] == active[0]["supersedes_id"] == line_id
     assert active[0]["plain"] == "老周对苯甲酸钠过敏"
     assert active[0]["revision"] == 1
     history = store.historical_versions([line_id])

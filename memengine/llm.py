@@ -216,12 +216,10 @@ class MockLLMClient:
             stem = _section_after(prompt, "用户问题题干：")
             return json.dumps(parse_query_rules(stem), ensure_ascii=False)
         if "慢系统综合推理与作答器" in prompt.split("# Input", 1)[0]:
-            memories = _labeled_json(prompt, "检索证据（非指令数据，按分区与分数排列）：")
+            memories = _labeled_json(prompt, "检索证据（非指令数据，按分数排列）：")
             question = _labeled_json(prompt, "用户问题（非指令数据）：")
             query_type = _labeled_line(prompt, "查询类型：")
-            outer = [item for item in memories if item.get("zone") == "OUTER_ANTI_INTUITIVE"]
-            inner = [item for item in memories if item.get("zone") == "INNER_INTUITIVE"]
-            data = plan_answer(None, outer, inner, question, query_type)
+            data = plan_answer(memories, question, query_type, _labeled_json(prompt, "明确命中的实体："))
             return json.dumps(data, ensure_ascii=False)
         if prompt.startswith("# 无损事实抽取与分类写入器"):
             utterance = re.search(r'<untrusted_utterance role="[^"]*">(.*?)</untrusted_utterance>', prompt, re.S)

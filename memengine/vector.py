@@ -6,11 +6,28 @@ import hashlib
 import math
 import re
 from collections import Counter
+from typing import Protocol
 
 import numpy as np
 
 from memengine.categories import map_categories
 from memengine.router import match_entities
+from memengine.textutil import strip_step_tags, tokenize_for_fts
+
+
+class Embedder(Protocol):
+    @property
+    def model_name(self) -> str: ...
+
+    def encode(self, texts: list[str]) -> np.ndarray: ...
+
+
+def normalize_vectors(vectors):
+    result = np.asarray(vectors, dtype="<f4")
+    if result.ndim != 2 or not result.shape[1] or not np.isfinite(result).all():
+        raise ValueError("invalid embedding vectors")
+    norms = np.linalg.norm(result, axis=1, keepdims=True)
+    return result / np.where(norms > 0, norms, 1.0)
 
 _WORD = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]", re.UNICODE)
 _LATIN = re.compile(r"[A-Za-z0-9]+")
@@ -55,6 +72,26 @@ class HashedTfidfEmbedder:
 
     def __init__(self, dim: int = 512):
         self.dim = int(dim)
+
+    @property
+    def model_name(self):
+        return f"hash-tfidf-static-v2:{self.dim}"
+
+    def encode(self, texts: list[str]) -> np.ndarray:
+        vectors = []
+        for text in texts:
+            clean = strip_step_tags(text)
+            terms = [term for term in tokenize_for_fts(clean).split() if term not in _QUERY_STOP]
+            weights = {}
+            counts = Counter(terms)
+            for term in terms:
+                if term.isascii() and term.isalpha() and len(term) >= 4:
+                    for index in range(len(term) - 2):
+                        feature = "~" + term[index:index + 3]
+                        counts[feature] += 1
+                        weights[feature] = 0.35
+            vectors.append(self._embed_counts(counts, weights))
+        return np.asarray(vectors, dtype="<f4").reshape(len(texts), self.dim)
 
     def _tf_counts(self, text: str) -> Counter:
         return Counter(tokenize(text))
@@ -143,23 +180,26 @@ def unique_facts(z_index: dict) -> list[dict]:
     return facts
 
 
-def weighted_rrf(vec_hits: list[dict], hash_hits: list[dict], w_vec: float = 0.65, w_hash: float = 0.35, k: int = 60) -> list[dict]:
+def weighted_rrf(vec_hits: list[dict], hash_hits: list[dict], w_vec: float = 0.65, w_hash: float = 0.35, k: int = 60,
+                 *, extra_channels=()) -> list[dict]:
     """Weighted Reciprocal Rank Fusion. Rank is 1-based. Identity is fact id."""
     scores: dict[str, float] = {}
     keep: dict[str, dict] = {}
-    for weight, hits in ((w_vec, vec_hits or []), (w_hash, hash_hits or [])):
+    channels = ((w_vec, vec_hits or []), (w_hash, hash_hits or []), *extra_channels)
+    total_weight = sum(weight for weight, hits in channels if hits) or 1
+    for weight, hits in channels:
         seen = set()
         for rank, fact in enumerate(hits, start=1):
             fact_id = str(fact.get("id") or "")
             if not fact_id or fact_id in seen:
                 continue
             seen.add(fact_id)
-            scores[fact_id] = scores.get(fact_id, 0.0) + weight / (k + rank)
+            scores[fact_id] = scores.get(fact_id, 0.0) + weight * fact.get("rrf_factor", 1.0) / (k + rank)
             if fact_id not in keep:
                 keep[fact_id] = dict(fact)
             else:
                 keep[fact_id] = {**fact, **keep[fact_id]}
             keep[fact_id]["rrf_score"] = scores[fact_id]
-            keep[fact_id]["rrf_norm"] = scores[fact_id] * (k + 1) / (w_vec + w_hash)
+            keep[fact_id]["rrf_norm"] = scores[fact_id] * (k + 1) / total_weight
     ordered = sorted(keep.values(), key=lambda fact: (-float(fact.get("rrf_score") or 0.0), str(fact.get("id"))))
     return ordered

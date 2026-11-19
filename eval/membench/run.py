@@ -77,9 +77,15 @@ def _choose(client, mock: bool, context: str, item: dict) -> tuple[str | None, f
     return parse_choice(raw), (time.perf_counter() - started) * 1000, tokens
 
 
+def _retrieved_facts(retrieved: dict) -> list[dict]:
+    if "ranked" in retrieved:
+        return retrieved["ranked"]
+    return [fact for key in ("hits", "outer", "inner", "belt") for fact in retrieved.get(key) or []]
+
+
 def _retrieved_texts(retrieved: dict) -> list[str]:
     texts = []
-    for fact in list(retrieved.get("hits") or []) + list(retrieved.get("outer") or []) + list(retrieved.get("inner") or []):
+    for fact in _retrieved_facts(retrieved):
         text = fact.get("text") or ""
         if text and text not in texts:
             texts.append(text)
@@ -186,6 +192,8 @@ def _eval_item_body(item: dict, engine, client, mock: bool, write_ms: list, usag
             "matched_entities": list(retrieved.get("matched_entities") or []),
             "entity_fallback": bool(retrieved.get("entity_fallback")),
             "n_outer": len(retrieved.get("outer") or []),
+            "n_belt": len(retrieved.get("belt") or []),
+            "belt_compressed_count": retrieved.get("belt_compressed_count", 0),
             "n_inner": len(retrieved.get("inner") or []),
             "n_hits": len(retrieved.get("hits") or []),
             "write_actions": write_actions,
@@ -232,9 +240,7 @@ def _write_artifact(artifacts_dir: Path, item: dict, engine, retrieved: dict, sk
                 "zkeys": fact.get("zkeys") or fact.get("z_axis_keys") or [],
                 "source_step_ids": fact.get("source_step_ids") or [],
             }
-            for fact in list(retrieved.get("hits") or [])
-            + list(retrieved.get("outer") or [])
-            + list(retrieved.get("inner") or [])
+            for fact in _retrieved_facts(retrieved)
         ],
         "retrieved_preview": [text[:400] for text in memory_texts[:10]],
         "skipped_or_noop_turns": skipped_turns,
@@ -356,7 +362,7 @@ def _item_key(item: dict) -> str:
 
 
 def _checkpoint_meta(sample: int, seed: int, mode: str, model: str | None) -> dict:
-    return {"_checkpoint_meta": True, "contract_version": 2, "sample": sample, "seed": seed, "mode": mode, "model": model}
+    return {"_checkpoint_meta": True, "contract_version": 3, "sample": sample, "seed": seed, "mode": mode, "model": model}
 
 
 def _load_checkpoint(path: Path, meta: dict | None) -> dict[str, dict]:

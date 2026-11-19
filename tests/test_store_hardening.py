@@ -20,8 +20,9 @@ def test_legacy_database_migrates_idempotently(tmp_path):
         assert store.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert store.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert store.history_tokens() == estimate_tokens("legacy dialogue")
-        assert [tuple(row) for row in store.conn.execute("SELECT zkey, key_type FROM line_zkeys")] == [("类目:影视", "category")]
-        assert tuple(store.conn.execute("SELECT user_id, role, event_time FROM ingest").fetchone()) == ("default", "user", 10)
+        assert store.get_meta("schema_version") == "2"
+        assert tuple(store.conn.execute("SELECT user_id, role, event_ts FROM raw_turns").fetchone()) == ("default", "user", 10)
+        assert not store.conn.execute("SELECT name FROM sqlite_master WHERE name IN ('ingest','line_zkeys')").fetchall()
         store.close()
 
 

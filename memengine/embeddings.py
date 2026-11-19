@@ -47,6 +47,13 @@ class OpenAICompatibleEmbedder:
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         return vectors / np.where(norms > 0, norms, 1)
 
+    @property
+    def model_name(self):
+        return f"openai:{self.url}:{self.model}"
+
+    def encode(self, texts):
+        return np.asarray(self._embed(texts), dtype="<f4")
+
     def search_many(self, queries, facts, top_n):
         if not facts or not queries or top_n <= 0:
             return [[] for _ in queries]

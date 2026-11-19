@@ -71,7 +71,7 @@ def test_unrelated_query_does_not_fall_back_to_recent_facts():
     try:
         engine.add("[step 0] user: I really dig the movie Ran\nagent: Nice.", timestamp=1.0)
         assert engine.has_facts()
-        # "What" forces the task route; casual greetings may still return no hits.
+        engine.vector = type("NoVectorMatch", (), {"search": lambda self, query, facts, top_n: []})()
         retrieved = engine.search("What should I pack for a ski trip tomorrow?")
         texts = [fact.get("text") or "" for fact in list(retrieved.get("hits") or []) + list(retrieved.get("outer") or []) + list(retrieved.get("inner") or [])]
         assert not texts

@@ -1,6 +1,6 @@
 """Step 5 write operations and 2D rendering.
 
-OVERWRITE replaces one line and archives the previous value.
+OVERWRITE supersedes one fact in the same display slot.
 APPEND is a following line inside the block (single newline).
 INSERT_ISOLATED keeps a blank line from the neighbor (double newline).
 NOOP leaves the notebook unchanged.
@@ -55,7 +55,7 @@ def _resolve_block(store, block_id: str, topic: str, timestamp: float, alias: di
 
 def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, plain: str, timestamp: float,
                    alias: dict | None = None, fact_zkeys=None, scope=DEFAULT_SCOPE, role="user",
-                   event_time=None, source_step_ids=None) -> str | None:
+                   event_time=None, source_step_ids=None, source_turn_id=None) -> str | None:
     """Apply one layout operation. Returns the line id, or None for NOOP."""
     action = op.get("action")
     if action not in ACTIONS or action == "NOOP":
@@ -64,7 +64,7 @@ def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, p
     line_id = op.get("target_line_id") or ""
     line_id = alias.get(line_id, line_id)
     if action == "DELETE_LINE":
-        return line_id if store.delete_line(line_id, timestamp=timestamp, scope=scope) else None
+        return line_id if store.delete_fact(line_id, ingest_time=timestamp, scope=scope) else None
     zkeys = [str(key) for key in (op.get("z_axis_keys") or []) if key]
     for key in fact_zkeys or []:
         key = str(key)
@@ -81,31 +81,30 @@ def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, p
     isolated = action == "INSERT_ISOLATED_LINE"
 
     if action == "OVERWRITE_SAME_LINE":
-        updated = store.update_line(line_id, formatted=formatted, plain=plain, attribute=attribute, value=str(value),
-                                    surprise=surprise, raw_dist=None, layout=action, zkeys=zkeys, timestamp=timestamp,
-                                    source_step_ids=source_step_ids, scope=scope, role=role, event_time=event_time,
-                                    is_conflict=is_conflict)
-        return line_id if updated else None
+        return store.supersede_fact(line_id, formatted=formatted, plain=plain, attribute=attribute, value=str(value),
+                                    surprise=surprise, layout=action, zkeys=zkeys, ingest_time=timestamp,
+                                    current_step_ids=source_step_ids, current_turn_id=source_turn_id, scope=scope,
+                                    role=role, event_time_start=event_time, is_conflict=is_conflict)
 
     block_id = _resolve_block(store, str(op.get("target_block_id") or "NEW"), topic, timestamp, alias,
                               scope=scope, event_time=event_time, is_conflict=is_conflict)
     if block_id is None:
         return None
-    return store.insert_line(
+    return store.insert_fact(
         block_id=block_id,
         formatted=formatted,
         plain=plain,
         attribute=attribute,
         value=str(value),
         surprise=surprise,
-        raw_dist=None,
         layout=action,
         isolated=isolated,
         zkeys=zkeys,
-        timestamp=timestamp,
+        ingest_time=timestamp,
         source_step_ids=source_step_ids,
+        source_turn_ids=[source_turn_id] if source_turn_id is not None else [],
         scope=scope,
         role=role,
-        event_time=event_time,
+        event_time_start=event_time,
         is_conflict=is_conflict,
     )
