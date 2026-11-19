@@ -134,4 +134,6 @@ prompts/            三份规格提示词
 eval/               数据生成、两条基线、指标、运行入口、results/
 tests/              pytest
 docs/DESIGN.md      步骤对照、简化决定、缺口
+docs/SPEC.md        规格原文（与所有者 Google Doc 对应）
+.github/workflows/  CI：pytest + 小规模 mock 评测冒烟
 ```
