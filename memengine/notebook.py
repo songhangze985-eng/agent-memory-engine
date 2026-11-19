@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from memengine.textutil import merge_step_ids, step_ids_in
+
 ACTIONS = {
     "OVERWRITE_SAME_LINE",
     "APPEND_ADJACENT_LINE",
@@ -47,13 +49,17 @@ def _resolve_block(store, block_id: str, topic: str, timestamp: float, alias: di
     return block_id
 
 
-def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, plain: str, timestamp: float, alias: dict | None = None) -> str | None:
+def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, plain: str, timestamp: float, alias: dict | None = None, fact_zkeys=None) -> str | None:
     """Apply one layout operation. Returns the line id, or None for NOOP."""
     action = op.get("action")
     if action not in ACTIONS or action == "NOOP":
         return None
     alias = alias if alias is not None else {}
     zkeys = [str(key) for key in (op.get("z_axis_keys") or []) if key]
+    for key in fact_zkeys or []:
+        key = str(key)
+        if key and key not in zkeys:
+            zkeys.append(key)
     try:
         surprise = float(op.get("surprise_score") if op.get("surprise_score") is not None else 0.5)
     except (TypeError, ValueError):
@@ -66,6 +72,13 @@ def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, p
         current = store.get_line(line_id) if line_id else None
         if current is not None:
             store.archive_line(current, timestamp)
+            source_ids = merge_step_ids(
+                current.get("source_step_ids"),
+                step_ids_in(current.get("plain") or current.get("text") or ""),
+                step_ids_in(current.get("formatted") or ""),
+                step_ids_in(plain or ""),
+                step_ids_in(formatted or ""),
+            )
             store.update_line(
                 line_id,
                 formatted=formatted,
@@ -78,6 +91,7 @@ def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, p
                 isolated=bool(current.get("isolated")),
                 zkeys=zkeys,
                 timestamp=timestamp,
+                source_step_ids=source_ids,
             )
             return line_id
         action = "APPEND_ADJACENT_LINE"

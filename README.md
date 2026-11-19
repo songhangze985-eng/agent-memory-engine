@@ -126,12 +126,55 @@ python3 -m eval.run_eval --scale full --out eval/results/full_eval.json
 
 原始 JSON 和这份表也在 `eval/results/small_eval.json`、`eval/results/small_eval.md`。
 
+## MemBench
+
+评测数据用官方仓库 [import-myself/Membench](https://github.com/import-myself/Membench) 的 `MemData/`（论文 [arXiv:2506.21605](https://arxiv.org/abs/2506.21605)）。README 徽章写着 MIT，仓库里没有 `LICENSE` 文件。镜像压缩包在 [Google Drive](https://drive.google.com/file/d/112Zraj4pTPH4Idph6i1uMOLA_LPFdGr0/view?usp=sharing)。论文正文用的加噪抽样在 `data2test`，这个目录不在公开 git 树里，所以下面的运行用的是分类后的 `MemData`，不是 Sub-dataset 1/2。
+
+每条轨迹 `add` 进一个新的 `CognitiveMemoryEngine`，再用 `answer` 回答四选一。准确率按论文口径：抽出的选项字母与 `ground_truth` 一致。另外用同一个作答头做两条对照：无记忆（只有问题和选项）、全上下文（整段对话加问题和选项）。有密钥时作答头是 `LLM_*` 指定的模型；没有密钥时作答头是词面重叠选择器，引擎仍走离线 mock。
+
+```bash
+python3 -m eval.membench.run --sample 20 --mode mock
+
+export LLM_BASE_URL=https://api.deepseek.com/v1
+export LLM_API_KEY=sk-...          # 或 OPENAI_API_KEY
+export LLM_MODEL=deepseek-chat
+python3 -m eval.membench.run --sample 20 --mode live --model deepseek-chat --concurrency 4 \
+  --out eval/results/membench/sample20_deepseek.json
+```
+
+`--sample` 是每一大类的条数（参与/观察 × 事实/反思）。缺的官方 JSON 会下载到 `eval/membench/.cache/MemData/`，也可以用 `--data-dir` 指向已经解压的 `MemData`。
+
+### 论文报告值（不是本次实测）
+
+来源：Tan 等，MemBench，arXiv:2506.21605，Table 5，模型 Qwen2.5-7B-Instruct，Sub-dataset 1。
+
+| 方法 | 事实·参与 | 事实·观察 | 反思·参与 | 反思·观察 |
+| --- | --- | --- | --- | --- |
+| FullMemory | 0.647 | 0.786 | 0.733 | 0.883 |
+| RetrievalMemory | 0.692 | 0.883 | 0.692 | 0.883 |
+| RecentMemory | 0.639 | 0.800 | 0.700 | 0.867 |
+
+### 本次抽样实测
+
+模式：**mock**。环境里没有 LLM API key。80 条（每类 20，种子 42）。作答头是词面重叠，引擎写入是英文整句落成孤立行。这些数字不能当作质量分数，也不能和上一张 Sub-dataset 1 的表比高低。`cost_usd` 为空。
+
+| 系统 | 参与·事实 | 参与·反思 | 观察·事实 | 观察·反思 | 总体准确率 | Recall@10 | 写入 ms/次 | 读取 ms/次 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 引擎 answer() | 30.0% | 35.0% | 50.0% | 25.0% | 35.0% | — | 7.319 | 22.131 |
+| 引擎检索 + 同一作答头 | 30.0% | 35.0% | 50.0% | 25.0% | 35.0% | 56.7% | 7.319 | 22.131 |
+| 无记忆基线 | 15.0% | 35.0% | 25.0% | 20.0% | 23.8% | — | — | — |
+| 全上下文基线 | 30.0% | 35.0% | 50.0% | 25.0% | 35.0% | — | — | — |
+
+选择题进入任务态。引擎检索的 Recall@10 是 56.7%。`answer()` 和「检索 + 同一作答头」总体 35.0%，无记忆基线 23.8%。参与·反思这一列两边都是 35.0%，其余三类引擎更高。mock 下全上下文选择器与引擎打成相同的 35.0%，因为离线作答头看到的证据文本和整段对话里的答案字符串重叠方式接近。
+
+原始结果：`eval/results/membench/sample20_mock.json`、`eval/results/membench/sample20_mock.md`。
+
 ## 目录
 
 ```
 memengine/          五步引擎、SQLite、模型客户端、抽取与策略
 prompts/            三份规格提示词
-eval/               数据生成、两条基线、指标、运行入口、results/
+eval/               合成评测、MemBench 加载与打分、results/
 tests/              pytest
 docs/DESIGN.md      步骤对照、简化决定、缺口
 docs/SPEC.md        规格原文（与所有者 Google Doc 对应）

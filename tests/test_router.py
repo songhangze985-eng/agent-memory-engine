@@ -1,4 +1,4 @@
-from memengine.router import CASUAL, TASK, route_query
+from memengine.router import CASUAL, TASK, match_entities, route_query
 
 
 KEYS = [
@@ -34,11 +34,27 @@ def test_syntax_triggers_follow_the_spec():
     assert route_query("请你帮我做一个完整的方案", []) == CASUAL
     assert len("请你帮我做一个完整的方案") == 12
     assert route_query("请你帮我做一个完整的方案哦", []) == TASK
-    # The spec regex is character-level, so 别 inside 特别 is a task hit.
-    assert route_query("今天的特别节目", []) == TASK
+    assert route_query("今天的特别节目", []) == CASUAL
+    assert route_query("你别去", []) == TASK
+
+
+def test_english_cues_use_word_boundaries_and_mcq_is_task():
+    assert route_query("hello", []) == CASUAL
+    assert route_query("Please change the meeting", []) == TASK
+    assert route_query("What is the education level of the subordinate?", []) == TASK
+    question = "What is the education level?\nA. Bachelor\nB. Associate Degree\nC. High School\nD. Master"
+    assert route_query(question, ["entity:subordinate"]) == TASK
+    assert route_query("Anniversary party", ["entity:ann"]) == CASUAL
+    assert route_query("Ann is here", ["person:Ann"]) == TASK
 
 
 def test_decision_pattern_needs_length():
     assert route_query("请帮我", []) == CASUAL
     assert route_query("门锁坏了怎么办", []) == CASUAL
     assert route_query("请帮我确认老周是不是对花生过敏，并给个方案。", KEYS) == TASK
+
+
+def test_english_entity_match_folds_simple_plurals():
+    keys = ["entity:movie", "person:Ran"]
+    assert match_entities("According to the movies I mentioned, what kind might I prefer?", keys) == ["entity:movie"]
+    assert match_entities("Anniversary party", ["entity:ann"]) == []

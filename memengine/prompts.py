@@ -9,6 +9,7 @@ _FILES = {
     "origin": "origin_boundary.txt",
     "reason": "system2_reasoner.txt",
     "layout": "notebook_layout.txt",
+    "query": "query_parser.txt",
 }
 
 

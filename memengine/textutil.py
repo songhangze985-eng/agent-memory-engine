@@ -58,3 +58,36 @@ def parse_cn_number(raw: str) -> int:
 def split_sentences(text: str) -> list[str]:
     parts = re.split(r"[。！？!\n]+", text or "")
     return [part.strip() for part in parts if part.strip()]
+
+
+_STEP_TAG = re.compile(r"\[step (\d+)\]")
+
+
+def step_ids_in(text: str) -> list[int]:
+    """Preserve first-seen order of ``[step N]`` markers."""
+    found: list[int] = []
+    for match in _STEP_TAG.finditer(text or ""):
+        step = int(match.group(1))
+        if step not in found:
+            found.append(step)
+    return found
+
+
+def merge_step_ids(*groups) -> list[int]:
+    found: list[int] = []
+    for group in groups:
+        for step in group or []:
+            step = int(step)
+            if step not in found:
+                found.append(step)
+    return found
+
+
+def ensure_step_tags(text: str, ids) -> str:
+    """Make sure every source step id appears as a ``[step N]`` tag in text."""
+    raw = text or ""
+    missing = [int(step) for step in (ids or []) if f"[step {int(step)}]" not in raw]
+    if not missing:
+        return raw
+    prefix = " ".join(f"[step {step}]" for step in missing)
+    return f"{prefix} {raw}".strip()

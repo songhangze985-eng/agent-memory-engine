@@ -9,12 +9,18 @@ from __future__ import annotations
 
 import re
 
+from memengine.categories import attach_dual_zkeys
 from memengine.textutil import split_sentences
 
 _GREETING = re.compile(
-    r"^(你好|您好|嗨|早上好|晚上好|哈哈|呵呵|谢谢|再见|周末愉快|辛苦啦|最近还好吗|吃过饭了吗|今天天气真好|好的|在吗)"
+    r"^(你好|您好|嗨|早上好|晚上好|哈哈|呵呵|谢谢|再见|周末愉快|辛苦啦|最近还好吗|吃过饭了吗|今天天气真好|好的|在吗|"
+    r"hi|hello|hey|thanks|thank you|ok|okay|goodbye|bye)"
     r"[啊呀呢吧!！。.~～\s]*$",
     re.IGNORECASE,
+)
+_STOP = frozenset(
+    "the and for are was were you your that this with from have has had not can but "
+    "his her its our their what which who when where why how about into over than then".split()
 )
 
 
@@ -28,9 +34,10 @@ def is_greeting(text: str) -> bool:
 
 
 def _fact(text, zkeys, attribute, value, topic, isolated) -> dict:
+    body = text.strip()
     return {
-        "text": text.strip(),
-        "zkeys": list(zkeys),
+        "text": body,
+        "zkeys": attach_dual_zkeys(zkeys, body),
         "attribute": attribute,
         "value": str(value),
         "topic": topic,
@@ -146,6 +153,42 @@ def _from_sentence(sentence: str) -> dict | None:
     return None
 
 
+def english_entity_keys(text: str) -> list[str]:
+    """Crude Z keys for an English turn: proper names plus content tokens."""
+    keys = []
+    seen = set()
+    for name in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b", text or ""):
+        if name.lower() in _STOP:
+            continue
+        key = f"person:{name}"
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    for token in re.findall(r"[A-Za-z]{3,}|\d{2,}", text or ""):
+        folded = token.lower()
+        if folded in _STOP:
+            continue
+        key = f"entity:{folded}"
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+        if len(keys) >= 12:
+            break
+    return keys
+
+
+def english_turn_fact(text: str) -> dict | None:
+    raw = (text or "").strip()
+    if not raw or re.search(r"[\u4e00-\u9fff]", raw):
+        return None
+    keys = english_entity_keys(raw)
+    if not keys:
+        return None
+    step = re.search(r"\[step (\d+)\]", raw)
+    attribute = f"turn:{step.group(1)}" if step else "turn"
+    return _fact(raw, keys, attribute, raw[:80], "dialogue", True)
+
+
 def extract_facts(text: str) -> list[dict]:
     if is_greeting(text):
         return []
@@ -160,4 +203,7 @@ def extract_facts(text: str) -> list[dict]:
             continue
         seen.add(marker)
         found.append(fact)
-    return found
+    if found or re.search(r"[\u4e00-\u9fff]", text or ""):
+        return found
+    fallback = english_turn_fact(text or "")
+    return [fallback] if fallback else []
