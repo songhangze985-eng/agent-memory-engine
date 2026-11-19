@@ -1,15 +1,29 @@
+from importlib.resources import files
+
 from memengine.extract import extract_facts
 from memengine.llm import MockLLMClient, loads_json_object
 from memengine.prompts import load_prompt, prompt_dir, render_prompt
 
 
+_PROMPT_FILES = (
+    "origin_boundary.txt",
+    "system2_reasoner.txt",
+    "notebook_layout.txt",
+    "query_parser.txt",
+    "query_origin_controller.txt",
+)
+
+
 def test_prompt_dir_resolves_spec_files():
     directory = prompt_dir()
-    assert (directory / "origin_boundary.txt").is_file()
-    assert (directory / "system2_reasoner.txt").is_file()
-    assert (directory / "notebook_layout.txt").is_file()
-    assert (directory / "query_parser.txt").is_file()
-    assert (directory / "query_origin_controller.txt").is_file()
+    for name in _PROMPT_FILES:
+        assert (directory / name).is_file()
+
+
+def test_prompt_templates_resolve_via_importlib_resources():
+    root = files("prompts")
+    for name in _PROMPT_FILES:
+        assert root.joinpath(name).read_text(encoding="utf-8").strip()
 
 
 def test_prompt_files_keep_the_spec_contract():

@@ -17,5 +17,23 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Unit tests
         run: python3 -m pytest -q
+      - name: Non-editable wheel can answer
+        run: |
+          set -euo pipefail
+          python3 -m pip wheel . --no-deps -w /tmp/memengine-wheel
+          python3 -m venv /tmp/memengine-wheel-venv
+          /tmp/memengine-wheel-venv/bin/pip install --disable-pip-version-check /tmp/memengine-wheel/*.whl
+          cd /tmp
+          /tmp/memengine-wheel-venv/bin/python - <<'PY'
+          from memengine import CognitiveMemoryEngine
+          from memengine.llm import MockLLMClient
+
+          engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient())
+          engine.add("老周对苯甲酸钠过敏。")
+          result = engine.answer("老周对哪种防腐剂过敏？")
+          if not result["response"]:
+              raise SystemExit(f"empty answer: {result!r}")
+          print(result["response"])
+          PY
       - name: Small mock eval smoke
         run: python3 -m eval.run_eval --scale small --mode mock --out /tmp/small_eval.json
