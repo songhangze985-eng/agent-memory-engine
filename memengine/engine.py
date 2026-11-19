@@ -311,7 +311,9 @@ class CognitiveMemoryEngine:
         with self.store.read_snapshot():
             keyed = self.store.entity_keys(scope=scope)
             direct = match_entities(query, keyed)
-            if (self.enable_casual_bypass and not direct and not parsed["entities"] and not parsed["categories"]
+            # Category words such as 城市 are not task intent. The rule router still
+            # requires an entity hit or a task cue before leaving the casual bypass.
+            if (self.enable_casual_bypass and not direct and not parsed["entities"]
                     and parsed["query_type"] == "FACTUAL" and not _RECALL_CUE.search(query)
                     and route_query(query, ()) == CASUAL):
                 return result(CASUAL, parsed)

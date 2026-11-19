@@ -175,6 +175,21 @@ def test_category_hub_and_noise_never_expand_as_graph_edges():
     assert [fact["plain"] for fact in result["ranked"] if fact["entity_anchor"]] == [hashed[0]["plain"]]
 
 
+def test_category_word_alone_stays_casual_and_does_not_speak_unrelated_facts():
+    engine = _engine()
+    engine.add("李楠将前往青岛参加供应商会谈。", timestamp=1)
+    engine.add("老周对苯甲酸钠过敏，不能食用含该防腐剂的食品。", timestamp=2)
+    query = "海边城市适合散步吗"
+    result = engine.retrieve(query, timestamp=3)
+    assert result["parsed_query"]["categories"] == ["类目:地点"]
+    assert result["route"] == CASUAL and result["empty_retrieval"]
+    answer = engine.answer(query, timestamp=3, retrieved=result)
+    assert answer["response"] == ""
+    assert "供应商会谈" not in answer["response"] and "苯甲酸钠" not in answer["response"]
+    asked = engine.retrieve("李楠将前往青岛参加什么？", timestamp=4, read_only=True)
+    assert asked["route"] == TASK and "供应商会谈" in asked["context"]
+
+
 def test_origin_hints_do_not_create_entity_anchors_or_sort_by_semantic_distance():
     engine = _engine(enable_casual_bypass=False)
     engine.add("老周对苯甲酸钠过敏，不能食用含该防腐剂的食品。", timestamp=1)
