@@ -9,6 +9,7 @@ def test_prompt_dir_resolves_spec_files():
     assert (directory / "system2_reasoner.txt").is_file()
     assert (directory / "notebook_layout.txt").is_file()
     assert (directory / "query_parser.txt").is_file()
+    assert (directory / "query_origin_controller.txt").is_file()
 
 
 def test_prompt_files_keep_the_spec_contract():
@@ -21,13 +22,13 @@ def test_prompt_files_keep_the_spec_contract():
     assert "慢系统综合推理与作答器" in reason
     assert "只读隔离" in reason
     assert "{retrieved_top_k_memories}" in reason
-    assert "{user_question_with_options}" in reason
+    assert "{user_question}" in reason
     assert "无损事实抽取与分类写入器" in layout
     assert "{raw_turn_text}" in layout
     assert "{step_id}" in layout
     assert "{query_stem}" in query
     assert "查询路由与上位类目解析器" in query
-    for action in ("OVERWRITE_SAME_LINE", "APPEND_ADJACENT_LINE", "INSERT_ISOLATED_LINE", "NOOP"):
+    for action in ("OVERWRITE_SAME_LINE", "APPEND_ADJACENT_LINE", "INSERT_ISOLATED_LINE", "DELETE_LINE", "NOOP"):
         assert action in layout
     for name in ("影视", "书籍", "音乐", "饮食", "地点", "人物", "消费", "工作学习", "运动健康", "日程计划", "兴趣习惯", "情绪观点"):
         assert name in layout
@@ -63,11 +64,12 @@ def test_mock_client_fills_all_contracts():
         "reason",
         query_type="FACTUAL",
         retrieved_top_k_memories=outer,
-        user_question_with_options="老周对哪种防腐剂过敏？",
+        user_question='"老周对哪种防腐剂过敏？"',
     )
     reason_data = loads_json_object(client.complete(reason))
     assert "苯甲酸钠" in reason_data["final_answer"]
     assert "write_operations" not in reason_data
+    assert set(reason_data) == {"evidence_synthesis", "anti_intuitive_override", "rejected_noise_ids", "final_answer"}
 
     facts = extract_facts("老周对苯甲酸钠过敏，不能食用含该防腐剂的食品。")
     layout = render_prompt(

@@ -7,7 +7,7 @@ from memengine.categories import (
 )
 from memengine.engine import CognitiveMemoryEngine
 from memengine.llm import MockLLMClient
-from memengine.queryparse import normalize_parsed_query, parse_query_rules, strip_query_options
+from memengine.queryparse import normalize_parsed_query, parse_query_rules
 from memengine.vector import weighted_rrf
 
 
@@ -66,17 +66,16 @@ def test_weighted_rrf_prefers_vector_ranks_by_default():
     assert set(ids) == {"v1", "both", "v3", "h1"}
 
 
-def test_retrieve_never_returns_empty_when_store_has_facts():
+def test_unrelated_query_does_not_fall_back_to_recent_facts():
     engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient())
     try:
         engine.add("[step 0] user: I really dig the movie Ran\nagent: Nice.", timestamp=1.0)
         assert engine.has_facts()
-        # "What" forces the task route; casual greetings may still return no hits.
+        engine.vector = type("NoVectorMatch", (), {"search": lambda self, query, facts, top_n: []})()
         retrieved = engine.search("What should I pack for a ski trip tomorrow?")
         texts = [fact.get("text") or "" for fact in list(retrieved.get("hits") or []) + list(retrieved.get("outer") or []) + list(retrieved.get("inner") or [])]
-        assert texts
-        assert retrieved["empty_retrieval"] is False
-        assert any("Ran" in text for text in texts)
+        assert not texts
+        assert retrieved["empty_retrieval"] is True
     finally:
         engine.store.close()
 
@@ -96,12 +95,12 @@ def test_search_uses_question_stem_and_ignores_options():
     formatted = format_question(item)
     assert "Zucchini" in formatted and "Ran" in formatted
     assert "Zucchini" not in stem and "Alpine" not in stem
-    assert strip_query_options(formatted) == stem or strip_mcq_options(formatted) == stem
+    assert strip_mcq_options(formatted) == stem
 
     engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient())
     try:
         engine.add("[step 0] user: I really dig the movie Ran\nagent: Nice.", timestamp=1.0)
-        retrieved = engine.search(formatted)
+        retrieved = engine.search(stem)
         parsed = retrieved["parsed_query"]
         blob = " ".join(
             [

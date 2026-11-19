@@ -7,3 +7,5 @@ __pycache__/
 *.sqlite
 .mypy_cache/
 eval/membench/.cache/
+eval/locomo/.cache/
+eval/longmemeval/.cache/

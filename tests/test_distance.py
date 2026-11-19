@@ -27,7 +27,7 @@ def test_identical_anchor_can_be_raw_zero_but_not_asymptotic_zero():
     assert asymptotic_distance(raw) == 0.05
 
 
-def test_isolated_lines_stay_outside_the_default_radius():
+def test_layout_and_surprise_do_not_change_semantic_distance():
     fact = {
         "text": "工作安排周会时间",
         "surprise": 0.1,
@@ -35,4 +35,4 @@ def test_isolated_lines_stay_outside_the_default_radius():
         "isolated": True,
     }
     origin = {"x_topic": "工作安排", "y_subtopic": "周会时间", "decision_anchor": "工作安排周会时间"}
-    assert compute_raw_dist(fact, origin) >= 0.72
+    assert compute_raw_dist(fact, origin) == compute_raw_dist({**fact, "isolated": False, "layout": "APPEND_ADJACENT_LINE", "surprise": 0.9}, origin)

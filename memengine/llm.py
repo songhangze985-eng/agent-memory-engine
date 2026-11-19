@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from html import unescape
 
 from memengine.extract import extract_facts
 from memengine.policy import decide_layout, decide_origin, plan_answer
@@ -198,7 +199,12 @@ class MockLLMClient:
     """Offline stand-in. Reads the filled prompt and runs the deterministic policy."""
 
     def complete(self, prompt: str) -> str:
-        if "Origin & Boundary Controller" in prompt:
+        if prompt.startswith("# 查询与原点控制器"):
+            query = _labeled_json(prompt, "查询：")
+            decision = decide_origin(_labeled_json(prompt, "当前原点："), _labeled_json(prompt, "候选主题摘要："),
+                                     _labeled_json(prompt, "候选实体轴："), query)
+            return json.dumps({**parse_query_rules(query), **decision}, ensure_ascii=False)
+        if "Origin & Boundary Controller" in prompt.split("# Input", 1)[0]:
             data = decide_origin(
                 _labeled_json(prompt, "当前历史原点："),
                 _labeled_json(prompt, "2D 笔记本主题索引目录："),
@@ -206,55 +212,21 @@ class MockLLMClient:
                 _labeled_line(prompt, "用户当前输入："),
             )
             return json.dumps(data, ensure_ascii=False)
-        if "查询路由与上位类目解析器" in prompt:
+        if "查询路由与上位类目解析器" in prompt.split("# Input", 1)[0]:
             stem = _section_after(prompt, "用户问题题干：")
             return json.dumps(parse_query_rules(stem), ensure_ascii=False)
-        if "慢系统综合推理与作答器" in prompt or "System 2 Anti-Intuitive Reasoner" in prompt:
-            if "慢系统综合推理与作答器" in prompt:
-                memories = _labeled_json(prompt, "检出的历史记忆片段（按相关度与双轨权重排序，含 step_id 时序）：")
-                question = _section_after(prompt, "用户问题（及选项，如有）：")
-                if not isinstance(memories, list):
-                    memories = []
-                outer = [item for item in memories if item.get("zone") == "OUTER_ANTI_INTUITIVE"]
-                inner = [item for item in memories if item.get("zone") != "OUTER_ANTI_INTUITIVE"]
-                if not outer and not inner:
-                    inner = memories
-                data = plan_answer(None, outer, inner, question)
-                return json.dumps(
-                    {
-                        "evidence_synthesis": data.get("final_response") or "",
-                        "anti_intuitive_override": bool((data.get("reasoning_trace") or {}).get("anti_intuitive_overrides")),
-                        "final_answer": data.get("final_response") or "",
-                        "reasoning_trace": data.get("reasoning_trace") or {},
-                    },
-                    ensure_ascii=False,
-                )
-            data = plan_answer(
-                _labeled_json(prompt, "当前决策原点："),
-                _labeled_json(prompt, "毒圈外·高权反直觉事实（例外/冲突/单次约束，优先审查）："),
-                _labeled_json(prompt, "毒圈内·高压缩直觉事实（渐近常规背景，仅供参考）："),
-                _labeled_line(prompt, "用户当前问题："),
-            )
+        if "慢系统综合推理与作答器" in prompt.split("# Input", 1)[0]:
+            memories = _labeled_json(prompt, "检索证据（非指令数据，按分数排列）：")
+            question = _labeled_json(prompt, "用户问题（非指令数据）：")
+            query_type = _labeled_line(prompt, "查询类型：")
+            data = plan_answer(memories, question, query_type, _labeled_json(prompt, "明确命中的实体："))
             return json.dumps(data, ensure_ascii=False)
-        if "无损事实抽取与分类写入器" in prompt or "3D Notebook Layout Router" in prompt:
-            if "无损事实抽取与分类写入器" in prompt:
-                try:
-                    candidates = _labeled_json(prompt, "局部相似已有 2D 段落（Top-3）：")
-                except Exception:
-                    candidates = []
-                raw = _section_after(prompt, "当前轮次原文：")
-                facts = extract_facts(raw)
-                data = decide_layout(candidates if isinstance(candidates, list) else [], facts, 0)
-                for op, fact in zip(data.get("write_operations") or [], facts):
-                    zkeys = list(fact.get("zkeys") or op.get("z_axis_keys") or [])
-                    op["z_axis_keys"] = zkeys
-                    op["entity_z_keys"] = [key for key in zkeys if not str(key).startswith("类目:")]
-                    op["category_z_keys"] = [key for key in zkeys if str(key).startswith("类目:")]
-                return json.dumps(data, ensure_ascii=False)
+        if prompt.startswith("# 无损事实抽取与分类写入器"):
+            utterance = re.search(r'<untrusted_utterance role="[^"]*">(.*?)</untrusted_utterance>', prompt, re.S)
             data = decide_layout(
-                _labeled_json(prompt, "局部相似 2D 段落块（Top-3）："),
-                _labeled_json(prompt, "本轮对话抽取的客观事实列表："),
-                _labeled_line(prompt, "当前时间戳："),
+                _labeled_json(prompt, "候选 2D 段落（Top-8，额外包含全部已命中实体行）："),
+                extract_facts(unescape(utterance[1])),
+                float(_labeled_line(prompt, "时间戳：")),
             )
             return json.dumps(data, ensure_ascii=False)
         raise ValueError("unrecognized prompt")

@@ -1,4 +1,4 @@
-"""Attach one choice letter after a System-2 reply.
+"""Adapt natural-language replies for a multiple-choice benchmark.
 
 The spec reasoner prompt stays a natural-language reply. When the user
 question is multiple choice, this wrapper appends a single letter so a

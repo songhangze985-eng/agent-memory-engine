@@ -1,666 +1,544 @@
-"""Cognitive memory engine: add / search / answer over the five-step pipeline."""
+"""Scoped 2D notebook, poison-circle retrieval and read-only System 2."""
 
 from __future__ import annotations
 
+import json
+import re
 import time
+from datetime import datetime, timezone
+from html import escape
 from typing import Callable
 
-from memengine.categories import attach_dual_zkeys
-from memengine.distance import asymptotic_distance, compute_raw_dist
-from memengine.extract import english_entity_keys, extract_facts, is_greeting
-from memengine.llm import MockLLMClient, loads_json_object
-from memengine.mcq import end_with_choice
-from memengine.notebook import apply_write_op, format_fact_line, render_block
+from memengine.categories import GENERAL_CATEGORY
+from memengine.distance import (BELT, EPSILON, INNER, NEWS_KEY, NEWS_TOPIC, OUTER,
+                                consolidation_count, inner_boundary, is_noise, score_bipolar, unit_interval)
+from memengine.embeddings import OpenAICompatibleEmbedder
+from memengine.extract import extract_facts, is_greeting
+from memengine.llm import FatalLLMError, MockLLMClient, loads_json_object
+from memengine.notebook import ACTIONS, apply_write_op, format_fact_line, line_body, render_block
 from memengine.policy import decide_layout, decide_origin, plan_answer
 from memengine.prompts import render_prompt
-from memengine.queryparse import normalize_parsed_query, parse_query_rules, strip_query_options
-from memengine.router import CASUAL, TASK, entity_names, match_entities, route_query
-from memengine.store import Store
-from memengine.textutil import char_bigrams, estimate_tokens, jaccard, step_ids_in
+from memengine.queryparse import parse_query_rules
+from memengine.router import CASUAL, TASK, match_entities, route_query
+from memengine.store import DEFAULT_SCOPE, Store, key_type
+from memengine.temporal import absolute_event_text, parse_temporal_intent
+from memengine.textutil import char_bigrams, estimate_tokens, jaccard, normalize_entity, step_ids_in
 from memengine.timeline import TimelineBook
-from memengine.vector import HashedTfidfEmbedder, unique_facts, weighted_rrf
-from memengine.zaxis import collapse_and_scan_z_axis, expand_entities, order_far_to_near
+from memengine.vector import HashedTfidfEmbedder, weighted_rrf
+from memengine.zaxis import collapse_and_scan_z_axis, order_far_to_near
 
-CASUAL_REPLY = "好的，我在。需要我帮你处理具体事情时直接说就行。"
-NEWS_TOPIC = "时事杂讯"
-NEWS_KEY = "话题:时事杂讯"
-_NOISE_MIN = 16
+_RECALL_CUE = re.compile(r"记得|回忆|偏好|爱看|喜欢|\b(?:remember|recall|prefer|like)\b", re.I)
+_QUESTION_CUE = re.compile(r"[?？]|啥|什么|哪|\b(?:what|which|who|when|where|why|how)\b", re.I)
+_DELETE_CUE = re.compile(r"忘掉|忘记|删除|撤销|取消|不再|已经不|\b(?:forget|remove|delete|cancel|no longer|not anymore)\b", re.I)
 
 
 class CognitiveMemoryEngine:
-    def __init__(
-        self,
-        db_path: str = ":memory:",
-        llm=None,
-        delta_t_buffer: float = 10.0,
-        epsilon: float = 0.05,
-        enable_timeline_buffer: bool = True,
-        enable_casual_bypass: bool = True,
-        clock: Callable[[], float] | None = None,
-        vector=None,
-    ):
-        self.store = Store(db_path)
-        self.llm = llm if llm is not None else MockLLMClient()
-        self.vector = vector if vector is not None else HashedTfidfEmbedder()
+    def __init__(self, db_path: str = ":memory:", llm=None, delta_t_buffer: float = 10.0,
+                 epsilon: float = EPSILON, enable_timeline_buffer: bool = True,
+                 enable_casual_bypass: bool = True, clock: Callable[[], float] | None = None,
+                 vector=None, *, categories: list[str] | None = None, bipolar_lambda: float = 0.50,
+                 belt_prune_ratio: float = 0.35, min_keep: int = 2):
         self.epsilon = float(epsilon)
+        if not 0 < self.epsilon <= 1:
+            raise ValueError("epsilon must be in (0, 1]")
+        self.bipolar_lambda = float(bipolar_lambda)
+        if not 0 <= self.bipolar_lambda <= 1:
+            raise ValueError("bipolar_lambda must be in [0, 1]")
+        self.belt_prune_ratio = float(belt_prune_ratio)
+        self.min_keep = min_keep
+        _validate_belt_config(self.belt_prune_ratio, min_keep)
+        self.llm = llm if llm is not None else MockLLMClient()
+        self.vector = vector if vector is not None else OpenAICompatibleEmbedder.from_env() or HashedTfidfEmbedder()
+        self.store = Store(db_path, embedder=self.vector)
         self.enable_casual_bypass = bool(enable_casual_bypass)
+        self.categories = tuple(dict.fromkeys(name.strip() for name in (categories or []) if name.strip()))
         self.timeline = TimelineBook(delta_t_buffer, enabled=enable_timeline_buffer)
         self.timeline.layer1 = self.store.load_timeline(1)
         self.timeline.layer2 = self.store.load_timeline(2)
-        self.timeline.events = int(self.store.get_meta("timeline_events") or "0")
-        self.origin = self._load_origin()
-        stored_radius = self.store.get_meta("radius")
-        self.radius = float(stored_radius) if stored_radius is not None else 0.45
+        self.timeline.events = int(self.store.get_meta("timeline_events") or 0)
+        self.origin, self.radius = self._control_state(DEFAULT_SCOPE)
         self.pending: list[dict] = []
         self.fallback_count = 0
+        self._base_clock = clock
         self._clock = clock
 
     def _now(self) -> float:
-        if self._clock is not None:
-            return float(self._clock())
-        return time.time()
+        return float(self._clock()) if self._clock is not None else time.time()
 
     def set_time(self, timestamp: float) -> None:
         stamp = float(timestamp)
+        self._clock = lambda: stamp
 
-        def _fixed() -> float:
-            return stamp
+    def reset_clock(self) -> None:
+        self._clock = self._base_clock
 
-        self._clock = _fixed
+    @staticmethod
+    def _control_key(scope):
+        return "control:" + json.dumps(scope, ensure_ascii=False)
 
-    def _load_origin(self) -> dict | None:
-        raw = self.store.get_meta("origin")
-        if not raw:
-            return None
-        import json
+    def _control_state(self, scope):
+        raw = self.store.get_meta(self._control_key(scope))
+        if raw is not None:
+            data = json.loads(raw)
+            return data["origin"], inner_boundary(unit_interval(data["radius"], 0.25))
+        if scope == DEFAULT_SCOPE:
+            legacy = self.store.get_meta("origin")
+            radius = unit_interval(self.store.get_meta("radius"), 0.25)
+            return (json.loads(legacy) if legacy else None), inner_boundary(radius)
+        return None, 0.25
 
-        return json.loads(raw)
+    def _record_timeline(self, layer, payload, now, scope, event_time=None):
+        position, last = self.store.last_timeline_node(layer, scope=scope)
+        tail = [last] if last else []
+        self.timeline.buffer(tail, payload, now)
+        if last is None or len(tail) > 1:
+            position += 1
+        node = tail[-1]
+        self.store.save_timeline_node(layer, position, node, scope=scope, event_time=event_time)
+        if scope == DEFAULT_SCOPE:
+            events = int(self.store.get_meta("timeline_events") or 0) + 1
+            self.store.set_meta("timeline_events", str(events))
+            return layer, position, node, events
+        return None
 
-    def _save_control_state(self) -> None:
-        import json
+    def _refresh_timeline(self, change):
+        if change is None:
+            return
+        layer, position, node, events = change
+        nodes = self.timeline.layer1 if layer == 1 else self.timeline.layer2
+        if events != self.timeline.events + 1 or position > len(nodes):
+            self.timeline.layer1 = self.store.load_timeline(1)
+            self.timeline.layer2 = self.store.load_timeline(2)
+        else:
+            nodes[position:position + 1] = [node]
+        self.timeline.events = events
 
-        self.store.set_meta("origin", json.dumps(self.origin or {}, ensure_ascii=False))
-        self.store.set_meta("radius", str(self.radius))
-        self.store.replace_timeline(1, self.timeline.layer1)
-        self.store.replace_timeline(2, self.timeline.layer2)
-        self.store.set_meta("timeline_events", str(self.timeline.events))
+    def add(self, text: str, timestamp: float | None = None, sync: bool = True, *, user_id="default",
+            agent_id="default", session_id="default", role="user", event_time=None) -> dict:
+        now = float(timestamp) if timestamp is not None else self._now()
+        scope = (user_id, agent_id, session_id)
+        turn_id = self.store.append_turn(text or "", now, scope=scope, role=role, event_ts=event_time)
+        facts = extract_facts(text or "") if isinstance(self.llm, MockLLMClient) else []
+        job = {"text": text or "", "ts": now, "scope": scope, "role": role, "facts": facts,
+               "turn_id": turn_id, "event_time": float(event_time) if event_time is not None else None}
+        if not sync:
+            self.pending.append(job)
+            return {"facts": facts, "operations": [], "queued": True, "turn_id": turn_id}
+        self.drain(user_id=user_id, agent_id=agent_id)
+        return self._apply_job(job)
 
-    def add(self, text: str, timestamp: float | None = None, sync: bool = True) -> dict:
-        """Ingest one turn. Writes run inline unless ``sync`` is false."""
-        if timestamp is not None:
-            self.set_time(timestamp)
-        now = self._now()
-        self.store.append_ingest(text or "", now)
-        facts = extract_facts(text or "")
-        if not facts and not self._using_mock() and not is_greeting(text or ""):
-            facts = self._llm_extract(text or "")
-        job = {"text": text or "", "facts": facts, "ts": now, "noise": False, "ops": []}
-        if facts:
-            candidates = self._candidate_blocks(facts)
-            step_id = (step_ids_in(text or "") or [""])[0]
-            prompt = render_prompt(
-                "layout",
-                step_id=str(step_id),
-                candidate_2d_blocks=candidates,
-                raw_turn_text=text or "",
-            )
-            data, _used_fallback = self._call_json(
-                prompt,
-                lambda: decide_layout(candidates, facts, now),
-                required=("write_operations",),
-            )
-            job["ops"] = list(data.get("write_operations") or [])
-        elif not is_greeting(text or "") and len((text or "").strip()) >= _NOISE_MIN:
-            job["noise"] = True
-        if sync:
-            applied = self._apply_job(job)
-            self.store.commit()
-            return {"facts": facts, "operations": applied, "queued": False}
-        self.pending.append(job)
-        self.store.commit()
-        return {"facts": facts, "operations": [], "queued": True}
-
-    def drain(self) -> list[dict]:
-        applied: list[dict] = []
-        while self.pending:
-            applied.extend(self._apply_job(self.pending.pop(0)))
-        self.store.commit()
+    def drain(self, *, user_id=None, agent_id=None) -> list[dict]:
+        applied = []
+        for job in tuple(self.pending):
+            if ((user_id is not None and job["scope"][0] != user_id)
+                    or (agent_id is not None and job["scope"][1] != agent_id)):
+                continue
+            applied.extend(self._apply_job(job)["operations"])
+            self.pending.remove(job)
         return applied
 
-    def search(self, query: str, timestamp: float | None = None) -> dict:
-        """Route and retrieve. Task path moves the origin; it does not run system 2.
+    def _candidate_blocks(self, text, scope, facts):
+        blocks = self.store.blocks_for_prompt(scope=scope)
+        graph_keys = {key for block in blocks for line in block["lines"] for key in line["entity_z_keys"]}
+        explicit = {normalize_entity(key) for key in match_entities(text, graph_keys)}
+        explicit.update(normalize_entity(key) for fact in facts for key in fact.get("zkeys", []) if key_type(key) == "entity")
+        topics = {fact.get("topic") for fact in facts}
+        query_grams = char_bigrams(text)
+        ranked = sorted(blocks, key=lambda block: (block["topic"] in topics, jaccard(
+            query_grams, char_bigrams(block["topic"] + " " + " ".join(line["plain"] for line in block["lines"][-3:])))), reverse=True)
+        candidates = []
+        for rank, block in enumerate(ranked):
+            lines = block["lines"]
+            pinned = {line["id"] for line in lines if explicit.intersection(map(normalize_entity, line["entity_z_keys"]))}
+            if rank >= 8 and not pinned:
+                continue
+            recent = {line["id"] for line in lines[-5:]} if rank < 8 else set()
+            fields = ("id", "text", "formatted", "attribute", "value", "zkeys", "isolated")
+            candidates.append({"id": block["id"], "topic": block["topic"], "lines": [
+                {field: line[field] for field in fields} for line in lines if line["id"] in pinned | recent]})
+        return candidates
 
-        Query parsing, Z-hash, and the vector channel all use the question stem
-        only (multiple-choice options are stripped). Poison-circle geometry and
-        the overlap reranker are unchanged.
-        """
-        if timestamp is not None:
-            self.set_time(timestamp)
-        started = time.perf_counter()
-        stem = strip_query_options(query)
-        parsed = self._parse_query(stem)
-        index = self.store.z_index()
-        route = route_query(stem, index.keys()) if self.enable_casual_bypass else TASK
-        history_tokens = estimate_tokens(self.store.history_text())
-        if route == CASUAL:
-            hits = self._hash_lookup(stem, index)
-            elapsed = (time.perf_counter() - started) * 1000
-            return {
-                "route": CASUAL,
-                "hits": hits,
-                "outer": [],
-                "inner": [],
-                "origin": self.origin,
-                "radius": self.radius,
-                "matched_entities": list(parsed.get("entities") or []),
-                "entity_fallback": False,
-                "empty_retrieval": not hits,
-                "parsed_query": parsed,
-                "scan_far_to_near": [],
-                "retrieval_ms": elapsed,
-                "context_tokens": estimate_tokens("\n".join(hit["text"] for hit in hits)),
-                "history_tokens": history_tokens,
-            }
-        merged, empty_retrieval = self._dual_channel_candidates(stem, parsed)
-        direct = match_entities(stem, index.keys())
-        parsed_keys = [str(key) for key in list(parsed.get("entities") or []) + list(parsed.get("categories") or []) if key]
-        if direct or parsed_keys:
-            expanded = expand_entities(index, list(direct) + parsed_keys, hops=2)
-        elif index:
-            expanded = list(index.keys())
+    def _apply_job(self, job) -> dict:
+        text, now, scope = job["text"], job["ts"], job["scope"]
+        facts = job["facts"]
+        step_ids = step_ids_in(text)
+        greeting = is_greeting(text)
+        candidates = [] if greeting else self._candidate_blocks(text, scope, facts)
+        change = None
+        if greeting:
+            ops = []
+        elif isinstance(self.llm, MockLLMClient):
+            ops = decide_layout(candidates, facts, now)["write_operations"]
+            if not facts and len(text.strip()) >= 16:
+                existing = next((block for block in candidates if block["topic"] == NEWS_TOPIC), None)
+                ops = [{"action": "APPEND_ADJACENT_LINE", "target_block_id": existing["id"] if existing else "NEW",
+                        "topic": NEWS_TOPIC, "formatted_line": format_fact_line(now, text), "z_axis_keys": [NEWS_KEY]}]
         else:
-            expanded = []
-        scan_keys = sorted(set(direct) | set(parsed_keys) | set(expanded))
-        notebook_index = self._notebook_index()
-        origin_prompt = render_prompt(
-            "origin",
-            current_origin_json=self.origin or {},
-            notebook_2d_index=notebook_index,
-            matched_z_entities=scan_keys,
-            user_query=stem,
-        )
-        decision, _used_fallback = self._call_json(
-            origin_prompt,
-            lambda: decide_origin(self.origin, notebook_index, scan_keys, stem),
-            required=("new_origin", "poison_circle"),
-        )
-        if not _valid_origin(decision):
-            self.fallback_count += 1
-            decision = decide_origin(self.origin, notebook_index, scan_keys, stem)
-        new_origin = decision["new_origin"]
-        circle = decision["poison_circle"]
-        radius = float(circle.get("radius_r", 0.45))
-        self.radius = min(1.0, max(self.epsilon, radius))
-        self.origin = {
-            "x_topic": str(new_origin.get("x_topic") or "未归类"),
-            "y_subtopic": str(new_origin.get("y_subtopic") or "总览"),
-            "decision_anchor": str(new_origin.get("decision_anchor") or stem[:80]),
-        }
-        now = self._now()
-        self.timeline.record(1, {"origin": self.origin}, now)
-        far_to_near = order_far_to_near(circle.get("z_axis_scan_order_far_to_near") or [], scan_keys)
-        tagged = []
-        seen = set()
-        for fact in merged:
-            item = dict(fact)
-            item["raw_dist"] = compute_raw_dist(item, self.origin)
-            item["d_asymp"] = asymptotic_distance(item["raw_dist"], self.epsilon)
-            item["zone"] = "INNER_INTUITIVE" if item["d_asymp"] <= self.radius else "OUTER_ANTI_INTUITIVE"
-            tagged.append(item)
-            seen.add(item.get("id"))
-        ranked = self.existing_rerank(stem, tagged, top_k=10)
-        if _is_time_travel(stem):
-            line_ids = []
-            seen_lines = set()
-            for key in far_to_near:
-                for fact in index.get(key, []):
-                    if fact["id"] not in seen_lines:
-                        seen_lines.add(fact["id"])
-                        line_ids.append(fact["id"])
-            for version in self.store.historical_versions(line_ids):
-                version["raw_dist"] = max(0.8, float(version.get("raw_dist") or 0.8))
-                version["d_asymp"] = asymptotic_distance(version["raw_dist"], self.epsilon)
-                version["zone"] = "OUTER_ANTI_INTUITIVE"
-                ranked.append(version)
-            ranked = self.existing_rerank(stem, ranked, top_k=10)
-        # Preserve the existing reranker's order; split zones afterwards.
-        outer = [fact for fact in ranked if fact.get("zone") == "OUTER_ANTI_INTUITIVE"]
-        inner = [fact for fact in ranked if fact.get("zone") != "OUTER_ANTI_INTUITIVE"]
-        context = _context_blob(outer, inner)
-        self._save_control_state()
-        self.store.commit()
-        elapsed = (time.perf_counter() - started) * 1000
-        empty_flag = not ranked
-        if empty_flag and self.has_facts():
-            ranked = self.get_recent_facts(limit=10)
-            for item in ranked:
-                item["raw_dist"] = compute_raw_dist(item, self.origin)
-                item["d_asymp"] = asymptotic_distance(item.get("raw_dist") or self.epsilon, self.epsilon)
-                item["zone"] = "INNER_INTUITIVE" if item["d_asymp"] <= self.radius else "OUTER_ANTI_INTUITIVE"
-            outer = [fact for fact in ranked if fact.get("zone") == "OUTER_ANTI_INTUITIVE"]
-            inner = [fact for fact in ranked if fact.get("zone") != "OUTER_ANTI_INTUITIVE"]
-            context = _context_blob(outer, inner)
-            empty_flag = False
-        return {
-            "route": TASK,
-            "hits": [],
-            "outer": outer,
-            "inner": inner,
-            "origin": self.origin,
-            "radius": self.radius,
-            "matched_entities": direct,
-            "entity_fallback": not bool(direct) and bool(scan_keys),
-            "empty_retrieval": empty_flag,
-            "parsed_query": parsed,
-            "scan_far_to_near": far_to_near,
-            "retrieval_ms": elapsed,
-            "context_tokens": estimate_tokens(context),
-            "history_tokens": history_tokens,
-            "context": context,
-        }
+            context = self.store.get_turn_window([job["turn_id"]], window=3, user_id=scope[0], agent_id=scope[1])
+            prompt = render_prompt("layout", step_id=str(step_ids[0]) if step_ids else "",
+                                   candidate_2d_blocks=candidates, raw_turn_text=escape(text), role=escape(job["role"]),
+                                   timestamp=now, categories=list(self.categories),
+                                   current_date_iso=datetime.fromtimestamp(job["event_time"] if job["event_time"] is not None else now, timezone.utc).date().isoformat(),
+                                   recent_turns=[{"role": row["role"], "text": escape(row["text"])} for row in context
+                                                 if row["turn_id"] < job["turn_id"]])
+            def fallback_layout():
+                nonlocal facts
+                facts = extract_facts(text)
+                return decide_layout(candidates, facts, now)
 
-    def _parse_query(self, stem: str) -> dict:
-        fallback = lambda: parse_query_rules(stem)
-        if self._using_mock():
-            return parse_query_rules(stem)
-        prompt = render_prompt("query", query_stem=stem)
-        data, _used = self._call_json(prompt, fallback, required=("query_type", "categories"))
-        return normalize_parsed_query(data, stem)
-
-    def _dual_channel_candidates(self, stem: str, parsed: dict) -> tuple[list[dict], bool]:
-        hash_hits = self.search_z_hash(parsed.get("entities") or [], parsed.get("categories") or [], query_stem=stem)
-        vec_query = parsed.get("semantic_vector_query") or stem
-        vec_hits = self.search_vector(vec_query, top_n=30)
-        merged = weighted_rrf(vec_hits, hash_hits, w_vec=0.65, w_hash=0.35)
-        empty = not merged
-        if not merged and self.has_facts():
-            merged = self.get_recent_facts(limit=10)
-        return merged, empty and not merged
-
-    def search_z_hash(self, entities, categories, query_stem: str = "") -> list[dict]:
-        index = self.store.z_index()
-        hits: list[dict] = []
-        seen: set[str] = set()
-
-        def add_from(key: str) -> None:
-            for fact in index.get(key, []):
-                if fact["id"] in seen:
+            data, fallback = self._call_json(prompt, fallback_layout, _valid_operations)
+            ops = data["write_operations"]
+        allowed_blocks = {block["id"]: block for block in candidates}
+        allowed_lines = {line["id"]: (block, line) for block in candidates for line in block["lines"]}
+        alias, applied = {}, []
+        with self.store.transaction():
+            for op in ops:
+                action = op["action"]
+                target = op.get("target_line_id") or ""
+                block = op.get("target_block_id") or "NEW"
+                if action in {"OVERWRITE_SAME_LINE", "DELETE_LINE"} and target not in allowed_lines and target not in alias:
                     continue
-                seen.add(fact["id"])
-                hits.append(dict(fact))
+                if action == "DELETE_LINE" and not _DELETE_CUE.search(text):
+                    continue
+                if action in {"APPEND_ADJACENT_LINE", "INSERT_ISOLATED_LINE"} and block not in allowed_blocks and block != "NEW" and not block.startswith("NEW:"):
+                    continue
+                if action == "NOOP":
+                    if target in allowed_lines or target in alias:
+                        self.store.merge_line_mentions(alias.get(target, target), step_ids, scope=scope, turn_id=job["turn_id"])
+                    applied.append(op)
+                    continue
+                plain = line_body(op.get("formatted_line") or "")
+                target_block, target_line = allowed_lines.get(target, ({}, {}))
+                topic = target_block.get("topic") or allowed_blocks.get(block, {}).get("topic") or op.get("topic") or GENERAL_CATEGORY
+                attribute = target_line.get("attribute") or op.get("attribute") or ""
+                if action == "OVERWRITE_SAME_LINE" and target_line.get("attribute") and op.get("attribute") not in (None, "", attribute):
+                    continue
+                zkeys = [NEWS_KEY] if topic == NEWS_TOPIC else _write_keys(op)
+                reference_time = job["event_time"] if job["event_time"] is not None else now
+                rewritten, inferred_time = absolute_event_text(plain, reference_time)
+                effective_time = _iso_timestamp(op.get("event_time_iso"))
+                if effective_time is None:
+                    effective_time = inferred_time if inferred_time is not None else reference_time
+                operation = {**op, "z_axis_keys": zkeys, "topic": topic, "attribute": attribute}
+                if rewritten != plain:
+                    operation["formatted_line"] = format_fact_line(now, rewritten)
+                line_id = apply_write_op(self.store, operation, topic=topic, attribute=attribute,
+                                         value=op.get("value") or "", plain=plain, timestamp=now, alias=alias,
+                                         scope=scope, role=job["role"], event_time=effective_time, source_step_ids=step_ids,
+                                         source_turn_id=job["turn_id"])
+                if line_id:
+                    if action == "OVERWRITE_SAME_LINE":
+                        alias[target] = line_id
+                    if re.fullmatch(r"pending-\d+", op.get("operation_id") or ""):
+                        alias[op["operation_id"]] = line_id
+                    applied.append({**operation, "line_id": line_id})
+            writes = [op for op in applied if op.get("line_id")]
+            if writes:
+                topic = next((op.get("topic") for op in reversed(writes) if op.get("topic")), "撤销")
+                change = self._record_timeline(2, {"topic": topic, "operations": len(writes),
+                                                  "is_conflict": any(op.get("is_conflict_or_override") for op in writes)},
+                                               now, scope, job["event_time"])
+        self._refresh_timeline(change)
+        if not isinstance(self.llm, MockLLMClient) and not greeting and not fallback:
+            facts = [{"text": line_body(op["formatted_line"]), "topic": op["topic"], "attribute": op["attribute"],
+                      "value": op.get("value") or "", "zkeys": op["z_axis_keys"],
+                      "isolated": op["action"] == "INSERT_ISOLATED_LINE"}
+                     for op in applied if op["action"] not in {"NOOP", "DELETE_LINE"}]
+        return {"facts": facts, "operations": applied, "queued": False, "turn_id": job["turn_id"]}
 
-        wanted = [str(key).strip() for key in list(categories or []) + list(entities or []) if str(key).strip()]
-        for key in wanted:
-            add_from(key)
-        names = {key.split(":", 1)[-1].lower() for key in wanted if key.split(":", 1)[-1]}
-        for key in index:
-            bare = key.split(":", 1)[-1].lower()
-            if bare and bare in names:
-                add_from(key)
-        direct = match_entities(query_stem, index.keys()) if query_stem else []
-        seeds = list(dict.fromkeys(list(direct) + wanted))
-        if seeds:
-            for key in expand_entities(index, seeds, hops=2):
-                add_from(key)
-        return hits
+    def delete(self, line_id, *, hard=False, user_id="default", agent_id="default", timestamp=None) -> bool:
+        now = float(timestamp) if timestamp is not None else self._now()
+        scope = (user_id, agent_id, None)
+        change = None
+        with self.store.transaction():
+            line = self.store.get_line(line_id, scope=scope, include_deleted=hard)
+            deleted = line is not None and self.store.delete_fact(line_id, ingest_time=now, hard=hard, scope=scope)
+            if deleted:
+                change = self._record_timeline(2, {"topic": "撤销", "operations": 1}, now, (*scope[:2], line["session_id"]))
+        self._refresh_timeline(change)
+        if deleted and hard and hasattr(self.vector, "forget"):
+            self.vector.forget(line_id)
+        return deleted
 
-    def search_vector(self, query_text: str, top_n: int = 30) -> list[dict]:
-        facts = unique_facts(self.store.z_index())
-        return self.vector.search(query_text or "", facts, top_n=top_n)
+    def search(self, query: str, timestamp: float | None = None, *, flush_pending: bool = True, **kwargs) -> dict:
+        return self.retrieve(query, timestamp=timestamp, flush_pending=flush_pending, **kwargs)
+
+    def retrieve(self, query: str, *, user_id="default", agent_id="default", session_id=None,
+                 top_k=10, token_budget=2048, timestamp=None, read_only=False, flush_pending=True,
+                 belt_prune_ratio: float | None = None, min_keep: int | None = None,
+                 include_raw_turns: bool = False) -> dict:
+        prune_ratio = self.belt_prune_ratio if belt_prune_ratio is None else float(belt_prune_ratio)
+        keep_floor = self.min_keep if min_keep is None else min_keep
+        _validate_belt_config(prune_ratio, keep_floor)
+        started = time.perf_counter()
+        now = float(timestamp) if timestamp is not None else self._now()
+        scope = (user_id, agent_id, session_id)
+        control_scope = (user_id, agent_id, "default" if session_id is None else session_id)
+        origin, radius = self._control_state(control_scope)
+        direct = []
+        temporal = parse_temporal_intent(query, now)
+
+        def result(route, parsed, *, ranked=(), belt_total=0, belt_pruned=0, scan=None, fallback=False, weights=None):
+            outer = [fact for fact in ranked if fact["zone"] == OUTER]
+            inner = [fact for fact in ranked if fact["zone"] == INNER]
+            belt = [fact for fact in ranked if fact["zone"] == BELT]
+            context = "\n".join(fact["text"] for fact in ranked)
+            history_tokens = self.store.history_tokens(scope)
+            drilldown = self.store.get_turn_window(
+                [turn_id for fact in ranked[:3] for turn_id in fact.get("source_turn_ids", [])],
+                user_id=user_id, agent_id=agent_id) if include_raw_turns else []
+            return {"route": route, "hits": [], "ranked": list(ranked), "outer": outer, "inner": inner,
+                    "belt": belt, "origin": origin, "radius": radius,
+                    "drilldown_turns": drilldown, "temporal_intent": vars(temporal),
+                    "outer_triggered_count": len(outer), "inner_count": len(inner), "belt_count": len(belt),
+                    "belt_compressed_count": belt_total - len(belt),
+                    "belt_pruned_count": belt_pruned,
+                    "matched_entities": direct, "entity_fallback": fallback, "empty_retrieval": not ranked,
+                    "parsed_query": parsed, "scan_far_to_near": scan or [], "context": context,
+                    "retrieval_ms": (time.perf_counter() - started) * 1000, "context_tokens": estimate_tokens(context),
+                    "history_tokens": history_tokens, "poison_circle": weights,
+                    "scope": {"user_id": user_id, "agent_id": agent_id, "session_id": session_id}}
+
+        if (self.enable_casual_bypass and is_greeting(query) and not (_RECALL_CUE.search(query) or _QUESTION_CUE.search(query))
+                and not match_entities(query, self.store.entity_keys(scope=scope))):
+            return result(CASUAL, parse_query_rules(query, categories=self.categories))
+
+        if self.pending and flush_pending and not read_only:
+            self.drain(user_id=user_id, agent_id=agent_id)
+        parsed = parse_query_rules(query, categories=self.categories)
+        if temporal.is_historical:
+            parsed["query_type"] = "TIME_TRAVEL"
+        with self.store.read_snapshot():
+            keyed = self.store.entity_keys(scope=scope)
+            direct = match_entities(query, keyed)
+            # Category words such as 城市 are not task intent. The rule router still
+            # requires an entity hit or a task cue before leaving the casual bypass.
+            if (self.enable_casual_bypass and not direct and not parsed["entities"]
+                    and parsed["query_type"] == "FACTUAL" and not _RECALL_CUE.search(query)
+                    and route_query(query, ()) == CASUAL):
+                return result(CASUAL, parsed)
+            merged = self._recall(query, parsed, temporal, scope, direct)
+        hints = list(dict.fromkeys(key for fact in merged[:10] for key in fact["entity_z_keys"]))[:15]
+        preview = [{"block_id": fact["block_id"], "topic": fact["topic"],
+                    "preview": fact["plain"][:180], "preview_attr": fact["attribute"]} for fact in merged[:8]]
+        decision = decide_origin(origin, preview, direct or hints, query)
+        circle = decision["poison_circle"]
+        origin = decision["new_origin"]
+        radius = 0.35 if temporal.is_historical else inner_boundary(circle["radius_r"])
+        c_max = max((consolidation_count(fact) for fact in merged if not is_noise(fact)), default=1)
+        rrf_max = max((fact["rrf_score"] for fact in merged), default=0.0)
+        rrf_order = {fact["id"]: rank for rank, fact in enumerate(merged)}
+        buckets = {}
+        for fact in merged:
+            keys = fact["entity_z_keys"]
+            tagged = score_bipolar(fact, c_max=c_max, rrf_max=rrf_max,
+                                    radius=radius, bipolar_lambda=self.bipolar_lambda, epsilon=self.epsilon)
+            for key in keys or fact["category_z_keys"][:1] or ["未分桶"]:
+                buckets.setdefault(key, []).append(tagged)
+        scan = order_far_to_near(circle.get("z_axis_scan_order_far_to_near", []), list(dict.fromkeys([*direct, *buckets])))
+        collapsed = collapse_and_scan_z_axis(buckets, scan)
+        ranked = [{**fact, "z_bucket": bucket["z_bucket"]} for bucket in collapsed for fact in bucket["facts"]]
+        ranked.sort(key=lambda fact: (-fact["bipolar_score"], rrf_order[fact["id"]]))
+        pruned = _prune_belt(ranked, prune_ratio, keep_floor)
+        selected = _fit_context(pruned, top_k, token_budget)
+        if not read_only:
+            with self.store.transaction():
+                self.store.set_meta(self._control_key(control_scope), json.dumps({"origin": origin, "radius": radius}, ensure_ascii=False))
+                line_ids = [fact["id"] for fact in selected]
+                if line_ids:
+                    self.store.increment_hit_counts(line_ids)
+            if control_scope == DEFAULT_SCOPE:
+                self.origin, self.radius = origin, radius
+        return result(TASK, parsed, ranked=selected, belt_total=sum(fact["zone"] == BELT for fact in ranked),
+                      belt_pruned=len(ranked) - len(pruned),
+                      scan=scan, fallback=not direct and bool(hints),
+                      weights={"radius_r": radius, "radius_out": 1.0 - radius, "bipolar_lambda": self.bipolar_lambda,
+                               "belt_prune_ratio": prune_ratio, "min_keep": keep_floor,
+                               "z_axis_scan_order_far_to_near": scan})
+
+    def _recall(self, query, parsed, temporal, scope, direct):
+        user_id, agent_id, session_id = scope
+        options = dict(user_id=user_id, agent_id=agent_id, session_id=session_id, ids_only=True)
+        dense = self.search_vector(parsed["semantic_vector_query"], top_n=40, **options)
+        lexical = self.store.search_bm25(query, **options)
+        entities = direct or parsed["entities"]
+        inverted = self.store.search_entity_inverted(entities, **options)
+        timed = []
+        previous = (temporal.is_historical and temporal.order_hint == "latest"
+                    and temporal.start_ts is None and temporal.end_ts is None)
+        if temporal.is_historical or temporal.start_ts is not None or temporal.end_ts is not None:
+            timed = self.store.search_temporal(start_ts=temporal.start_ts, end_ts=temporal.end_ts,
+                                               order_hint=temporal.order_hint, rev_index=temporal.rev_index,
+                                               entities={normalize_entity(key) for key in direct}, previous_only=previous, **options)
+        channels = (dense, lexical, inverted, timed)
+        ids = {hit["id"] for channel in channels for hit in channel}
+        details = {fact["id"]: fact for fact in self.store.facts_by_ids(ids, scope=scope)}
+        time_ids = {hit["id"] for hit in timed}
+        inverted_ids = {hit["id"] for hit in inverted}
+        dense_scores = {hit["id"]: hit["vector_score"] for hit in dense}
+        entity_names = {normalize_entity(key) for key in direct}
+        for fact in details.values():
+            anchor = bool(entity_names.intersection(normalize_entity(key) for key in fact["entity_z_keys"]))
+            fact.update(vector_score=dense_scores.get(fact["id"], 0.0), entity_anchor=anchor or fact["id"] in inverted_ids,
+                        temporal_match=fact["id"] in time_ids)
+            if fact["historical"] and not temporal.is_historical:
+                fact["rrf_factor"] = 0.35
+                fact["text"] = "[历史已变更] " + fact["text"]
+            elif time_ids and (previous or temporal.start_ts is not None or temporal.end_ts is not None or temporal.rev_index is not None):
+                if not fact["temporal_match"]:
+                    fact["rrf_factor"] = 0.35
+
+        def hydrate(channel):
+            return [{**details[hit["id"]], **hit} for hit in channel]
+
+        return weighted_rrf(hydrate(dense), hydrate(inverted), w_vec=0.40, w_hash=0.15,
+                            extra_channels=((0.35, hydrate(lexical)), (0.25, hydrate(timed))))
+
+    def search_z_hash(self, entities, categories, query_stem="", *, snapshot=None, index=None, expanded=None):
+        seeds = list(entities or [])
+        if query_stem:
+            seeds.extend(match_entities(query_stem, self.store.entity_keys()))
+        return self.store.search_entity_inverted(seeds, include_superseded=False)
+
+    def search_vector(self, query_text: str, top_n: int = 40, *, snapshot=None, user_id="default", agent_id="default",
+                      session_id=None, ids_only=False) -> list[dict]:
+        if hasattr(self.vector, "encode"):
+            return self.store.search_vector(query_text, top_n=top_n, ids_only=ids_only, user_id=user_id,
+                                            agent_id=agent_id, session_id=session_id)
+        facts = self.store.snapshot(scope=(user_id, agent_id, session_id), include_superseded=True) if snapshot is None else snapshot
+        hits = [fact for fact in self.vector.search(query_text, facts, top_n=top_n) if fact.get("vector_score", 0) > 0]
+        return [{"id": fact["id"], "vector_score": fact["vector_score"]} for fact in hits] if ids_only else hits
 
     def has_facts(self) -> bool:
-        return bool(unique_facts(self.store.z_index()))
+        return bool(self.store.snapshot())
 
-    def get_recent_facts(self, limit: int = 10) -> list[dict]:
-        facts = unique_facts(self.store.z_index())
-        facts.sort(key=lambda fact: (-float(fact.get("updated_at") or 0), str(fact.get("id"))))
-        return [dict(fact) for fact in facts[: max(1, limit)]]
+    def get_recent_facts(self, limit: int = 10, *, snapshot=None) -> list[dict]:
+        facts = self.store.snapshot() if snapshot is None else snapshot
+        return sorted(facts, key=lambda fact: (-fact["updated_at"], fact["id"]))[:max(0, limit)]
 
-    def existing_rerank(self, query_stem: str, candidates: list[dict], top_k: int = 10) -> list[dict]:
-        ranked = _rank_by_overlap(list(candidates or []), query_stem)
-        if not ranked:
-            return []
-        return ranked[: max(1, top_k)]
-
-    def answer(self, query: str, timestamp: float | None = None, retrieved: dict | None = None) -> dict:
-        """Full reply. System 2 is read-only: its JSON cannot change memory or the radius."""
+    def answer(self, query: str, timestamp: float | None = None, retrieved: dict | None = None, *,
+               user_id="default", agent_id="default") -> dict:
         if retrieved is None:
-            retrieved = self.search(query, timestamp=timestamp)
-        elif timestamp is not None:
-            self.set_time(timestamp)
+            retrieved = self.retrieve(query, user_id=user_id, agent_id=agent_id, timestamp=timestamp, read_only=True)
+        elif retrieved.get("scope") and (retrieved["scope"]["user_id"], retrieved["scope"]["agent_id"]) != (user_id, agent_id):
+            raise ValueError("retrieved evidence belongs to a different user or agent")
         if retrieved["route"] == CASUAL:
-            if retrieved["hits"]:
-                response = "。".join(hit["text"] for hit in retrieved["hits"][:3])
-            else:
-                response = CASUAL_REPLY
-            return {**retrieved, "response": response, "reasoning": None, "llm_fallback": False}
-        memories = list(retrieved.get("outer") or []) + list(retrieved.get("inner") or []) + list(retrieved.get("hits") or [])
-        parsed = retrieved.get("parsed_query") or parse_query_rules(strip_query_options(query))
-        prompt = render_prompt(
-            "reason",
-            query_type=parsed.get("query_type") or "FACTUAL",
-            retrieved_top_k_memories=memories,
-            user_question_with_options=query,
-        )
-
-        def _reason_fallback():
-            old = plan_answer(retrieved["origin"], retrieved["outer"], retrieved["inner"], query)
-            return {
-                "evidence_synthesis": old.get("final_response") or "",
-                "anti_intuitive_override": bool((old.get("reasoning_trace") or {}).get("anti_intuitive_overrides")),
-                "final_answer": old.get("final_response") or "",
-                "reasoning_trace": old.get("reasoning_trace") or {},
-            }
-
-        data, used_fallback = self._call_json(
-            prompt,
-            _reason_fallback,
-            required=("final_answer",),
-        )
-        trace = data.get("reasoning_trace") or {}
-        if not isinstance(trace, dict):
-            trace = {}
-        safe_trace = {
-            "anti_intuitive_overrides": list(trace.get("anti_intuitive_overrides") or []),
-            "rejected_noise_ids": list(trace.get("rejected_noise_ids") or []),
-            "verification_status": str(trace.get("verification_status") or "PARTIAL_INFO"),
-            "evidence_synthesis": str(data.get("evidence_synthesis") or ""),
-            "anti_intuitive_override": bool(data.get("anti_intuitive_override")),
-        }
-        public = {key: retrieved[key] for key in retrieved if key != "context"}
-        reply = end_with_choice(query, str(data.get("final_answer") or data.get("final_response") or ""))
-        return {
-            **public,
-            "response": reply,
-            "reasoning": safe_trace,
-            "llm_fallback": used_fallback,
-        }
-
-    def _using_mock(self) -> bool:
-        return isinstance(self.llm, MockLLMClient)
-
-    def _llm_extract(self, text: str) -> list[dict]:
-        """Minimal fact list for Prompt 3. Used only with a live client."""
-        prompt = (
-            "Extract objective facts from the utterance. "
-            'Return JSON {"facts":[{"text":"...","zkeys":["person:Name","entity:token"],'
-            '"attribute":"...","value":"...","topic":"dialogue","isolated":true}]}. '
-            'If there is no objective fact, return {"facts":[]}.\n'
-            f"Utterance:\n{text[:4000]}"
-        )
-        try:
-            data = loads_json_object(self.llm.complete(prompt))
-        except Exception:
-            return []
-        facts = []
-        for item in data.get("facts") or []:
-            if not isinstance(item, dict) or not str(item.get("text") or "").strip():
-                continue
-            zkeys = [str(key) for key in (item.get("zkeys") or []) if key]
-            if not zkeys:
-                zkeys = english_entity_keys(str(item.get("text")))
-            facts.append(
-                {
-                    "text": str(item.get("text")).strip(),
-                    "zkeys": zkeys,
-                    "attribute": str(item.get("attribute") or "fact"),
-                    "value": str(item.get("value") or ""),
-                    "topic": str(item.get("topic") or "dialogue"),
-                    "isolated": bool(item.get("isolated", True)),
-                    "is_greeting": False,
-                }
-            )
-        return facts
+            return {**retrieved, "response": "", "reasoning": None, "llm_fallback": False}
+        ranked = retrieved.get("ranked")
+        if ranked is None:
+            ranked = [fact for key in ("hits", "outer", "inner", "belt") for fact in retrieved.get(key) or []]
+        query_type = retrieved["parsed_query"]["query_type"]
+        memories = [{key: fact.get(key) for key in ("id", "text", "zone", "z_bucket", "revision", "historical",
+                                                    "source_step_ids", "attribute", "entity_z_keys", "topic",
+                                                    "event_time", "updated_at", "is_conflict_or_override", "entity_anchor",
+                                                    "isolated", "vector_score", "zkeys", "temporal_match")}
+                    for fact in ranked]
+        entities = retrieved.get("matched_entities", [])
+        prompt = render_prompt("reason", query_type=query_type, retrieved_top_k_memories=memories, matched_entities=entities,
+                               user_question=json.dumps(query, ensure_ascii=False))
+        data, used_fallback = self._call_json(prompt, lambda: plan_answer(ranked, query, query_type, entities), _valid_reason)
+        evidence_ids = {fact["id"] for fact in memories}
+        safe = {"evidence_synthesis": data["evidence_synthesis"], "anti_intuitive_override": data["anti_intuitive_override"],
+                "rejected_noise_ids": [item for item in data["rejected_noise_ids"] if item in evidence_ids]}
+        return {**retrieved, "response": data["final_answer"], "reasoning": safe, "llm_fallback": used_fallback}
 
     def timeline_stats(self) -> dict:
-        reduction = self.timeline.reduction()
-        return {
-            "events": self.timeline.events,
-            "nodes": self.timeline.nodes,
-            "layer1": len(self.timeline.layer1),
-            "layer2": len(self.timeline.layer2),
-            "reduction": reduction,
-        }
+        return {"events": self.timeline.events, "nodes": self.timeline.nodes, "layer1": len(self.timeline.layer1),
+                "layer2": len(self.timeline.layer2), "reduction": self.timeline.reduction()}
 
     def render(self) -> str:
-        chunks = []
-        for block in self.store.blocks_for_prompt():
-            body = render_block(
-                [{"formatted": line["formatted"], "isolated": line["isolated"]} for line in block["lines"]]
-            )
-            if body:
-                chunks.append(f"# {block['topic']}\n{body}")
-        return "\n\n".join(chunks)
+        return "\n\n".join(f"# {block['topic']}\n{render_block(block['lines'])}" for block in self.store.blocks_for_prompt())
 
-    def _apply_job(self, job: dict) -> list[dict]:
-        applied: list[dict] = []
-        alias: dict[str, str] = {}
-        if job.get("noise"):
-            existing = self.store.block_by_topic(NEWS_TOPIC)
-            op = {
-                "action": "APPEND_ADJACENT_LINE",
-                "target_block_id": existing["id"] if existing else "NEW",
-                "target_line_id": "",
-                "formatted_line": format_fact_line(job["ts"], job["text"].strip()),
-                "z_axis_keys": [NEWS_KEY],
-                "surprise_score": 0.12,
-            }
-            apply_write_op(
-                self.store,
-                op,
-                topic=NEWS_TOPIC,
-                attribute="",
-                value="",
-                plain=job["text"].strip(),
-                timestamp=job["ts"],
-                alias=alias,
-            )
-            applied.append(op)
-        else:
-            facts = job.get("facts") or []
-            ops = job.get("ops") or []
-            for index, fact in enumerate(facts):
-                op = ops[index] if index < len(ops) else {"action": "NOOP"}
-                if not isinstance(op, dict):
-                    op = {"action": "NOOP"}
-                action = op.get("action")
-                if action not in {"OVERWRITE_SAME_LINE", "APPEND_ADJACENT_LINE", "INSERT_ISOLATED_LINE", "NOOP"}:
-                    op = {**op, "action": "NOOP"}
-                zkeys = attach_dual_zkeys(
-                    list(op.get("z_axis_keys") or []) + list(fact.get("zkeys") or []),
-                    fact.get("text") or op.get("formatted_line") or "",
-                    extra_entity_keys=op.get("entity_z_keys"),
-                    extra_category_keys=op.get("category_z_keys"),
-                )
-                op = {**op, "z_axis_keys": zkeys}
-                apply_write_op(
-                    self.store,
-                    op,
-                    topic=fact.get("topic") or "杂项",
-                    attribute=fact.get("attribute") or "",
-                    value=fact.get("value") or "",
-                    plain=fact.get("text") or "",
-                    timestamp=job["ts"],
-                    alias=alias,
-                    fact_zkeys=zkeys,
-                )
-                applied.append(op)
-        if any(op.get("action") != "NOOP" for op in applied):
-            inner, outer = self._zone_counts()
-            self.timeline.record(2, {"in_cnt": inner, "out_cnt": outer}, job["ts"])
-            self._save_control_state()
-        return applied
-
-    def _zone_counts(self) -> tuple[int, int]:
-        seen = set()
-        inner = outer = 0
-        for facts in self.store.z_index().values():
-            for fact in facts:
-                if fact["id"] in seen:
-                    continue
-                seen.add(fact["id"])
-                raw = compute_raw_dist(fact, self.origin)
-                distance = asymptotic_distance(raw, self.epsilon)
-                if distance <= (self.radius or 0.45):
-                    inner += 1
-                else:
-                    outer += 1
-        return inner, outer
-
-    def _candidate_blocks(self, facts: list[dict]) -> list[dict]:
-        blocks = self.store.blocks_for_prompt()
-        if not blocks:
-            return []
-        fact_keys = set()
-        topics = set()
-        fact_text = []
-        for fact in facts:
-            topics.add(fact.get("topic") or "")
-            fact_keys.update(fact.get("zkeys") or [])
-            fact_text.append(fact.get("text") or "")
-        blob = char_bigrams(" ".join(fact_text))
-
-        def pinned(block: dict) -> bool:
-            if block["topic"] in topics:
-                return True
-            for line in block["lines"]:
-                if not line.get("attribute"):
-                    continue
-                if any(line["attribute"] == fact.get("attribute") and fact_keys.intersection(line.get("zkeys") or []) for fact in facts):
-                    return True
-            return False
-
-        pinned_blocks = [block for block in blocks if pinned(block)]
-        ranked = sorted(
-            blocks,
-            key=lambda block: jaccard(
-                blob,
-                char_bigrams(block["topic"] + " " + " ".join(line["text"] for line in block["lines"][-3:])),
-            ),
-            reverse=True,
-        )
-        chosen = []
-        seen = set()
-        for block in pinned_blocks + ranked:
-            if block["id"] in seen:
-                continue
-            seen.add(block["id"])
-            chosen.append(_trim_block(block, facts))
-            if len(chosen) >= 3 and len(chosen) >= len(pinned_blocks):
-                break
-        return chosen
-
-    def _notebook_index(self) -> list[dict]:
-        index = []
-        for block in self.store.blocks_for_prompt():
-            preview_lines = block["lines"][-3:]
-            preview = " ".join(line["text"] for line in preview_lines)
-            attr = ""
-            for line in reversed(block["lines"]):
-                if line.get("attribute"):
-                    attr = line["attribute"]
-                    break
-            index.append(
-                {
-                    "block_id": block["id"],
-                    "topic": block["topic"],
-                    "preview": preview[:180],
-                    "preview_attr": attr,
-                }
-            )
-        return index
-
-    def _hash_lookup(self, query: str, index: dict) -> list[dict]:
-        hits = []
-        seen = set()
-        for key, facts in index.items():
-            name = entity_names(key)
-            if name and name in query:
-                for fact in facts:
-                    if fact["id"] in seen:
-                        continue
-                    seen.add(fact["id"])
-                    hits.append(fact)
-        return hits
-
-    def _call_json(self, prompt: str, fallback, required: tuple[str, ...]) -> tuple[dict, bool]:
+    def _call_json(self, prompt, fallback, validator):
         try:
             data = loads_json_object(self.llm.complete(prompt))
-            if any(key not in data for key in required):
-                raise ValueError("missing keys")
-            return data, False
+            if validator(data):
+                return data, False
+        except FatalLLMError:
+            raise
         except Exception:
-            self.fallback_count += 1
-            return fallback(), True
+            pass
+        self.fallback_count += 1
+        return fallback(), True
 
 
-def _valid_origin(data: dict) -> bool:
-    origin = data.get("new_origin")
-    circle = data.get("poison_circle")
-    return isinstance(origin, dict) and isinstance(circle, dict) and "radius_r" in circle
+def _valid_operations(data):
+    operations = data.get("write_operations")
+    string_fields = ("target_block_id", "target_line_id", "formatted_line", "topic", "attribute", "value", "operation_id", "event_time_iso")
+    list_fields = ("z_axis_keys", "entity_z_keys", "category_z_keys", "tags")
+    return isinstance(operations, list) and all(
+        isinstance(op, dict) and isinstance(op.get("action"), str) and op["action"] in ACTIONS
+        and all(isinstance(op.get(field, ""), str) for field in string_fields)
+        and all(_string_list(op.get(field, [])) for field in list_fields)
+        and isinstance(op.get("is_conflict_or_override", False), bool)
+        and (op["action"] in {"DELETE_LINE", "NOOP"} or bool(line_body(op.get("formatted_line", ""))))
+        for op in operations)
 
 
-def _split_zones(collapsed: list[dict]) -> tuple[list[dict], list[dict]]:
-    outer, inner = [], []
-    seen = set()
-    for bucket in collapsed:
-        for fact in bucket["facts"]:
-            if fact["id"] in seen:
-                continue
-            seen.add(fact["id"])
-            if fact.get("zone") == "OUTER_ANTI_INTUITIVE":
-                outer.append(fact)
+def _string_list(value):
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _valid_reason(data):
+    return (isinstance(data.get("final_answer"), str) and isinstance(data.get("evidence_synthesis"), str)
+            and isinstance(data.get("anti_intuitive_override"), bool) and _string_list(data.get("rejected_noise_ids")))
+
+
+def _write_keys(op):
+    keys = [*(op.get("z_axis_keys") or ()), *(op.get("entity_z_keys") or ())]
+    tags = [*(op.get("category_z_keys") or ()), *(op.get("tags") or ())]
+    keys.extend(tag if key_type(tag) == "tag" else f"类目:{tag}" for tag in tags if tag.strip())
+    return list(dict.fromkeys(key.strip() for key in keys if key.strip()))
+
+
+def _iso_timestamp(value):
+    if not value:
+        return None
+    try:
+        date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (date if date.tzinfo else date.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def _validate_belt_config(ratio, min_keep):
+    if not 0 <= ratio <= 1:
+        raise ValueError("belt_prune_ratio must be in [0, 1]")
+    if type(min_keep) is not int or min_keep < 1:
+        raise ValueError("min_keep must be a positive integer")
+
+
+def _prune_belt(ranked, ratio, min_keep):
+    if not ranked:
+        return []
+    threshold = ratio * ranked[0]["bipolar_score"]
+    kept = {fact["id"] for fact in ranked if fact["zone"] != BELT or fact["bipolar_score"] >= threshold}
+    if len(kept) < min_keep:
+        for fact in ranked:
+            kept.add(fact["id"])
+            if len(kept) >= min_keep:
+                break
+    return [fact for fact in ranked if fact["id"] in kept]
+
+
+def _fit_context(ranked, top_k, token_budget):
+    selected = []
+    context = ""
+    for fact in ranked:
+        if len(selected) >= top_k:
+            break
+        candidate = f"{context}\n{fact['text']}" if context else fact["text"]
+        if estimate_tokens(candidate) <= token_budget:
+            selected.append(fact)
+            context = candidate
+    if not selected and ranked and top_k > 0 and token_budget > 0:
+        first = ranked[0]
+        low, high = 1, len(first["text"])
+        while low < high:
+            midpoint = (low + high + 1) // 2
+            if estimate_tokens(first["text"][:midpoint]) <= token_budget:
+                low = midpoint
             else:
-                inner.append(fact)
-    return outer, inner
-
-
-def _rank_by_overlap(facts: list[dict], query: str) -> list[dict]:
-    if len(facts) < 2:
-        return facts
-    query_grams = char_bigrams(query)
-    return sorted(
-        facts,
-        key=lambda fact: jaccard(query_grams, char_bigrams(fact.get("text") or "")),
-        reverse=True,
-    )
-
-
-def _context_blob(outer: list[dict], inner: list[dict]) -> str:
-    chunks = []
-    for fact in outer + inner:
-        chunks.append(fact.get("text") or "")
-    return "\n".join(chunks)
-
-
-def _is_time_travel(query: str) -> bool:
-    import re
-
-    if re.search(r"第[0-9一二两三四五六七八九十]+次", query or "") and "之前" in (query or ""):
-        return True
-    return bool(re.search(r"最早|原本|以前|上次|之前", query or ""))
-
-
-def _trim_block(block: dict, facts: list[dict]) -> dict:
-    fact_attrs = {fact.get("attribute") for fact in facts if fact.get("attribute")}
-    fact_keys = set()
-    for fact in facts:
-        fact_keys.update(fact.get("zkeys") or [])
-    pinned = []
-    rest = []
-    for line in block["lines"]:
-        if line.get("attribute") in fact_attrs and fact_keys.intersection(line.get("zkeys") or []):
-            pinned.append(line)
-        else:
-            rest.append(line)
-    shown = pinned + rest[-5:]
-    # Preserve order and drop duplicates.
-    seen = set()
-    lines = []
-    for line in shown:
-        if line["id"] in seen:
-            continue
-        seen.add(line["id"])
-        lines.append(line)
-    lines.sort(key=lambda line: block["lines"].index(line) if line in block["lines"] else 0)
-    return {"id": block["id"], "topic": block["topic"], "lines": lines}
+                high = midpoint - 1
+        selected.append({**first, "text": first["text"][:low], "context_truncated": True})
+    return selected

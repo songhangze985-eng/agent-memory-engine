@@ -1,0 +1,26 @@
+[
+  {
+    "question_id": "synthetic-update",
+    "question_type": "knowledge-update",
+    "question": "What is my current project color?",
+    "question_date": "2024/03/03 (Sun) 09:00",
+    "haystack_dates": ["2024/03/02 (Sat) 09:00", "2024/03/01 (Fri) 09:00"],
+    "haystack_session_ids": ["answer_color_2", "answer_color_1"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "My project color is now turquoise.", "has_answer": true},
+       {"role": "assistant", "content": "Okay."}],
+      [{"role": "user", "content": "My project color used to be purple.", "has_answer": true}]
+    ],
+    "answer_session_ids": ["answer_color_1", "answer_color_2"]
+  },
+  {
+    "question_id": "synthetic-missing_abs",
+    "question_type": "single-session-user",
+    "question": "Have I ever owned a sailboat?",
+    "question_date": "2024/03/02",
+    "haystack_dates": ["2024/03/01"],
+    "haystack_session_ids": ["distractor"],
+    "haystack_sessions": [[{"role": "user", "content": "I went hiking yesterday."}]],
+    "answer_session_ids": []
+  }
+]

@@ -9,12 +9,9 @@ class _Evil(MockLLMClient):
         if "慢系统综合推理与作答器" in prompt or "System 2 Anti-Intuitive Reasoner" in prompt:
             return json.dumps(
                 {
-                    "reasoning_trace": {
-                        "anti_intuitive_overrides": [],
-                        "rejected_noise_ids": [],
-                        "verification_status": "VERIFIED",
-                    },
-                    "final_response": "这是回复",
+                    "evidence_synthesis": "这是依据",
+                    "anti_intuitive_override": True,
+                    "rejected_noise_ids": [],
                     "final_answer": "这是回复",
                     "write_operations": [
                         {
@@ -45,6 +42,8 @@ def _snapshot(engine: CognitiveMemoryEngine):
         "keys": sorted(engine.store.z_index()),
         "layer2": json.dumps(engine.timeline.layer2, ensure_ascii=False),
         "pending": len(engine.pending),
+        "layer1": json.dumps(engine.timeline.layer1, ensure_ascii=False),
+        "control": (engine.origin, engine.radius),
     }
 
 
@@ -60,9 +59,9 @@ def test_reasoner_output_cannot_write_or_move_the_circle():
     assert "人物:黑客" not in after["keys"]
     assert after["layer2"] == before["layer2"]
     assert after["pending"] == before["pending"]
-    assert engine.origin["x_topic"] != "HACKED"
+    assert after == before
     assert engine.radius != 0.01
-    assert engine.radius == 0.45
+    assert engine.radius == 0.25
 
 
 def test_pending_write_stays_queued_through_answer():

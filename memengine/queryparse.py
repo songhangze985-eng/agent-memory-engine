@@ -15,10 +15,11 @@ from memengine.categories import (
 
 _REFLECTIVE = re.compile(
     r"\b(prefer|preference|kind of|type of|what kind|probably|might|overall|in common|personality|habit|style)\b"
-    r"|共同点|偏好|性格|习惯|风格|可能喜欢|更喜欢",
+    r"|共同点|偏好|性格|习惯|风格|可能喜欢|更喜欢|爱看.{0,5}(?:啥|什么)|喜欢.{0,5}(?:啥|什么)",
     re.I,
 )
 _CJK = re.compile(r"[\u4e00-\u9fff]")
+_TIME_TRAVEL = re.compile(r"最早|原本|以前|上次|之前|\b(?:previously|originally|earlier|last time|used to|before)\b", re.I)
 
 
 def history_language(text: str) -> str:
@@ -32,28 +33,31 @@ def expand_semantic_query(stem: str, categories: list[str]) -> str:
         extra = category_synonyms(key, language=language)
         if extra:
             parts.append(extra)
-    return " ".join(part for part in parts if part)
+    return "\n".join(part for part in parts if part)
 
 
-def parse_query_rules(stem: str) -> dict:
+def parse_query_rules(stem: str, *, categories=()) -> dict:
     text = (stem or "").strip()
-    categories = map_categories(text, limit=3)
-    query_type = "REFLECTIVE" if _REFLECTIVE.search(text) else "FACTUAL"
+    keys = map_categories(text, limit=3, categories=categories)
+    if _TIME_TRAVEL.search(text):
+        query_type = "TIME_TRAVEL"
+    else:
+        query_type = "REFLECTIVE" if _REFLECTIVE.search(text) else "FACTUAL"
     return {
         "query_type": query_type,
         "entities": extract_explicit_entities(text),
-        "categories": categories,
-        "semantic_vector_query": expand_semantic_query(text, categories),
+        "categories": keys,
+        "semantic_vector_query": expand_semantic_query(text, keys),
     }
 
 
-def normalize_parsed_query(data: dict | None, stem: str) -> dict:
-    fallback = parse_query_rules(stem)
+def normalize_parsed_query(data: dict | None, stem: str, *, categories=()) -> dict:
+    fallback = parse_query_rules(stem, categories=categories)
     raw = data if isinstance(data, dict) else {}
     query_type = str(raw.get("query_type") or fallback["query_type"]).upper()
-    if query_type not in {"REFLECTIVE", "FACTUAL"}:
+    if query_type not in {"REFLECTIVE", "FACTUAL", "TIME_TRAVEL"}:
         query_type = fallback["query_type"]
-    categories = validate_category_keys(raw.get("categories") or [], fallback_text=stem, limit=3)
+    categories = validate_category_keys(raw.get("categories") or [], fallback_text=stem, limit=3, categories=categories)
     if not categories:
         categories = list(fallback["categories"])
     entities = []
@@ -71,7 +75,7 @@ def normalize_parsed_query(data: dict | None, stem: str) -> dict:
     for key in entities:
         name = key.split(":", 1)[-1]
         if name and name.lower() in stem_l:
-            kept.append(key)
+            kept.append(f"实体:{name}")
     if not kept:
         kept = list(fallback["entities"])
     semantic = str(raw.get("semantic_vector_query") or "").strip() or fallback["semantic_vector_query"]
@@ -83,23 +87,6 @@ def normalize_parsed_query(data: dict | None, stem: str) -> dict:
         "categories": categories,
         "semantic_vector_query": semantic,
     }
-
-
-
-_CHOICE_LINE = re.compile(r"(?m)^\s*[ABCD][\.\)]\s+.*$")
-_REPLY_LETTER = re.compile(r"(?im)^\s*Reply with only one letter:.*$")
-_TIME_PREFIX = re.compile(r"^\(current time is [^)]*\)\s*")
-
-
-def strip_query_options(text: str) -> str:
-    """Remove MCQ choices and letter instructions from a possibly-formatted question."""
-    raw = _REPLY_LETTER.sub("", text or "")
-    raw = _CHOICE_LINE.sub("", raw)
-    raw = _TIME_PREFIX.sub("", raw.strip())
-    lines = [line.rstrip() for line in raw.splitlines() if line.strip()]
-    return "\n".join(lines).strip()
-
-
 # Re-exported so write-side callers have one import path.
 __all__ = [
     "CATEGORY_ENUM",

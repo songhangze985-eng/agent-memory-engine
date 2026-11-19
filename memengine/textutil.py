@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 _CN_NUM = {
     "一": 1,
@@ -60,7 +61,33 @@ def split_sentences(text: str) -> list[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
-_STEP_TAG = re.compile(r"\[step (\d+)\]")
+_STEP_TAG = re.compile(r"\[step(?:\s+|:\s*)(\d+)\]", re.I)
+
+
+def strip_step_tags(text: str) -> str:
+    return _STEP_TAG.sub("", text).strip()
+
+
+def normalize_entity(raw: str) -> str:
+    text = unicodedata.normalize("NFKC", raw).strip()
+    prefix, separator, value = text.partition(":")
+    if separator and prefix.strip().casefold() in {"实体", "人物", "类目", "话题", "禁忌", "事件", "地点",
+                                            "entity", "person", "category", "topic", "tag", "place", "event"}:
+        text = value
+    return re.sub(r"\s+", "", text).casefold()
+
+
+def tokenize_for_fts(text: str) -> str:
+    terms = []
+    for token in re.findall(r"[\u3400-\u9fff]+|[A-Za-z0-9_.\-/]+", strip_step_tags(text)):
+        if "\u3400" <= token[0] <= "\u9fff":
+            terms.extend(token)
+            terms.extend(token[index:index + 2] for index in range(len(token) - 1))
+        else:
+            token = token.strip(".-/").lower()
+            if any(char.isalnum() for char in token):
+                terms.append(token)
+    return " ".join(terms)
 
 
 def step_ids_in(text: str) -> list[int]:

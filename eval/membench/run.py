@@ -24,7 +24,8 @@ from eval.membench.catalog import (
     PAPER_URL,
     REPO_URL,
 )
-from eval.membench.items import format_question, question_stem
+from eval.membench.items import format_question, parse_timestamp, question_stem
+from eval.mcq import end_with_choice
 from eval.membench.load import load_sample
 from eval.membench.score import (
     accuracy,
@@ -39,6 +40,7 @@ from eval.membench.score import (
 from memengine.engine import CognitiveMemoryEngine
 from memengine.llm import FatalLLMError, MockLLMClient, build_llm_from_env
 from memengine.textutil import estimate_tokens, step_ids_in
+from memengine.vector import HashedTfidfEmbedder
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = Path(__file__).resolve().parent / ".cache" / "MemData"
@@ -75,9 +77,15 @@ def _choose(client, mock: bool, context: str, item: dict) -> tuple[str | None, f
     return parse_choice(raw), (time.perf_counter() - started) * 1000, tokens
 
 
+def _retrieved_facts(retrieved: dict) -> list[dict]:
+    if "ranked" in retrieved:
+        return retrieved["ranked"]
+    return [fact for key in ("hits", "outer", "inner", "belt") for fact in retrieved.get(key) or []]
+
+
 def _retrieved_texts(retrieved: dict) -> list[str]:
     texts = []
-    for fact in list(retrieved.get("hits") or []) + list(retrieved.get("outer") or []) + list(retrieved.get("inner") or []):
+    for fact in _retrieved_facts(retrieved):
         text = fact.get("text") or ""
         if text and text not in texts:
             texts.append(text)
@@ -85,7 +93,8 @@ def _retrieved_texts(retrieved: dict) -> list[str]:
 
 
 def _eval_item(item: dict, client, mock: bool, artifacts_dir: Path | None = None) -> dict:
-    engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient() if mock else client)
+    engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient() if mock else client,
+                                   vector=HashedTfidfEmbedder() if mock else None)
     write_ms = []
     usage_ctx = (
         client.track_usage()
@@ -123,16 +132,16 @@ def _eval_item_body(item: dict, engine, client, mock: bool, write_ms: list, usag
         stem = question_stem(item)
         question = format_question(item)
         started = time.perf_counter()
-        # Retrieval uses the stem only; options are reserved for answer().
-        retrieved = engine.search(stem)
+        query_time = parse_timestamp(item.get("q_time"), max((turn["ts"] for turn in item["turns"]), default=0) + 1)
+        retrieved = engine.retrieve(stem, timestamp=query_time)
         read_ms = (time.perf_counter() - started) * 1000
         started = time.perf_counter()
         # Reuse the same retrieval so Recall@10 / same-head score the memory answer() saw.
-        answered = engine.answer(question, retrieved=retrieved)
+        answered = engine.answer(stem, retrieved=retrieved)
         answer_ms = (time.perf_counter() - started) * 1000
         memory_texts = _retrieved_texts(retrieved)
         transcript = "\n".join(turn["text"] for turn in item["turns"])
-        native = answered.get("response") or ""
+        native = end_with_choice(question, answered.get("response") or "")
         same_letter, same_ms, same_tokens = _choose(client, mock, "\n".join(memory_texts), item)
         none_letter, none_ms, none_tokens = _choose(client, mock, "", item)
         full_letter, full_ms, full_tokens = _choose(client, mock, transcript, item)
@@ -183,6 +192,8 @@ def _eval_item_body(item: dict, engine, client, mock: bool, write_ms: list, usag
             "matched_entities": list(retrieved.get("matched_entities") or []),
             "entity_fallback": bool(retrieved.get("entity_fallback")),
             "n_outer": len(retrieved.get("outer") or []),
+            "n_belt": len(retrieved.get("belt") or []),
+            "belt_compressed_count": retrieved.get("belt_compressed_count", 0),
             "n_inner": len(retrieved.get("inner") or []),
             "n_hits": len(retrieved.get("hits") or []),
             "write_actions": write_actions,
@@ -229,9 +240,7 @@ def _write_artifact(artifacts_dir: Path, item: dict, engine, retrieved: dict, sk
                 "zkeys": fact.get("zkeys") or fact.get("z_axis_keys") or [],
                 "source_step_ids": fact.get("source_step_ids") or [],
             }
-            for fact in list(retrieved.get("hits") or [])
-            + list(retrieved.get("outer") or [])
-            + list(retrieved.get("inner") or [])
+            for fact in _retrieved_facts(retrieved)
         ],
         "retrieved_preview": [text[:400] for text in memory_texts[:10]],
         "skipped_or_noop_turns": skipped_turns,
@@ -306,7 +315,7 @@ def _markdown(payload: dict) -> str:
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     labels = {
-        "engine_native": "引擎 answer()",
+        "engine_native": "引擎自然语言回答 + 选项适配",
         "engine_same_head": "引擎检索 + 同一作答头",
         "no_memory": "无记忆基线",
         "full_context": "全上下文基线",
@@ -353,7 +362,7 @@ def _item_key(item: dict) -> str:
 
 
 def _checkpoint_meta(sample: int, seed: int, mode: str, model: str | None) -> dict:
-    return {"_checkpoint_meta": True, "sample": sample, "seed": seed, "mode": mode, "model": model}
+    return {"_checkpoint_meta": True, "contract_version": 3, "sample": sample, "seed": seed, "mode": mode, "model": model}
 
 
 def _load_checkpoint(path: Path, meta: dict | None) -> dict[str, dict]:
@@ -507,7 +516,7 @@ def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path, co
         usage_prompt = int(usage.get("prompt_tokens") or 0)
         usage_completion = int(usage.get("completion_tokens") or 0)
     note = (
-        "本次为 mock 模式：作答头是确定性的词面重叠选择器，引擎 answer() 走离线规则。这些数字不是记忆质量分数。"
+        "本次为 mock 模式：作答头用确定性词面重叠，引擎答复由评测适配器映射到选项。这些数字不是记忆质量分数。"
         if resolved != "live"
         else (
             f"本次引擎、无记忆基线和全上下文基线使用同一个接口，模型 {resolved_model}，"
