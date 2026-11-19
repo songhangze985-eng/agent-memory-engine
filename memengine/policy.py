@@ -11,7 +11,7 @@ import re
 from memengine.distance import MIN_REL, is_noise, is_override
 from memengine.notebook import format_fact_line
 from memengine.store import key_type
-from memengine.textutil import char_bigrams, jaccard, normalize_entity, parse_cn_number
+from memengine.textutil import ORDINAL_PHRASE, char_bigrams, jaccard, normalize_entity, parse_cn_number
 
 REFUSAL = "根据现有记忆，没有足够的直接关联可以确认这一点。"
 
@@ -20,7 +20,7 @@ def _specific_zkeys(keys) -> set[str]:
     return {normalize_entity(str(key)) for key in (keys or []) if str(key) and key_type(str(key)) == "entity"}
 
 
-_ORDINAL = re.compile(r"第([0-9]+|[一二两三四五六七八九十])次")
+_ORDINAL = ORDINAL_PHRASE
 
 
 def _noop() -> dict:

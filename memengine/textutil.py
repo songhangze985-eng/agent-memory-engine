@@ -51,10 +51,27 @@ def token_units(text: str) -> int:
     return len(text) + 3 * len(re.findall(r"[\u4e00-\u9fff]", text)) if text else 0
 
 
+# Shared by temporal.parse_temporal_intent and policy.travel_revision.
+ORDINAL_PHRASE = re.compile(r"第\s*([\d一二两三四五六七八九十]+)\s*次")
+
+
 def parse_cn_number(raw: str) -> int:
+    """Arabic digits, or a Chinese numeral from 1 through 99.
+
+    Anything else stays 1, matching the old single-character fallback.
+    """
     if raw.isdigit():
         return int(raw)
-    return _CN_NUM.get(raw, 1)
+    if raw in _CN_NUM:
+        return _CN_NUM[raw]
+    if len(raw) < 2 or raw.count("十") != 1 or any(char not in _CN_NUM for char in raw):
+        return 1
+    tens_text, ones_text = raw.split("十")
+    if len(tens_text) > 1 or len(ones_text) > 1:
+        return 1
+    tens = _CN_NUM[tens_text] if tens_text else 1
+    ones = _CN_NUM[ones_text] if ones_text else 0
+    return tens * 10 + ones
 
 
 def split_sentences(text: str) -> list[str]:
