@@ -14,10 +14,10 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["memengine*", "prompts*"]
+include = ["memengine*"]
 
 [tool.setuptools.package-data]
-prompts = ["*.txt"]
+memengine = ["prompt_templates/*.txt"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

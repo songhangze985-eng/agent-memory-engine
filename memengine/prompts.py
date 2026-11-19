@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from importlib.resources import files
 from pathlib import Path
 
 _FILES = {
@@ -16,17 +17,12 @@ _FILES = {
 
 
 def prompt_dir() -> Path:
-    """Resolve ``prompts/`` for editable installs and packaged wheels."""
-    here = Path(__file__).resolve().parent
-    candidates = [
-        here.parent / "prompts",  # repo / editable layout
-        here / "prompts",  # packaged next to the module
-    ]
-    for path in candidates:
-        if path.is_dir() and (path / _FILES["origin"]).is_file():
-            return path
+    """Resolve prompt templates packaged inside memengine."""
+    root = files("memengine") / "prompt_templates"
+    if (root / _FILES["origin"]).is_file():
+        return root
     raise FileNotFoundError(
-        "prompts/ not found beside the package; expected origin_boundary.txt"
+        "prompt_templates/ not found in the memengine package; expected origin_boundary.txt"
     )
 
 

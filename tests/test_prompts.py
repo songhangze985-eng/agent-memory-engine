@@ -21,9 +21,9 @@ def test_prompt_dir_resolves_spec_files():
 
 
 def test_prompt_templates_resolve_via_importlib_resources():
-    root = files("prompts")
+    root = files("memengine") / "prompt_templates"
     for name in _PROMPT_FILES:
-        assert root.joinpath(name).read_text(encoding="utf-8").strip()
+        assert (root / name).read_text(encoding="utf-8").strip()
 
 
 def test_prompt_files_keep_the_spec_contract():
