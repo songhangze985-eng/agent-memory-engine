@@ -168,7 +168,7 @@ def test_category_hub_and_noise_never_expand_as_graph_edges():
     graph = engine.store.z_index()
     assert len(graph["类目:movie"]) == 10
     assert not engine.store.search_entity_inverted(["类目:影视", "话题:时事杂讯"])
-    hashed = engine.search_z_hash(["实体:Alice"], ["类目:影视"])
+    hashed = engine.search_z_hash(["实体:Alice"])
     assert [hit["plain"] for hit in hashed] == ["Alice starred in film Title0"]
     result = engine.retrieve("Which film did Alice star in?", read_only=True)
     assert result["ranked"][0]["plain"] == "Alice starred in film Title0"
@@ -237,6 +237,43 @@ def test_call_local_clock_and_pending_flush_are_scoped():
     assert engine._now() == 60
     engine.reset_clock()
     assert engine._now() == 50
+
+
+def test_scoped_readers_see_only_the_requested_tenant():
+    engine = _engine()
+    engine.add("老周对苯甲酸钠过敏。", user_id="alice", timestamp=1)
+    retrieved = engine.retrieve("老周对什么过敏？", user_id="alice", read_only=True)
+    assert "苯甲酸钠" in retrieved["context"]
+    assert engine.timeline_stats() == {"events": 0, "nodes": 0, "layer1": 0, "layer2": 0, "reduction": None}
+    assert engine.render() == ""
+    assert engine.has_facts() is False
+
+    alice = engine.timeline_stats(user_id="alice")
+    assert (alice["events"], alice["nodes"], alice["layer2"]) == (1, 1, 1)
+    assert "苯甲酸钠" in engine.render(user_id="alice")
+    assert engine.has_facts(user_id="alice") is True
+    assert [hit["plain"] for hit in engine.search_z_hash(["人物:老周"], user_id="alice")] == ["老周对苯甲酸钠过敏"]
+    assert engine.search_z_hash(["人物:老周"]) == []
+
+    engine.add("苏晚的门禁密码是7341。", timestamp=2)
+    assert engine.timeline_stats()["events"] == 1
+    assert "7341" in engine.render() and "苯甲酸钠" not in engine.render()
+    assert engine.search_z_hash(["人物:苏晚"]) and engine.search_z_hash(["人物:老周"]) == []
+    assert "7341" not in engine.render(user_id="alice")
+    assert engine.timeline_stats(user_id="alice")["events"] == 1
+    assert engine.search_z_hash(["人物:苏晚"], user_id="alice") == []
+    assert engine.has_facts(user_id="carol") is False
+
+    engine.add("李楠将前往青岛参加供应商会谈。", user_id="alice", agent_id="beta", session_id="s2", timestamp=3)
+    scoped = {"user_id": "alice", "agent_id": "beta", "session_id": "s2"}
+    assert "青岛" not in engine.render(user_id="alice")
+    assert engine.has_facts(user_id="alice", agent_id="beta") is False
+    assert engine.timeline_stats(user_id="alice")["events"] == 1
+    assert "青岛" in engine.render(**scoped)
+    assert engine.timeline_stats(**scoped)["events"] == 1
+    assert engine.has_facts(**scoped) is True
+    assert "青岛" in engine.search_z_hash(["人物:李楠"], **scoped)[0]["plain"]
+    assert engine.search_z_hash(["人物:李楠"], user_id="alice") == []
 
 
 def test_fifty_engine_writes_persist_bounded_timeline(tmp_path):
