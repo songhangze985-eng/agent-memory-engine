@@ -205,7 +205,7 @@ def _guess_attribute(query: str, facts: list[dict]) -> str:
 
 def travel_revision(query: str):
     match = _ORDINAL.search(query or "")
-    if match and "之前" in query:
+    if match and ("之前" in query or "以前" in query):
         return parse_cn_number(match.group(1)) - 1
     if re.search(r"最早|原本|以前|\b(?:originally|original|first)\b", query or "", re.I):
         return 0

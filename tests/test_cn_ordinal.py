@@ -24,9 +24,10 @@ def test_parse_cn_number_reads_compound_numerals():
 def test_temporal_and_revision_policy_share_ordinals():
     expected = {"十二": 11, "二十": 19, "二十三": 22, "十": 9, "二": 1}
     for numeral, index in expected.items():
-        query = f"在第{numeral}次修改预算之前"
-        assert parse_temporal_intent(query, NOW).rev_index == index
-        assert travel_revision(query) == index
+        for marker in ("之前", "以前"):
+            query = f"在第{numeral}次修改预算{marker}"
+            assert parse_temporal_intent(query, NOW).rev_index == index
+            assert travel_revision(query) == index
     spaced = "在第 十二 次修改预算之前"
     assert parse_temporal_intent(spaced, NOW).rev_index == 11
     assert travel_revision(spaced) == 11
@@ -35,6 +36,7 @@ def test_temporal_and_revision_policy_share_ordinals():
     assert travel_revision(digits) == 11
     assert parse_temporal_intent("before the second revision", NOW).rev_index == 1
     assert travel_revision("before the second revision") == "previous"
+    assert travel_revision("以前") == 0
 
 
 def test_before_nth_budget_edit_uses_that_revision():
@@ -60,3 +62,9 @@ def test_before_nth_budget_edit_uses_that_revision():
     assert "5000" in twelfth["response"], twelfth["response"]
     assert "4000" not in twelfth["response"]
     assert "1000" not in twelfth["response"]
+
+    earlier = engine.answer("在第十二次修改预算以前", timestamp=900)
+    assert earlier["temporal_intent"]["rev_index"] == 11
+    assert "5000" in earlier["response"], earlier["response"]
+    assert "4000" not in earlier["response"]
+    assert "1000" not in earlier["response"]

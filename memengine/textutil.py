@@ -56,10 +56,7 @@ ORDINAL_PHRASE = re.compile(r"第\s*([\d一二两三四五六七八九十]+)\s*�
 
 
 def parse_cn_number(raw: str) -> int:
-    """Arabic digits, or a Chinese numeral from 1 through 99.
-
-    Anything else stays 1, matching the old single-character fallback.
-    """
+    """Arabic digits, or a Chinese numeral from 1 through 99. Anything else stays 1."""
     if raw.isdigit():
         return int(raw)
     if raw in _CN_NUM:
