@@ -6,20 +6,12 @@ import hashlib
 import math
 import re
 from collections import Counter
-from typing import Protocol
 
 import numpy as np
 
 from memengine.categories import map_categories
 from memengine.router import match_entities
 from memengine.textutil import strip_step_tags, tokenize_for_fts
-
-
-class Embedder(Protocol):
-    @property
-    def model_name(self) -> str: ...
-
-    def encode(self, texts: list[str]) -> np.ndarray: ...
 
 
 def normalize_vectors(vectors):
@@ -165,19 +157,6 @@ class HashedTfidfEmbedder:
 def rank_vector_hits(facts, scores, top_n):
     pairs = sorted(zip(scores, facts), key=lambda pair: -pair[0])
     return [{**fact, "vector_score": float(score)} for score, fact in pairs[:max(0, top_n)]]
-
-
-def unique_facts(z_index: dict) -> list[dict]:
-    seen: set[str] = set()
-    facts: list[dict] = []
-    for bucket in (z_index or {}).values():
-        for fact in bucket:
-            fact_id = fact.get("id")
-            if not fact_id or fact_id in seen:
-                continue
-            seen.add(fact_id)
-            facts.append(fact)
-    return facts
 
 
 def weighted_rrf(vec_hits: list[dict], hash_hits: list[dict], w_vec: float = 0.65, w_hash: float = 0.35, k: int = 60,
