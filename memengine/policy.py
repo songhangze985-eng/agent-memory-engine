@@ -11,7 +11,7 @@ import re
 from memengine.distance import MIN_REL, is_noise, is_override
 from memengine.notebook import format_fact_line
 from memengine.store import key_type
-from memengine.textutil import char_bigrams, jaccard, normalize_entity, parse_cn_number
+from memengine.textutil import ORDINAL_PHRASE, char_bigrams, jaccard, normalize_entity, parse_cn_number
 
 REFUSAL = "根据现有记忆，没有足够的直接关联可以确认这一点。"
 
@@ -20,7 +20,7 @@ def _specific_zkeys(keys) -> set[str]:
     return {normalize_entity(str(key)) for key in (keys or []) if str(key) and key_type(str(key)) == "entity"}
 
 
-_ORDINAL = re.compile(r"第([0-9]+|[一二两三四五六七八九十])次")
+_ORDINAL = ORDINAL_PHRASE
 
 
 def _noop() -> dict:
@@ -274,7 +274,17 @@ def plan_answer(facts: list, query: str, query_type="FACTUAL", matched_entities=
     elif timed and any(intent.get(key) is not None for key in ("start_ts", "end_ts", "rev_index")):
         chosen = _dedupe(timed)
     elif isinstance(travel, int) and historical:
-        chosen = _select_revision(historical, query, travel)
+        attribute = _guess_attribute(query, facts)
+        scoped = [fact for fact in facts if fact.get("attribute") == attribute] if attribute else list(facts)
+        latest = max((int(fact.get("revision") or 0) for fact in scoped), default=-1)
+        current = [fact for fact in scoped if not fact.get("historical") and int(fact.get("revision") or 0) == latest]
+        # Before the Nth change is revision N-1. Past the newest stored revision, that is the current row.
+        if latest >= 0 and travel >= latest and current:
+            chosen = _dedupe(current)
+            chosen_ids = {fact.get("id") for fact in chosen}
+            rejected = [item for item in rejected if item not in chosen_ids]
+        else:
+            chosen = _select_revision(historical, query, travel)
     elif timed:
         chosen = _dedupe(timed)
     elif historical and (travel is not None or query_type == "TIME_TRAVEL"):

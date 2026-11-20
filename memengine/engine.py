@@ -1033,13 +1033,19 @@ class CognitiveMemoryEngine(TaskWorkspace):
         eligible = admissible_evidence(bundle)
         facts = [row for row in eligible.values() if row["kind"] == "fact"]
         additional = [row for row in eligible.values() if row["kind"] != "fact" and evidence_matches_query(query, row)]
+        temporal = bundle["temporal_intent"]
+        # A before-Nth or plain previous query already names the revision. Keep the recalled
+        # facts when the only shared term is the attribute, so the ordinal selection can run.
+        revision_ask = query_type == "TIME_TRAVEL" and (
+            temporal.get("rev_index") is not None or (
+                temporal.get("order_hint") in {"latest", "earliest"}
+                and temporal.get("start_ts") is None and temporal.get("end_ts") is None))
         # Preserve the notebook selection rules for fact synthesis. Fresh session and task evidence
         # can answer directly when long-term recall lacks a relevant fact.
-        fallback_rows = facts if any(evidence_matches_query(query, row) for row in facts) else additional[:1]
+        fallback_rows = facts if facts and (revision_ask or any(evidence_matches_query(query, row) for row in facts)) else additional[:1]
         if fallback_rows and fallback_rows[0]["kind"] != "fact":
             fallback_rows = [{**row, "id": row["evidence_id"]} for row in fallback_rows]
         entities = bundle["matched_entities"]
-        temporal = bundle["temporal_intent"]
         memories = [{key: row[key] for key in ("id", "evidence_id", "text", "attribute", "entity_z_keys", "topic",
                                                "historical", "revision", "root_fact_id", "entity_anchor",
                                                "temporal_match", "vector_score", "zkeys", "is_conflict_or_override",

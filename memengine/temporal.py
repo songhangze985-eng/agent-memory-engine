@@ -8,12 +8,12 @@ from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from math import sqrt
 
-from memengine.textutil import normalize_entity, parse_cn_number, strip_step_tags, tokenize_for_fts
+from memengine.textutil import ORDINAL_PHRASE, normalize_entity, parse_cn_number, strip_step_tags, tokenize_for_fts
 from memengine.vector import _QUERY_STOP
 
 _DATE = re.compile(r"(?<!\d)((?:19|20)\d\d)[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
 _YEAR = re.compile(r"(?<![\w.-])((?:19|20)\d\d)(?![\d./-])|((?:19|20)\d\d)年")
-_BEFORE_N = re.compile(r"第\s*([\d一二两三四五六七八九十]+)\s*次.{0,12}(?:之前|以前)|"
+_BEFORE_N = re.compile(ORDINAL_PHRASE.pattern + r".{0,12}(?:之前|以前)|"
                        r"\bbefore\s+(?:the\s+)?(\d+|first|second|third|fourth|fifth)(?:st|nd|rd|th)?\s+"
                        r"(?:change|update|revision|edit)", re.I)
 _ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
