@@ -43,11 +43,12 @@ def jaccard(left: set[str], right: set[str]) -> float:
 
 def estimate_tokens(text: str) -> int:
     """CJK character ≈ 1 token; other characters ≈ 4 per token."""
-    if not text:
-        return 0
-    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
-    other = len(text) - cjk
-    return cjk + (other + 3) // 4
+    return (token_units(text) + 3) // 4
+
+
+def token_units(text: str) -> int:
+    """Count quarter-token units so concatenation rounds only once."""
+    return len(text) + 3 * len(re.findall(r"[\u4e00-\u9fff]", text)) if text else 0
 
 
 def parse_cn_number(raw: str) -> int:
@@ -77,14 +78,15 @@ def normalize_entity(raw: str) -> str:
     return re.sub(r"\s+", "", text).casefold()
 
 
-def tokenize_for_fts(text: str) -> str:
+def tokenize_for_fts(text: str, *, legacy=False) -> str:
     terms = []
-    for token in re.findall(r"[\u3400-\u9fff]+|[A-Za-z0-9_.\-/]+", strip_step_tags(text)):
+    pattern = r"[\u3400-\u9fff]+|[A-Za-z0-9_.\-/]+" if legacy else r"[\u3400-\u9fff]+|[A-Za-z0-9_.\-/@#+:]+"
+    for token in re.findall(pattern, strip_step_tags(text)):
         if "\u3400" <= token[0] <= "\u9fff":
             terms.extend(token)
             terms.extend(token[index:index + 2] for index in range(len(token) - 1))
         else:
-            token = token.strip(".-/").lower()
+            token = token.strip(".-/" if legacy else ".-:").lower()
             if any(char.isalnum() for char in token):
                 terms.append(token)
     return " ".join(terms)

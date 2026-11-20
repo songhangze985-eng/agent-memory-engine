@@ -16,6 +16,7 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from pathlib import Path
 
+from eval.evidence_ablation import Question, Turn, measure_pair
 from eval.membench.catalog import (
     CATEGORIES,
     DRIVE_URL,
@@ -37,10 +38,10 @@ from eval.membench.score import (
     mean,
     recall_at_10,
 )
-from memengine.engine import CognitiveMemoryEngine
+from eval.metrics import retrieval_report, retrieval_table
+from eval.paired import LABELS, add_backend_argument, cli_backend, evaluate_pair, make_engine
 from memengine.llm import FatalLLMError, MockLLMClient, build_llm_from_env
 from memengine.textutil import estimate_tokens, step_ids_in
-from memengine.vector import HashedTfidfEmbedder
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = Path(__file__).resolve().parent / ".cache" / "MemData"
@@ -92,9 +93,8 @@ def _retrieved_texts(retrieved: dict) -> list[str]:
     return texts
 
 
-def _eval_item(item: dict, client, mock: bool, artifacts_dir: Path | None = None) -> dict:
-    engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient() if mock else client,
-                                   vector=HashedTfidfEmbedder() if mock else None)
+def _eval_item(item: dict, client, mock: bool, artifacts_dir: Path | None = None, backend="hashed") -> dict:
+    engine = make_engine("mock" if mock else "live", client=client, allow_casual=True, backend=backend)
     write_ms = []
     usage_ctx = (
         client.track_usage()
@@ -108,12 +108,23 @@ def _eval_item(item: dict, client, mock: bool, artifacts_dir: Path | None = None
         engine.store.close()
 
 
+def paired_question(item, stamp):
+    return Question(_item_key(item), item["category"], question_stem(item), stamp,
+                    frozenset(map(str, item["evidence_steps"])))
+
+
+def evidence_turn(turn, index):
+    return Turn(str(turn.get("step", index)), "default", "user", turn["text"], turn["ts"])
+
+
 def _eval_item_body(item: dict, engine, client, mock: bool, write_ms: list, usage_delta: dict, artifacts_dir: Path | None = None) -> dict:
         write_actions: dict[str, int] = {}
         skipped_turns: list[dict] = []
-        for turn in item["turns"]:
+        raw_ids = {}
+        for index, turn in enumerate(item["turns"]):
             started = time.perf_counter()
             added = engine.add(turn["text"], timestamp=turn["ts"])
+            raw_ids[added["turn_id"]] = evidence_turn(turn, index)
             write_ms.append((time.perf_counter() - started) * 1000)
             ops = list(added.get("operations") or [])
             if not ops:
@@ -133,8 +144,10 @@ def _eval_item_body(item: dict, engine, client, mock: bool, write_ms: list, usag
         question = format_question(item)
         started = time.perf_counter()
         query_time = parse_timestamp(item.get("q_time"), max((turn["ts"] for turn in item["turns"]), default=0) + 1)
-        retrieved = engine.retrieve(stem, timestamp=query_time)
+        pair = evaluate_pair(engine, stem, query_time)
+        retrieved = pair.retrieved
         read_ms = (time.perf_counter() - started) * 1000
+        paired = measure_pair(engine, paired_question(item, query_time), pair, raw_ids)
         started = time.perf_counter()
         # Reuse the same retrieval so Recall@10 / same-head score the memory answer() saw.
         answered = engine.answer(stem, retrieved=retrieved)
@@ -175,6 +188,7 @@ def _eval_item_body(item: dict, engine, client, mock: bool, write_ms: list, usag
             "full_context_choice": full_letter,
             "full_context_correct": choice_correct(full_letter, item["ground_truth"]),
             "recall_at_10": recall_at_10(steps, item["evidence_steps"]),
+            **paired,
             "evidence_steps": item["evidence_steps"],
             "retrieved_steps": steps[:10],
             "retrieved_preview": [text[:200] for text in memory_texts[:10]],
@@ -354,6 +368,9 @@ def _markdown(payload: dict) -> str:
             "论文 Table 5（Qwen2.5-7B-Instruct，Sub-dataset 1）的报告值写在 JSON 的 `paper_reported_not_this_run`，不是上表。",
         ]
     )
+    if "paired_retrieval" in payload:
+        lines.extend(["", "## 配对检索与上下文装配", "",
+                      retrieval_table(("Overall", label, payload["paired_retrieval"][key]) for key, label in LABELS.items())])
     return "\n".join(lines) + "\n"
 
 
@@ -361,8 +378,8 @@ def _item_key(item: dict) -> str:
     return f"{item.get('category')}|{item.get('subtype')}|{item.get('scenario')}|{item.get('tid')}"
 
 
-def _checkpoint_meta(sample: int, seed: int, mode: str, model: str | None) -> dict:
-    return {"_checkpoint_meta": True, "contract_version": 3, "sample": sample, "seed": seed, "mode": mode, "model": model}
+def _checkpoint_meta(sample: int, seed: int, mode: str, model: str | None, backend="hashed") -> dict:
+    return {"_checkpoint_meta": True, "contract_version": 5, "sample": sample, "seed": seed, "mode": mode, "model": model, "backend": backend}
 
 
 def _load_checkpoint(path: Path, meta: dict | None) -> dict[str, dict]:
@@ -403,7 +420,7 @@ def _init_checkpoint(path: Path, meta: dict) -> dict[str, dict]:
     return done
 
 
-def _evaluate_all(items, client, mock: bool, concurrency: int, checkpoint_path: Path | None = None, checkpoint_meta: dict | None = None, artifacts_dir: Path | None = None) -> list[dict]:
+def _evaluate_all(items, client, mock: bool, concurrency: int, checkpoint_path: Path | None = None, checkpoint_meta: dict | None = None, artifacts_dir: Path | None = None, backend="hashed") -> list[dict]:
     rows: list[dict | None] = [None] * len(items)
     lock = threading.Lock()
     done = _init_checkpoint(checkpoint_path, checkpoint_meta or {}) if checkpoint_path else {}
@@ -449,12 +466,14 @@ def _evaluate_all(items, client, mock: bool, concurrency: int, checkpoint_path: 
         for index, item in pending:
             if fatal:
                 break
-            consume_result(index, lambda item=item: _eval_item(item, client, mock, artifacts_dir))
+            consume_result(index, lambda item=item: _eval_item(item, client, mock, artifacts_dir) if backend == "hashed"
+                           else _eval_item(item, client, mock, artifacts_dir, backend))
     else:
         workers = min(concurrency, len(pending))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_eval_item, item, client, mock, artifacts_dir): index for index, item in pending
+                pool.submit(_eval_item, item, client, mock, artifacts_dir, *((backend,) if backend != "hashed" else ())): index
+                for index, item in pending
             }
             for future in as_completed(futures):
                 index = futures[future]
@@ -473,7 +492,7 @@ def _evaluate_all(items, client, mock: bool, concurrency: int, checkpoint_path: 
     return rows  # type: ignore[return-value]
 
 
-def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path, concurrency: int = 1, checkpoint_path: Path | None = None, only_tids: list[int] | None = None, only_categories: list[str] | None = None, fresh: bool = False, artifacts_dir: Path | None = None) -> dict:
+def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path, concurrency: int = 1, checkpoint_path: Path | None = None, only_tids: list[int] | None = None, only_categories: list[str] | None = None, fresh: bool = False, artifacts_dir: Path | None = None, backend="hashed") -> dict:
     if mode == "mock":
         client, resolved, resolved_model = MockLLMClient(), "mock", None
     elif mode == "live":
@@ -502,11 +521,11 @@ def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path, co
         bak = checkpoint_path.with_name(checkpoint_path.name + ".freshbak")
         checkpoint_path.replace(bak)
         print(f"--fresh: moved previous checkpoint to {bak}", flush=True)
-    meta = _checkpoint_meta(sample, seed, resolved, resolved_model)
+    meta = _checkpoint_meta(sample, seed, resolved, resolved_model, backend)
     if only_tids:
         meta = {**meta, "only_tids": sorted({int(tid) for tid in only_tids})}
     started = time.perf_counter()
-    rows = _evaluate_all(items, client, resolved != "live", concurrency, checkpoint_path, meta, artifacts_dir)
+    rows = _evaluate_all(items, client, resolved != "live", concurrency, checkpoint_path, meta, artifacts_dir, backend)
     wall_s = time.perf_counter() - started
     prompt_tokens = sum(row["prompt_tokens"] + row["question_tokens"] + row["ingest_tokens"] for row in rows)
     usage_prompt = sum(int(row.get("llm_prompt_tokens") or 0) for row in rows)
@@ -534,6 +553,7 @@ def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path, co
         "seed": seed,
         "n_items": len(rows),
         "mode": resolved,
+        "backend": backend,
         "model": resolved_model,
         "requested_model": model,
         "meaningful_as_quality": resolved == "live",
@@ -546,6 +566,7 @@ def run(sample: int, seed: int, mode: str, model: str | None, data_dir: Path, co
         "llm_completion_tokens": usage_completion if resolved == "live" else None,
         "cost_usd": None,
         "systems": _category_table(rows),
+        "paired_retrieval": {key: retrieval_report(rows, key) for key in LABELS},
         "capacity_bins": capacity_bins(rows),
         "paper_reported_not_this_run": PAPER_TABLE5_QWEN_SUBDATASET1,
         "items": rows,
@@ -557,6 +578,7 @@ def main() -> None:
     parser.add_argument("--sample", type=int, default=20, help="Items per top-level category (participation/observation x factual/reflective).")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mode", choices=["auto", "mock", "live"], default="auto")
+    add_backend_argument(parser)
     parser.add_argument("--model", default=None, help="Model name for a live OpenAI-compatible endpoint. Ignored in mock mode.")
     parser.add_argument("--concurrency", type=int, default=1, help="How many trajectories to score at once. Live DeepSeek runs can use 4.")
     parser.add_argument("--data-dir", default=str(DEFAULT_CACHE), help="Directory of official MemData files. Missing files are downloaded.")
@@ -575,7 +597,8 @@ def main() -> None:
     out = Path(args.out)
     checkpoint = out.with_suffix(".jsonl")
     artifacts_dir = Path(args.artifacts_dir) if args.artifacts_dir else (out.parent / "artifacts")
-    payload = run(args.sample, args.seed, args.mode, args.model, Path(args.data_dir), args.concurrency, checkpoint, only_tids or None, only_categories or None, args.fresh, artifacts_dir)
+    backend = cli_backend(parser, args.backend)
+    payload = run(args.sample, args.seed, args.mode, args.model, Path(args.data_dir), args.concurrency, checkpoint, only_tids or None, only_categories or None, args.fresh, artifacts_dir, backend)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     out.with_suffix(".md").write_text(_markdown(payload), encoding="utf-8")

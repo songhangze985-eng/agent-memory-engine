@@ -3,7 +3,88 @@
 from collections import defaultdict
 import json
 
-from memengine.textutil import estimate_tokens, merge_step_ids, step_ids_in, strip_step_tags
+from memengine.textutil import merge_step_ids, step_ids_in, strip_step_tags, tokenize_for_fts
+from memengine.lifecycle import content_hash, is_constraint
+
+
+def migrate_identifiers(store, tokenizer):
+    conn = store.conn
+    rebuild = []
+    for table in ("facts_fts", "facts_cold_fts", "raw_turns_fts"):
+        schema = conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[0]
+        if tokenizer not in schema:
+            rebuild.append(table)
+            conn.execute(f"DROP TABLE {table}")
+            columns = "" if table == "raw_turns_fts" else "fact_id UNINDEXED,user_id UNINDEXED,agent_id UNINDEXED,"
+            conn.execute(f'CREATE VIRTUAL TABLE {table} USING fts5({columns}fts_tokens, tokenize="{tokenizer}")')
+    missing = store.get_meta("identifier_index_version") != "1"
+    if not (missing or rebuild):
+        return
+    for table, tier in (("facts_fts", "hot"), ("facts_cold_fts", "cold")):
+        if table in rebuild:
+            conn.executemany(f"INSERT INTO {table}(rowid,fact_id,user_id,agent_id,fts_tokens) VALUES (?,?,?,?,?)",
+                             ((*row[:4], tokenize_for_fts(row[4])) for row in conn.execute(
+                                 "SELECT rowid,id,user_id,agent_id,plain FROM facts WHERE tier=?", (tier,))))
+    if missing or "raw_turns_fts" in rebuild:
+        conn.execute("DELETE FROM raw_turns_fts")
+        conn.executemany("INSERT INTO raw_turns_fts(rowid,fts_tokens) VALUES (?,?)",
+                         ((row[0], tokenize_for_fts(row[1])) for row in conn.execute("SELECT turn_id,text FROM raw_turns")))
+    if missing:
+        for row in conn.execute("SELECT id,plain FROM facts"):
+            store.index_identifiers(row[0], row[1])
+    store.set_meta("identifier_index_version", "1")
+
+
+def migrate_lifecycle(store):
+    if store.get_meta("lifecycle_schema_version") == "1":
+        return
+    conn = store.conn
+    fields = {
+        "memory_type": "TEXT NOT NULL DEFAULT 'fact' CHECK(memory_type IN ('fact','observation','procedural'))",
+        "confidence": "REAL NOT NULL DEFAULT 1.0", "derived_from_ids": "TEXT NOT NULL DEFAULT '[]'",
+        "is_constraint": "INTEGER NOT NULL DEFAULT 0", "tier": "TEXT NOT NULL DEFAULT 'hot' CHECK(tier IN ('hot','cold'))",
+        "last_accessed_at": "REAL", "content_hash": "TEXT", "mention_count": "INTEGER NOT NULL DEFAULT 1",
+        "tool_call_ids": "TEXT NOT NULL DEFAULT '[]'", "trigger_text": "TEXT NOT NULL DEFAULT ''",
+        "success_count": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for table, columns in (("facts", fields), ("raw_turns", {"extraction_state": "TEXT NOT NULL DEFAULT 'done'"}),
+                           ("fact_entities", {"tier": "TEXT NOT NULL DEFAULT 'hot'"})):
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, definition in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_scope_hash ON facts(user_id,agent_id,content_hash,tier,status,session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_scope_tier ON facts(user_id,agent_id,tier,status,session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_event_time_hot ON facts(user_id,agent_id,event_time_start) WHERE tier='hot'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fe_hot ON fact_entities(user_id,agent_id,key_type,entity_norm) WHERE tier='hot'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_turns_pending ON raw_turns(user_id,agent_id,session_id,extraction_state,turn_id)")
+    conn.executemany("UPDATE facts SET content_hash=?,is_constraint=? WHERE id=?",
+                     [(content_hash(row["plain"]), int(is_constraint(row["plain"])), row["id"])
+                      for row in conn.execute("SELECT id,plain FROM facts WHERE content_hash IS NULL")])
+    store.set_meta("lifecycle_schema_version", "1")
+
+
+def migrate_observation_rows(store):
+    if store.get_meta("lifecycle_sources_migrated") == "1":
+        return
+    conn = store.conn
+    for row in conn.execute("SELECT * FROM observations ORDER BY created_at,id").fetchall():
+        scope = (row["user_id"], row["agent_id"], "default")
+        block = store.create_block("Observations", row["created_at"], scope=scope)
+        data = store._version_data(fact_id=row["id"], block_id=block, seq=1, scope=scope, formatted=row["content"],
+                                   plain=row["content"], attribute="", value="", surprise=.25, layout=None, isolated=False,
+                                   is_conflict=False, role="assistant", ingest_time=row["created_at"], event_time_start=None,
+                                   status="active" if row["status"] == "active" else "deleted",
+                                   valid_until=None if row["status"] == "active" else row["updated_at"],
+                                   source_turn_ids=json.loads(row["source_turn_ids"]))
+        data.update(memory_type="observation", confidence=row["confidence"], derived_from_ids=row["derived_from_fact_ids"])
+        store._insert_version(data, (), offline=True)
+    conn.execute("DELETE FROM observations")
+    for row in conn.execute("SELECT key,value FROM meta WHERE key LIKE 'core_snapshot:%'").fetchall():
+        user_id, agent_id = json.loads(row["key"].split(":", 1)[1])
+        snapshot = json.loads(row["value"])
+        store.set_core_snapshot(**snapshot, user_id=user_id, agent_id=agent_id)
+    store.set_meta("lifecycle_sources_migrated", "1")
 
 
 def migrate_legacy(store):

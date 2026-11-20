@@ -53,7 +53,7 @@ def test_reasoner_output_cannot_write_or_move_the_circle():
     before = _snapshot(engine)
     result = engine.answer("老周对哪种防腐剂过敏？", timestamp=5000)
     after = _snapshot(engine)
-    assert result["response"] == "这是回复"
+    assert result["abstained"] and not result["claims"]
     assert after["lines"] == before["lines"]
     assert after["keys"] == before["keys"]
     assert "人物:黑客" not in after["keys"]

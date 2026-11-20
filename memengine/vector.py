@@ -81,7 +81,7 @@ class HashedTfidfEmbedder:
         vectors = []
         for text in texts:
             clean = strip_step_tags(text)
-            terms = [term for term in tokenize_for_fts(clean).split() if term not in _QUERY_STOP]
+            terms = [term for term in tokenize_for_fts(clean, legacy=True).split() if term not in _QUERY_STOP]
             weights = {}
             counts = Counter(terms)
             for term in terms:
