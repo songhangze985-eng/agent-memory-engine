@@ -8,11 +8,8 @@ import sysconfig
 from pathlib import Path
 
 _FILES = {
-    "origin": "origin_boundary.txt",
     "reason": "system2_reasoner.txt",
     "layout": "notebook_layout.txt",
-    "query": "query_parser.txt",
-    "controller": "query_origin_controller.txt",
 }
 
 
@@ -24,10 +21,10 @@ def prompt_dir() -> Path:
         Path(sysconfig.get_path("data")) / "share" / "memengine" / "prompts",
     ]
     for path in candidates:
-        if path.is_dir() and (path / _FILES["origin"]).is_file():
+        if path.is_dir() and (path / _FILES["layout"]).is_file():
             return path
     raise FileNotFoundError(
-        "prompts/ not found beside the package; expected origin_boundary.txt"
+        "prompts/ not found beside the package; expected notebook_layout.txt"
     )
 
 

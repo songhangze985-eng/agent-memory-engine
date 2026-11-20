@@ -7,7 +7,7 @@ from memengine.categories import (
 )
 from memengine.engine import CognitiveMemoryEngine
 from memengine.llm import MockLLMClient
-from memengine.queryparse import normalize_parsed_query, parse_query_rules
+from memengine.queryparse import parse_query_rules
 from memengine.vector import weighted_rrf
 
 
@@ -41,18 +41,12 @@ def test_unknown_categories_are_dropped_and_aliases_collapse():
     assert "类目:影视" in attached
 
 
-def test_query_parser_maps_hypernym_stems():
+def test_parse_query_rules_maps_hypernym_stems():
     movies = parse_query_rules("What do the movies I mentioned have in common?")
     assert "类目:影视" in movies["categories"]
     assert movies["entities"] == []
     books = parse_query_rules("What kind of books might I prefer?")
     assert "类目:书籍" in books["categories"]
-    invented = normalize_parsed_query(
-        {"query_type": "FACTUAL", "entities": ["实体:Interstellar"], "categories": ["类目:影视"], "semantic_vector_query": "x"},
-        "the movies I mentioned",
-    )
-    assert invented["entities"] == []
-    assert "类目:影视" in invented["categories"]
 
 
 def test_weighted_rrf_prefers_vector_ranks_by_default():
