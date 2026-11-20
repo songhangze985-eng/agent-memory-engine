@@ -256,19 +256,39 @@ def test_scoped_readers_see_only_the_requested_tenant():
     assert engine.search_z_hash(["人物:老周"]) == []
 
     engine.add("苏晚的门禁密码是7341。", timestamp=2)
+    engine.add("苏晚的门禁密码是9821。", user_id="bob", timestamp=2)
     assert engine.timeline_stats()["events"] == 1
-    assert "7341" in engine.render() and "苯甲酸钠" not in engine.render()
-    assert engine.search_z_hash(["人物:苏晚"]) and engine.search_z_hash(["人物:老周"]) == []
-    assert "7341" not in engine.render(user_id="alice")
+    assert engine.timeline_stats(user_id="bob")["events"] == 1
+    assert "7341" in engine.render() and "苯甲酸钠" not in engine.render() and "9821" not in engine.render()
+    bob = engine.render(user_id="bob")
+    assert "9821" in bob and "7341" not in bob and "苯甲酸钠" not in bob
+    assert engine.has_facts(user_id="bob") is True
+    assert [hit["plain"] for hit in engine.search_z_hash(["人物:苏晚"])] == ["苏晚的门禁密码是7341"]
+    assert [hit["plain"] for hit in engine.search_z_hash(["人物:苏晚"], user_id="bob")] == ["苏晚的门禁密码是9821"]
+    assert engine.search_z_hash(["人物:老周"]) == [] and engine.search_z_hash(["人物:老周"], user_id="bob") == []
+    assert "7341" not in engine.render(user_id="alice") and "9821" not in engine.render(user_id="alice")
     assert engine.timeline_stats(user_id="alice")["events"] == 1
     assert engine.search_z_hash(["人物:苏晚"], user_id="alice") == []
     assert engine.has_facts(user_id="carol") is False
 
-    engine.add("李楠将前往青岛参加供应商会谈。", user_id="alice", agent_id="beta", session_id="s2", timestamp=3)
+    engine.add("仓库备用钥匙放在绿色铁盒。", user_id="alice", session_id="s2", timestamp=3)
+    assert engine.timeline_stats(user_id="alice")["events"] == 2
+    alice_all = engine.render(user_id="alice")
+    assert "绿色铁盒" in alice_all and "苯甲酸钠" in alice_all
+    assert "绿色铁盒" not in engine.render(user_id="alice", session_id="default")
+    assert engine.timeline_stats(user_id="alice", session_id="default")["events"] == 1
+    assert engine.timeline_stats(user_id="alice", session_id="s2")["events"] == 1
+    assert engine.has_facts(user_id="alice", session_id="missing") is False
+    assert "绿色铁盒" in engine.search_z_hash(["事件:仓库备用钥匙"], user_id="alice")[0]["plain"]
+    assert engine.search_z_hash(["事件:仓库备用钥匙"], user_id="alice", session_id="default") == []
+    assert "绿色铁盒" not in engine.render() and "绿色铁盒" not in engine.render(user_id="bob")
+
+    engine.add("李楠将前往青岛参加供应商会谈。", user_id="alice", agent_id="beta", session_id="s2", timestamp=4)
     scoped = {"user_id": "alice", "agent_id": "beta", "session_id": "s2"}
     assert "青岛" not in engine.render(user_id="alice")
-    assert engine.has_facts(user_id="alice", agent_id="beta") is False
-    assert engine.timeline_stats(user_id="alice")["events"] == 1
+    assert engine.has_facts(user_id="alice", agent_id="beta") is True
+    assert engine.has_facts(user_id="alice", agent_id="beta", session_id="default") is False
+    assert engine.timeline_stats(user_id="alice")["events"] == 2
     assert "青岛" in engine.render(**scoped)
     assert engine.timeline_stats(**scoped)["events"] == 1
     assert engine.has_facts(**scoped) is True
