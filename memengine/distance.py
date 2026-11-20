@@ -21,21 +21,6 @@ def unit_interval(value, default=0.0):
     return min(1.0, max(0.0, parsed)) if math.isfinite(parsed) else default
 
 
-def asymptotic_distance(raw_dist: float, epsilon: float = EPSILON) -> float:
-    return max(epsilon, unit_interval(raw_dist))
-
-
-def semantic_origin_text(origin):
-    return " ".join(str(origin.get(key) or "") for key in ("x_topic", "y_subtopic", "decision_anchor")).strip()
-
-
-def compute_raw_dist(fact: dict, origin: dict | None) -> float:
-    from memengine.vector import HashedTfidfEmbedder
-
-    hit = HashedTfidfEmbedder().search(semantic_origin_text(origin or {}), [fact], 1)[0]
-    return 1.0 - unit_interval(hit["vector_score"])
-
-
 def is_noise(fact: dict) -> bool:
     return fact.get("topic") == NEWS_TOPIC or set(fact.get("zkeys") or ()) == {NEWS_KEY}
 
