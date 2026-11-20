@@ -60,3 +60,9 @@ def test_before_nth_budget_edit_uses_that_revision():
     assert "5000" in twelfth["response"], twelfth["response"]
     assert "4000" not in twelfth["response"]
     assert "1000" not in twelfth["response"]
+
+    earlier = engine.answer("在第十二次修改预算以前", timestamp=900)
+    assert earlier["temporal_intent"]["rev_index"] == 11
+    assert "5000" in earlier["response"], earlier["response"]
+    assert "4000" not in earlier["response"]
+    assert "1000" not in earlier["response"]

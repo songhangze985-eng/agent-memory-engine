@@ -11,16 +11,13 @@ import re
 from memengine.distance import MIN_REL, is_noise, is_override
 from memengine.notebook import format_fact_line
 from memengine.store import key_type
-from memengine.textutil import ORDINAL_PHRASE, char_bigrams, jaccard, normalize_entity, parse_cn_number
+from memengine.textutil import char_bigrams, jaccard, normalize_entity, parse_before_ordinal
 
 REFUSAL = "根据现有记忆，没有足够的直接关联可以确认这一点。"
 
 def _specific_zkeys(keys) -> set[str]:
     """Identity keys used for overwrite and reachability; categories are too coarse."""
     return {normalize_entity(str(key)) for key in (keys or []) if str(key) and key_type(str(key)) == "entity"}
-
-
-_ORDINAL = ORDINAL_PHRASE
 
 
 def _noop() -> dict:
@@ -204,9 +201,9 @@ def _guess_attribute(query: str, facts: list[dict]) -> str:
 
 
 def travel_revision(query: str):
-    match = _ORDINAL.search(query or "")
-    if match and "之前" in query:
-        return parse_cn_number(match.group(1)) - 1
+    index = parse_before_ordinal(query)
+    if index is not None:
+        return index
     if re.search(r"最早|原本|以前|\b(?:originally|original|first)\b", query or "", re.I):
         return 0
     if re.search(r"之前|上次|\b(?:last time|before|earlier|previously|used to)\b", query or "", re.I):

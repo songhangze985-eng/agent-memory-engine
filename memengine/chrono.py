@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from memengine.textutil import parse_cn_number
+
 UTC = timezone.utc
 DAY = 86400
 _MONTH = {name.casefold(): i for i, name in enumerate(calendar.month_name) if i}
@@ -14,7 +16,6 @@ _MONTH_RE = "|".join(sorted(_MONTH, key=len, reverse=True))
 _WEEKDAYS = "|".join(calendar.day_name)
 _WORD = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
          "seven": 7, "eight": 8, "nine": 9, "ten": 10, "a": 1, "an": 1}
-_ZH = dict(zip("零一二三四五六七八九十", range(11))) | {"两": 2}
 
 
 @dataclass(frozen=True)
@@ -68,12 +69,9 @@ def _month(day, months):
 
 
 def _number(text):
-    if text.isdigit():
-        return int(text)
-    if text in _WORD or text in _ZH:
-        return (_WORD | _ZH)[text]
-    tens, _, units = text.partition("十")
-    return _ZH.get(tens, 1) * 10 + _ZH.get(units, 0)
+    if text in _WORD:
+        return _WORD[text]
+    return parse_cn_number(text)
 
 
 def _bounds(day, unit):

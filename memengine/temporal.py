@@ -8,13 +8,12 @@ from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from math import sqrt
 
-from memengine.textutil import ORDINAL_PHRASE, normalize_entity, parse_cn_number, strip_step_tags, tokenize_for_fts
+from memengine.textutil import normalize_entity, parse_before_ordinal, parse_cn_number, strip_step_tags, tokenize_for_fts
 from memengine.vector import _QUERY_STOP
 
 _DATE = re.compile(r"(?<!\d)((?:19|20)\d\d)[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
 _YEAR = re.compile(r"(?<![\w.-])((?:19|20)\d\d)(?![\d./-])|((?:19|20)\d\d)年")
-_BEFORE_N = re.compile(ORDINAL_PHRASE.pattern + r".{0,12}(?:之前|以前)|"
-                       r"\bbefore\s+(?:the\s+)?(\d+|first|second|third|fourth|fifth)(?:st|nd|rd|th)?\s+"
+_BEFORE_EN = re.compile(r"\bbefore\s+(?:the\s+)?(\d+|first|second|third|fourth|fifth)(?:st|nd|rd|th)?\s+"
                        r"(?:change|update|revision|edit)", re.I)
 _ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
 _EARLIEST = re.compile(r"最早|第一次|原本|\b(?:earliest|originally|initially|first time|initial)\b", re.I)
@@ -155,9 +154,12 @@ def _interval(text, now):
 
 
 def parse_temporal_intent(query: str, now: float) -> TemporalIntent:
-    ordinal = _BEFORE_N.search(query)
-    if ordinal:
-        number = ordinal[1] or ordinal[2].lower()
+    index = parse_before_ordinal(query)
+    if index is not None:
+        return TemporalIntent(True, order_hint="before_n", rev_index=index)
+    english = _BEFORE_EN.search(query)
+    if english:
+        number = english[1].lower()
         return TemporalIntent(True, order_hint="before_n", rev_index=max(0, _ORDINALS.get(number, parse_cn_number(number)) - 1))
     start, end = _interval(query, now)
     earliest = bool(_EARLIEST.search(query))
