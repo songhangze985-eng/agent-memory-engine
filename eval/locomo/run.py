@@ -1,9 +1,9 @@
 """Evaluate LoCoMo turn evidence against a pure RRF control."""
 
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 
+from memengine.chrono import parse_session_clock
 from eval.evidence_ablation import Question, Turn, run_cli, sample_rows
 
 URL = "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
@@ -16,12 +16,12 @@ def parse_turns(conversation):
     turns = []
     for number, key in sessions:
         date = conversation.get(f"{key}_date_time")
-        stamp = (datetime.strptime(date, "%I:%M %p on %d %B, %Y").replace(tzinfo=timezone.utc).timestamp()
+        stamp = (parse_session_clock(date)
                  if date else (turns[-1].timestamp + 1 if turns else 0.0))
         for index, item in enumerate(conversation[key]):
             caption = item.get("blip_caption") or ""
             text = f"{item['speaker']}: {item['text']}" + (f" [Image: {caption}]" if caption else "")
-            turns.append(Turn(str(item["dia_id"]), str(number), "user", text, stamp + index / 1000))
+            turns.append(Turn(str(item["dia_id"]), str(number), "user", text, stamp + index / 1000, mention_time=stamp if date else None, speaker=item["speaker"]))
     if not turns or len({turn.ref for turn in turns}) != len(turns):
         raise ValueError("LoCoMo conversation has no turns or duplicate dia_id values")
     return turns
@@ -39,9 +39,12 @@ def groups(data, count, seed):
         dialog = data[ordinal]
         turns = parse_turns(dialog["conversation"])
         stamp = max(turn.timestamp for turn in turns) + 1
-        questions = [Question(f"{dialog['sample_id']}:{index}", CATEGORIES[int(item["category"])], item["question"],
-                              stamp, frozenset(map(str, item.get("evidence") or ())),
-                              unanswerable=int(item["category"]) == 5) for index, item in chosen]
+        questions = []
+        for index, item in chosen:
+            date = parse_session_clock(item.get("question_date"))
+            questions.append(Question(f"{dialog['sample_id']}:{index}", CATEGORIES[int(item["category"])], item["question"],
+                                      stamp if date is None else date, frozenset(map(str, item.get("evidence") or ())),
+                                      unanswerable=int(item["category"]) == 5))
         yield turns, questions
 
 

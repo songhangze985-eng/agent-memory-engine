@@ -14,28 +14,19 @@ from pathlib import Path
 from eval.baselines import CrudMemory, NaiveRAG
 from eval.generate import build_all
 from eval.metrics import answer_correct, percentile, trap_hallucinated
-from memengine.engine import CognitiveMemoryEngine
+from eval.paired import add_backend_argument, cli_backend, make_engine
 from memengine.llm import MockLLMClient, build_llm_from_env
-from memengine.vector import HashedTfidfEmbedder
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _systems(llm):
-    def vector():
-        return HashedTfidfEmbedder() if isinstance(llm, MockLLMClient) else None
-
+def _systems(llm, backend):
+    mode = "mock" if isinstance(llm, MockLLMClient) else "live"
     def full():
-        return CognitiveMemoryEngine(db_path=":memory:", llm=llm, vector=vector())
+        return make_engine(mode, client=llm, backend=backend, allow_casual=True)
 
     def variant():
-        return CognitiveMemoryEngine(
-            db_path=":memory:",
-            llm=llm,
-            vector=vector(),
-            enable_timeline_buffer=False,
-            enable_casual_bypass=False,
-        )
+        return make_engine(mode, client=llm, backend=backend, timeline_buffer=False)
 
     return [
         ("naive_rag", NaiveRAG, False),
@@ -216,7 +207,7 @@ def _markdown(payload: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def run(scale: str = "small", seed: int = 42, mode: str = "auto") -> dict:
+def run(scale: str = "small", seed: int = 42, mode: str = "auto", backend: str = "hashed") -> dict:
     if mode == "mock":
         llm, resolved, model = MockLLMClient(), "mock", None
     elif mode == "live":
@@ -230,6 +221,7 @@ def run(scale: str = "small", seed: int = 42, mode: str = "auto") -> dict:
         "scale": scale,
         "seed": seed,
         "mode": resolved,
+        "backend": backend,
         "model": model,
         "meaningful_as_quality": resolved == "live",
         "note": (
@@ -241,7 +233,7 @@ def run(scale: str = "small", seed: int = 42, mode: str = "auto") -> dict:
         "system_has_router": {},
         "systems": {},
     }
-    for name, factory, has_router in _systems(llm):
+    for name, factory, has_router in _systems(llm, backend):
         payload["system_has_router"][name] = has_router
         payload["systems"][name] = _eval_system(factory, bundle["tests"], has_router)
         if not has_router:
@@ -254,13 +246,14 @@ def main() -> None:
     parser.add_argument("--scale", choices=["small", "full"], default="small")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mode", choices=["auto", "mock", "live"], default="auto")
+    add_backend_argument(parser)
     parser.add_argument(
         "--out",
         default=str(ROOT / "eval" / "results" / "small_eval.json"),
         help="JSON output path",
     )
     args = parser.parse_args()
-    payload = run(scale=args.scale, seed=args.seed, mode=args.mode)
+    payload = run(scale=args.scale, seed=args.seed, mode=args.mode, backend=cli_backend(parser, args.backend))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

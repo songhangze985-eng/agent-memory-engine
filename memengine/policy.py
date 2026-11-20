@@ -248,7 +248,7 @@ def _select_revision(facts: list[dict], query: str, target) -> list[dict]:
     return _dedupe(chosen)
 
 
-def plan_answer(facts: list, query: str, query_type="FACTUAL", matched_entities=()) -> dict:
+def plan_answer(facts: list, query: str, query_type="FACTUAL", matched_entities=(), temporal_intent=None) -> dict:
     """Read-only. Does not accept a store and does not return write operations."""
     kept, rejected = [], []
     local = {normalize_entity(key) for key in matched_entities}
@@ -264,10 +264,19 @@ def plan_answer(facts: list, query: str, query_type="FACTUAL", matched_entities=
             kept.append(fact)
     historical = [fact for fact in kept if fact.get("historical")]
     travel = travel_revision(query)
-    if isinstance(travel, int) and historical:
+    timed = [fact for fact in kept if fact.get("temporal_match")] if query_type == "TIME_TRAVEL" else []
+    intent = temporal_intent or {}
+    if timed and intent.get("order_hint") in {"earliest", "latest"}:
+        per_chain = {}
+        for fact in timed:
+            per_chain.setdefault(fact.get("root_fact_id") or fact["id"], fact)
+        chosen = _dedupe(list(per_chain.values()))
+    elif timed and any(intent.get(key) is not None for key in ("start_ts", "end_ts", "rev_index")):
+        chosen = _dedupe(timed)
+    elif isinstance(travel, int) and historical:
         chosen = _select_revision(historical, query, travel)
-    elif any(fact.get("temporal_match") for fact in kept) and query_type == "TIME_TRAVEL":
-        chosen = _dedupe([fact for fact in kept if fact.get("temporal_match")])
+    elif timed:
+        chosen = _dedupe(timed)
     elif historical and (travel is not None or query_type == "TIME_TRAVEL"):
         chosen = _dedupe(historical)
     else:

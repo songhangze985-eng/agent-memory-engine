@@ -41,7 +41,8 @@ def is_noise(fact: dict) -> bool:
 
 
 def consolidation_count(fact: dict) -> int:
-    return max(1, len(fact.get("source_step_ids") or ()), len(fact.get("source_turn_ids") or ())) + int(fact.get("hit_count") or 0)
+    return max(1, len(fact.get("source_step_ids") or ()), len(fact.get("source_turn_ids") or ()),
+               fact.get("mention_count", 0)) + int(fact.get("hit_count") or 0)
 
 
 def is_override(fact: dict) -> bool:
@@ -49,6 +50,8 @@ def is_override(fact: dict) -> bool:
 
 
 def compute_bipolar_radius(fact: dict, c_max: int) -> float:
+    if fact.get("expires_at") is not None:
+        return 1.0
     if is_noise(fact):
         return 0.5
     count = consolidation_count(fact)
@@ -72,15 +75,13 @@ def inner_boundary(radius: float) -> float:
     return min(0.35, max(0.15, radius))
 
 
-def score_bipolar(fact: dict, *, c_max: int, rrf_max: float, radius: float,
-                  bipolar_lambda: float, epsilon: float = EPSILON) -> dict:
+def score_bipolar(fact: dict, *, c_max: int, radius: float, bipolar_lambda: float,
+                  status_weight: float = 1.0, epsilon: float = EPSILON, decay: float = 1.0) -> dict:
     radial = compute_bipolar_radius(fact, c_max)
     weight = bipolar_weight(radial, epsilon, epsilon)
-    relevance = fact["rrf_score"] / (rrf_max + 1e-12)
     inner = inner_boundary(radius)
     zone = INNER if radial <= inner else OUTER if radial >= 1.0 - inner else BELT
-    bonus = 0.05 if is_override(fact) and not is_noise(fact) else 0.0
     multiplier = bipolar_lambda + (1.0 - bipolar_lambda) * weight
-    score = relevance * multiplier + bonus
-    return {**fact, "r_m": radial, "bipolar_weight": weight, "rel_norm": relevance,
-            "override_bonus": bonus, "score": score, "bipolar_score": score, "zone": zone}
+    score = fact["ce_score"] * multiplier * status_weight * decay
+    return {**fact, "r_m": radial, "bipolar_weight": weight, "bipolar_factor": multiplier, "status_weight": status_weight,
+            "score": score, "bipolar_score": score, "final_score": score, "zone": zone, "decay_factor": decay}

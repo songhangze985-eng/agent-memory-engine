@@ -10,6 +10,7 @@ because those queries are not space-separated.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 from memengine.textutil import tokenize
 
@@ -63,35 +64,34 @@ def _token_forms(token: str) -> set[str]:
     return forms
 
 
-def _name_matches(name: str, query: str, query_tokens: set[str]) -> bool:
-    if not name:
-        return False
+@lru_cache(maxsize=32768)
+def _entity_forms(name: str):
     if _cjk(name):
-        return len(name) >= 2 and name in query
+        return None
     parts = latin_tokens(name)
     if not parts:
         folded = re.sub(r"[^a-z0-9]+", "", name.lower())
-        query_forms = set().union(*(_token_forms(tok) for tok in query_tokens)) if query_tokens else set()
-        return len(folded) >= 3 and (folded in query_tokens or folded in query_forms)
-    query_forms = set().union(*(_token_forms(tok) for tok in query_tokens)) if query_tokens else set()
-    return all(_token_forms(part) & query_forms for part in parts)
+        return (frozenset((folded,)),) if len(folded) >= 3 else ()
+    return tuple(frozenset(_token_forms(part)) for part in parts)
+
+
+def _name_matches(name: str, query: str, query_forms: set[str]) -> bool:
+    if not name:
+        return False
+    forms = _entity_forms(name)
+    if forms is None:
+        return len(name) >= 2 and name in query
+    return bool(forms) and all(not part.isdisjoint(query_forms) for part in forms)
 
 
 def entity_hit(query: str, entity_keys) -> bool:
-    tokens = latin_tokens(query)
-    for key in entity_keys:
-        if _name_matches(entity_names(key), query, tokens):
-            return True
-    return False
+    forms = {form for token in latin_tokens(query) for form in _token_forms(token)}
+    return any(_name_matches(entity_names(key), query, forms) for key in entity_keys)
 
 
 def match_entities(query: str, entity_keys) -> list[str]:
-    tokens = latin_tokens(query)
-    hits = []
-    for key in sorted(entity_keys):
-        if _name_matches(entity_names(key), query, tokens):
-            hits.append(key)
-    return hits
+    forms = {form for token in latin_tokens(query) for form in _token_forms(token)}
+    return [key for key in sorted(entity_keys) if _name_matches(entity_names(key), query, forms)]
 
 
 def _zh_trigger(pattern: re.Pattern, text: str) -> bool:

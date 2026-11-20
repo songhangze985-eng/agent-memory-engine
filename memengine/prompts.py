@@ -1,9 +1,10 @@
-"""Load the three spec prompts and fill their template slots."""
+"""Load registered prompts and fill their template slots."""
 
 from __future__ import annotations
 
 import json
 import re
+import sysconfig
 from pathlib import Path
 
 _FILES = {
@@ -20,7 +21,7 @@ def prompt_dir() -> Path:
     here = Path(__file__).resolve().parent
     candidates = [
         here.parent / "prompts",  # repo / editable layout
-        here / "prompts",  # packaged next to the module
+        Path(sysconfig.get_path("data")) / "share" / "memengine" / "prompts",
     ]
     for path in candidates:
         if path.is_dir() and (path / _FILES["origin"]).is_file():
@@ -38,9 +39,9 @@ def render_prompt(name: str, **kwargs) -> str:
     text = load_prompt(name)
     if name == "layout":
         kwargs = {"role": "user", "categories": [], "timestamp": 0, "current_date_iso": "1970-01-01",
-                  "recent_turns": [], **kwargs}
+                  "recent_turns": [], "batch_turns": [], **kwargs}
     if name == "reason":
-        kwargs = {"matched_entities": [], **kwargs}
+        kwargs = {"matched_entities": [], "temporal_intent": {}, "context_bundle": "", "citation_index": {}, **kwargs}
     values = {}
     for key, value in kwargs.items():
         if not isinstance(value, str):
