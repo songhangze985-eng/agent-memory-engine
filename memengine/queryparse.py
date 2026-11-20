@@ -5,12 +5,9 @@ from __future__ import annotations
 import re
 
 from memengine.categories import (
-    CATEGORY_ENUM,
-    attach_dual_zkeys,
     category_synonyms,
     extract_explicit_entities,
     map_categories,
-    validate_category_keys,
 )
 
 _REFLECTIVE = re.compile(
@@ -49,50 +46,3 @@ def parse_query_rules(stem: str, *, categories=()) -> dict:
         "categories": keys,
         "semantic_vector_query": expand_semantic_query(text, keys),
     }
-
-
-def normalize_parsed_query(data: dict | None, stem: str, *, categories=()) -> dict:
-    fallback = parse_query_rules(stem, categories=categories)
-    raw = data if isinstance(data, dict) else {}
-    query_type = str(raw.get("query_type") or fallback["query_type"]).upper()
-    if query_type not in {"REFLECTIVE", "FACTUAL", "TIME_TRAVEL"}:
-        query_type = fallback["query_type"]
-    categories = validate_category_keys(raw.get("categories") or [], fallback_text=stem, limit=3, categories=categories)
-    if not categories:
-        categories = list(fallback["categories"])
-    entities = []
-    seen = set()
-    for item in raw.get("entities") or []:
-        key = str(item).strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        entities.append(key)
-    # The parser must not invent titles: if the model invented an entity
-    # that is not a visible proper noun and not in the stem, drop it.
-    stem_l = (stem or "").lower()
-    kept = []
-    for key in entities:
-        name = key.split(":", 1)[-1]
-        if name and name.lower() in stem_l:
-            kept.append(f"实体:{name}")
-    if not kept:
-        kept = list(fallback["entities"])
-    semantic = str(raw.get("semantic_vector_query") or "").strip() or fallback["semantic_vector_query"]
-    if not semantic:
-        semantic = expand_semantic_query(stem, categories)
-    return {
-        "query_type": query_type,
-        "entities": kept,
-        "categories": categories,
-        "semantic_vector_query": semantic,
-    }
-# Re-exported so write-side callers have one import path.
-__all__ = [
-    "CATEGORY_ENUM",
-    "attach_dual_zkeys",
-    "expand_semantic_query",
-    "history_language",
-    "normalize_parsed_query",
-    "parse_query_rules",
-]

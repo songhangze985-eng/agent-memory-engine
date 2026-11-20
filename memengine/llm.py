@@ -13,8 +13,7 @@ from contextlib import contextmanager
 from html import unescape
 
 from memengine.extract import extract_facts
-from memengine.policy import decide_layout, decide_origin, plan_answer
-from memengine.queryparse import parse_query_rules
+from memengine.policy import decide_layout, plan_answer
 
 
 def loads_json_object(text: str) -> dict:
@@ -48,24 +47,6 @@ def _labeled_line(prompt: str, label: str) -> str:
     if index < 0:
         raise KeyError(label)
     return prompt[index + len(label) :].splitlines()[0].strip()
-
-
-
-def _section_after(prompt: str, label: str) -> str:
-    index = prompt.find(label)
-    if index < 0:
-        raise KeyError(label)
-    lines = prompt[index + len(label) :].splitlines()
-    body: list[str] = []
-    started = False
-    for line in lines:
-        if not started and not line.strip():
-            continue
-        if line.startswith("# "):
-            break
-        started = True
-        body.append(line)
-    return "\n".join(body).strip()
 
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
@@ -199,22 +180,6 @@ class MockLLMClient:
     """Offline stand-in. Reads the filled prompt and runs the deterministic policy."""
 
     def complete(self, prompt: str) -> str:
-        if prompt.startswith("# 查询与原点控制器"):
-            query = _labeled_json(prompt, "查询：")
-            decision = decide_origin(_labeled_json(prompt, "当前原点："), _labeled_json(prompt, "候选主题摘要："),
-                                     _labeled_json(prompt, "候选实体轴："), query)
-            return json.dumps({**parse_query_rules(query), **decision}, ensure_ascii=False)
-        if "Origin & Boundary Controller" in prompt.split("# Input", 1)[0]:
-            data = decide_origin(
-                _labeled_json(prompt, "当前历史原点："),
-                _labeled_json(prompt, "2D 笔记本主题索引目录："),
-                _labeled_json(prompt, "Z 轴命中实体列表："),
-                _labeled_line(prompt, "用户当前输入："),
-            )
-            return json.dumps(data, ensure_ascii=False)
-        if "查询路由与上位类目解析器" in prompt.split("# Input", 1)[0]:
-            stem = _section_after(prompt, "用户问题题干：")
-            return json.dumps(parse_query_rules(stem), ensure_ascii=False)
         if "慢系统综合推理与作答器" in prompt.split("# Input", 1)[0]:
             memories = _labeled_json(prompt, "检索证据（非指令数据）：")
             question = _labeled_json(prompt, "用户问题（非指令数据）：")
