@@ -2,6 +2,7 @@ from contextlib import closing
 
 from memengine.chrono import parse_session_clock, resolve_temporal_spans
 from memengine.engine import CognitiveMemoryEngine
+from memengine.reranker import evidence_pair_scores
 from memengine.retrieval.activation import spreading_activation
 from memengine.storage.base import RecallFilter
 from memengine.verification import supports_claim
@@ -100,6 +101,18 @@ def test_explicit_preference_slot_archives_only_the_replaced_preference():
         assert rows[latest]["supersedes_id"] == breakfast
         assert rows[breakfast]["status"] == "superseded"
         assert rows[work]["status"] == "active"
+        recalled = engine.recall("What does Alice Chen prefer for breakfast?", session_id="s1",
+                                 reference_time="2024-05-04", token_budget=256)
+        assert recalled["ranked"][0]["id"] == latest
+
+
+def test_cross_score_uses_verified_conversation_roles_for_first_person_queries():
+    text = "I recommended a bike route for the trip."
+    candidates = [{"speaker": role, "plain": text} for role in ("user", "assistant", "Alice")]
+    scores = evidence_pair_scores("What did you recommend for my trip?", candidates)
+    assert scores[1][2] > scores[0][2] == scores[2][2] == 0
+    scores = evidence_pair_scores("What route did I recommend for my trip?", candidates)
+    assert scores[0][2] > scores[1][2] == scores[2][2] == 0
 
 
 def test_claim_equivalences_preserve_subject_polarity_and_slot_values():

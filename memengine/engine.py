@@ -705,8 +705,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
             score = score * temporal_weight + 0.35 * fact["exact_hit_ratio"]
             if plan and plan.wide:
                 overlap = query_overlap(query, fact)
-                coverage, clause = pair_scores[index] if pair_scores else (overlap, 0)
-                quality = .22 * coverage + .10 * clause + .20 * fact["rrf_norm"]
+                coverage, clause, attribution = pair_scores[index] if pair_scores else (overlap, 0, 0)
+                quality = .22 * coverage + .10 * clause + .16 * attribution + .20 * fact["rrf_norm"]
                 quality += .30 * calendar_relevance(query, plan.windows, fact)
                 if fact.get("speaker") and re.search(r"(?<!\w)" + re.escape(fact["speaker"]) + r"(?!\w)",
                                                       query, re.I):

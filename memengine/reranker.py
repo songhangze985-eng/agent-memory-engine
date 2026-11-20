@@ -24,6 +24,12 @@ _CONSTRAINT_QUERY = re.compile(r"禁忌|限制|例外|特别情况|需要注意|
                                r"\b(?:allerg\w*|exceptions?|restrictions?|contraindications?|precautions?|avoid)\b", re.I)
 _CONSTRAINT_FACT = re.compile(r"过敏|禁忌|禁止|不得|不能|切勿|无障碍|例外|"
                               r"\b(?:allerg\w*|exceptions?|restrictions?|contraindications?|avoid|prohibited|must not)\b", re.I)
+_ASSISTANT_RECALL = re.compile(r"\b(?:did|have|had) you (?:say|think|tell|mention|suggest|recommend|give|advise|ask|propose)\b|"
+                               r"\byour (?:answer|recommendation|suggestion)\b", re.I)
+_FIRST_PERSON = re.compile(r"\b(?:i|my|me|mine)\b", re.I)
+_ADVICE = re.compile(r"\b(?:recommendations?|suggestions?|advice|tips|what should)\b", re.I)
+_SELF_PREFERENCE = re.compile(r"\bI (?:always |usually |mostly |really )?"
+                              r"(?:prefer|love|enjoy|dislike|avoid|am allergic|am vegan|am vegetarian)\b", re.I)
 
 
 def anchored_relevance(query, candidates):
@@ -43,13 +49,15 @@ def evidence_pair_scores(query, candidates):
         return {stem(word) if word.isascii() and word.isalpha() else word for word in terms if word not in _STOP}
 
     wanted = canonical(competition_terms(query))
+    role = "assistant" if _ASSISTANT_RECALL.search(query) else "user" if _FIRST_PERSON.search(query) else None
+    seeks_advice = role == "user" and bool(_ADVICE.search(query))
     documents = [fact.get("normalized_text") or fact["plain"] for fact in candidates]
     overlaps = [wanted & canonical(competition_terms(text)) for text in documents]
     frequencies = Counter(word for shared in overlaps for word in shared)
     weights = {word: 1 + log((len(candidates) + 1) / (frequencies[word] + 1)) for word in sorted(wanted)}
     denominator = sum(weights.values()) or 1
     output = []
-    for text, shared in zip(documents, overlaps):
+    for fact, text, shared in zip(candidates, documents, overlaps):
         coverage = sum(weights[word] for word in sorted(shared)) / denominator
         clause = 0.0
         if len(shared) > 1:
@@ -57,7 +65,12 @@ def evidence_pair_scores(query, candidates):
                 local = canonical(competition_terms(value)) & shared
                 if len(local) > 1:
                     clause = max(clause, sum(weights[word] for word in sorted(local)) / denominator)
-        output.append((coverage, clause))
+        attribution = 0.0
+        if role and role == fact.get("speaker") and coverage:
+            attribution = min(1, 2 * coverage)
+            if seeks_advice and _SELF_PREFERENCE.search(fact["plain"]):
+                attribution += .5
+        output.append((coverage, clause, attribution))
     return output
 
 
