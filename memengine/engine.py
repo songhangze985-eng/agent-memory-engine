@@ -825,11 +825,13 @@ class CognitiveMemoryEngine(TaskWorkspace):
                 raise
             return self.local_reranker.score(query, candidates), self.local_reranker
 
-    def search_z_hash(self, entities, categories, query_stem="", *, snapshot=None, index=None, expanded=None):
+    def search_z_hash(self, entities, query_stem="", *, user_id="default", agent_id="default", session_id=None):
+        scope = (user_id, agent_id, session_id)
         seeds = list(entities or [])
         if query_stem:
-            seeds.extend(match_entities(query_stem, self.store.entity_keys()))
-        return self.store.search_entity_inverted(seeds, include_superseded=False)
+            seeds.extend(match_entities(query_stem, self.store.entity_keys(scope=scope)))
+        return self.store.search_entity_inverted(seeds, include_superseded=False, user_id=user_id,
+                                                 agent_id=agent_id, session_id=session_id)
 
     def search_vector(self, query_text: str, top_n: int = 40, *, snapshot=None, user_id="default", agent_id="default",
                       session_id=None, ids_only=False, include_cold=False, filters=None) -> list[dict]:
@@ -842,8 +844,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
         hits = [fact for fact in self.vector.search(query_text, facts, top_n=top_n) if fact.get("vector_score", 0) > 0]
         return [{"id": fact["id"], "vector_score": fact["vector_score"]} for fact in hits] if ids_only else hits
 
-    def has_facts(self) -> bool:
-        return bool(self.store.snapshot())
+    def has_facts(self, *, user_id="default", agent_id="default", session_id=None) -> bool:
+        return bool(self.store.snapshot(scope=(user_id, agent_id, session_id)))
 
     def get_recent_facts(self, limit: int = 10, *, snapshot=None) -> list[dict]:
         facts = self.store.snapshot() if snapshot is None else snapshot
@@ -1090,12 +1092,18 @@ class CognitiveMemoryEngine(TaskWorkspace):
         return {**bundle, "response": response, "reasoning": safe, "llm_fallback": used_fallback,
                 "claims": approved, "provisional_item_ids": provisional, "abstained": not approved}
 
-    def timeline_stats(self) -> dict:
-        return {"events": self.timeline.events, "nodes": self.timeline.nodes, "layer1": len(self.timeline.layer1),
-                "layer2": len(self.timeline.layer2), "reduction": self.timeline.reduction()}
+    def timeline_stats(self, *, user_id="default", agent_id="default", session_id=None) -> dict:
+        scope = (user_id, agent_id, session_id)
+        layer1 = self.store.load_timeline(1, scope=scope)
+        layer2 = self.store.load_timeline(2, scope=scope)
+        events = sum(node.get("event_count", 1) for node in (*layer1, *layer2))
+        nodes = len(layer1) + len(layer2)
+        return {"events": events, "nodes": nodes, "layer1": len(layer1), "layer2": len(layer2),
+                "reduction": None if events <= 0 else 1.0 - nodes / events}
 
-    def render(self) -> str:
-        return "\n\n".join(f"# {block['topic']}\n{render_block(block['lines'])}" for block in self.store.blocks_for_prompt())
+    def render(self, *, user_id="default", agent_id="default", session_id=None) -> str:
+        blocks = self.store.blocks_for_prompt(scope=(user_id, agent_id, session_id))
+        return "\n\n".join(f"# {block['topic']}\n{render_block(block['lines'])}" for block in blocks)
 
     def _call_json(self, prompt, fallback, validator):
         try:
