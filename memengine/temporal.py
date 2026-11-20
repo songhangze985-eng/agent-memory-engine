@@ -5,8 +5,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from itertools import combinations
+from math import sqrt
 
-from memengine.textutil import parse_cn_number
+from memengine.textutil import normalize_entity, parse_cn_number, strip_step_tags, tokenize_for_fts
+from memengine.vector import _QUERY_STOP
 
 _DATE = re.compile(r"(?<!\d)((?:19|20)\d\d)[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
 _YEAR = re.compile(r"(?<![\w.-])((?:19|20)\d\d)(?![\d./-])|((?:19|20)\d\d)年")
@@ -18,6 +21,91 @@ _EARLIEST = re.compile(r"最早|第一次|原本|\b(?:earliest|originally|initia
 _LATEST = re.compile(r"最近|最新|当前|现在|\b(?:latest|current|most recent|now)\b", re.I)
 _PREVIOUS = re.compile(r"之前|以前|上次|\b(?:previously|earlier|last time|used to|before|formerly)\b", re.I)
 _WEEKDAY = {char: index for index, char in enumerate("一二三四五六日")}
+_CONVERSATIONAL = frozenset("just really also still want think have has had about now recently currently new old "
+                            "that they there been get got very going will time update changed".split())
+_STATE_CUE = re.compile(r"现在|改为|搬到|搬去|更新|不再|更换|住在|工作于|现任|"
+                        r"\b(?:current(?:ly)?|now|update[ds]?|switch(?:ed)?|chang(?:ed|e)|no longer|instead|"
+                        r"moved|live[sd]? in|living in|works? (?:at|for)|used to|replac\w*|anymore|new job)\b", re.I)
+_QUANTITY_QUERY = re.compile(r"多少|几(?:个|次|小时|年|月|部)|多久|\bhow (?:many|much|long|often)\b", re.I)
+_CLAUSES = re.compile(r"[!?;。！？；\n]|\.(?=\s)|\s[-–—]\s")
+_QUANTITY = re.compile(r"\b(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b", re.I)
+_NUMBER_WORDS = {name: str(index) for index, name in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve".split())}
+
+
+def competition_terms(text):
+    return {word for word in tokenize_for_fts(text).split()
+            if word not in _QUERY_STOP and word not in _CONVERSATIONAL and (word.isascii() or len(word) > 1)}
+
+
+def _measurement(text, target):
+    if not target:
+        return set(), set()
+    clauses = _CLAUSES.split(text)
+    choices = []
+    for clause in clauses:
+        # A number already named in the question can identify the subject rather than measure it.
+        values = {_NUMBER_WORDS.get(word.lower(), word) for word in _QUANTITY.findall(clause)} - target
+        if values:
+            topics = competition_terms(clause) & target
+            choices.append((topics, values))
+    return max(choices, key=lambda item: len(item[0]), default=(set(), set()))
+
+
+def temporal_competition(candidates, session_orders, query="", scores=None):
+    """Resolve competing versions without changing either stored fact."""
+    pool = candidates[:30]
+    relevance = {fact["id"]: score for fact, score in zip(candidates, scores)} if scores is not None else {}
+    clean = {fact["id"]: re.sub(r"^(?:user|assistant):\s*", "", strip_step_tags(fact["plain"]), flags=re.I) for fact in pool}
+    terms = {key: competition_terms(body) for key, body in clean.items()}
+    focus = competition_terms(query) if _QUANTITY_QUERY.search(query) else set()
+    measurements = {key: _measurement(body, focus) for key, body in clean.items()}
+    entities = {fact["id"]: {normalize_entity(key) for key in fact["entity_z_keys"]} |
+                {key for key, kind in fact["identifiers"].items() if kind == "project_token"} for fact in pool}
+    older, newer = set(), set()
+
+    def position(fact):
+        return (fact["event_time_start"], session_orders.get(fact["session_id"], 0),
+                max(fact["source_turn_ids"], default=0), fact["ingest_time"])
+
+    for a, b in combinations(pool, 2):
+        aid, bid = a["id"], b["id"]
+        linked = a.get("supersedes_id") == bid or b.get("supersedes_id") == aid
+        av = {key for key, kind in a["identifiers"].items() if kind == "version"}
+        bv = {key for key, kind in b["identifiers"].items() if kind == "version"}
+        if not linked and av and bv and av.isdisjoint(bv):
+            continue
+        if not linked and (a["role"] != b["role"] or a.get("epistemic_scope") != b.get("epistemic_scope")):
+            continue
+        overlap = terms[aid] & terms[bid]
+        similarity = len(overlap) / sqrt(max(1, len(terms[aid]) * len(terms[bid])))
+        attribute = a["attribute"]
+        shared_attribute = bool(attribute and not attribute.startswith(("turn:", "event:")) and attribute == b["attribute"])
+        shared_entity = bool(entities[aid] & entities[bid])
+        different_source = (a["session_id"] != b["session_id"] or
+                            bool(a["source_turn_ids"] and b["source_turn_ids"]
+                                 and set(a["source_turn_ids"]).isdisjoint(b["source_turn_ids"])))
+        a_topics, a_values = measurements[aid]
+        b_topics, b_values = measurements[bid]
+        # Long conversational turns often bury a revised count in a single clause.
+        # Compare the query-aligned portions only when both report conflicting quantities.
+        common_topics = a_topics & b_topics
+        quantity_slot = (len(common_topics) >= 2 and min(len(a_topics), len(b_topics)) >= max(2, len(focus) * 0.5)
+                         and a_values.isdisjoint(b_values))
+        if quantity_slot:
+            similarity = max(similarity, len(common_topics) / sqrt(len(a_topics) * len(b_topics)))
+        stateful = quantity_slot or bool(_STATE_CUE.search(clean[aid]) or _STATE_CUE.search(clean[bid]))
+        if not (linked or shared_entity and (shared_attribute or stateful and similarity >= 0.52)
+                or not shared_entity and stateful and different_source and len(overlap) >= 2 and similarity >= 0.68):
+            continue
+        first, second = position(a), position(b)
+        if first != second:
+            old, new = (aid, bid) if first < second else (bid, aid)
+            if new in relevance and relevance[new] < 0.80 * relevance[old]:
+                continue
+            older.add(old)
+            newer.add(new)
+    return {**dict.fromkeys(newer, "latest"), **dict.fromkeys(older, "older")}
 
 
 @dataclass(frozen=True)

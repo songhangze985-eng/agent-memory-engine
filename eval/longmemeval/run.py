@@ -1,18 +1,11 @@
 """Evaluate LongMemEval-S evidence without an external model or judge."""
 
-import re
-from datetime import datetime, timezone
 from pathlib import Path
 
+from memengine.chrono import parse_session_clock as _stamp
 from eval.evidence_ablation import Question, Turn, run_cli, sample_rows
 
 URL = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"
-
-
-def _stamp(value):
-    date = re.sub(r"\s*\([A-Za-z]+\)", "", value)
-    pattern = "%Y/%m/%d %H:%M" if ":" in date else "%Y/%m/%d"
-    return datetime.strptime(date, pattern).replace(tzinfo=timezone.utc).timestamp()
 
 
 def category(row):
@@ -27,9 +20,10 @@ def parse_item(row):
         stamp = _stamp(date)
         for index, item in enumerate(entries):
             role = item["role"]
-            turns.append(Turn(f"{session_id}:{index}", session_id, role, f"{role}: {item['content']}",
+            speaker = item.get("speaker") or role
+            turns.append(Turn(f"{session_id}:{index}", session_id, role, f"{speaker}: {item['content']}",
                               stamp + index / 1000, has_answer=item.get("has_answer") is True,
-                              ingest_session=f"session-{ordinal}"))
+                              ingest_session=f"session-{ordinal}", mention_time=stamp, speaker=speaker))
     bucket = category(row)
     sessions = frozenset(row.get("answer_session_ids") or ())
     evidence = frozenset(turn.ref for turn in turns if turn.has_answer)
@@ -56,5 +50,5 @@ def groups(data, count, seed):
 
 
 if __name__ == "__main__":
-    run_cli("LongMemEval-S", ("longmemeval_s.json", "longmemeval_s_cleaned.json"), URL,
+    run_cli("LongMemEval-S", ("longmemeval_s_cleaned.json", "longmemeval_s.json"), URL,
             Path(__file__).with_name(".cache"), groups)

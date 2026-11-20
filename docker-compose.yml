@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: memengine
+      POSTGRES_USER: memengine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - memory_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "memengine", "-d", "memengine"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  memengine:
+    build: .
+    environment:
+      MEMENGINE_DB_URL: ${MEMENGINE_DB_URL:?set MEMENGINE_DB_URL}
+      MEMENGINE_API_KEY: ${MEMENGINE_API_KEY:?set MEMENGINE_API_KEY}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  memory_pg:

@@ -4,23 +4,17 @@ import argparse
 import json
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
-
+from eval.evidence_ablation import measure_pair
 from eval.membench.catalog import CATEGORIES
 from eval.membench.items import parse_timestamp, question_stem
 from eval.membench.load import load_sample
-from eval.membench.run import _choose, _item_key
+from eval.membench.run import _choose, _item_key, evidence_turn, paired_question
 from eval.membench.score import choice_correct, extract_steps, mean, recall_at_10
-from memengine import engine as engine_module
+from eval.metrics import print_retrieval_reports, retrieval_report
+from eval.paired import LABELS, TOKEN_BUDGET, TOP_K, add_backend_argument, cli_backend, evaluate_pair, make_engine, paired_retrieve, attach_consolidated_context
+from eval.stress_corpus import stress_dialogue
 from memengine.distance import compute_bipolar_radius, consolidation_count, is_noise
-from memengine.engine import CognitiveMemoryEngine, _fit_context
-from memengine.llm import MockLLMClient
 from memengine.textutil import estimate_tokens
-from memengine.vector import HashedTfidfEmbedder
-
-
-TOP_K = 10
-TOKEN_BUDGET = 2048
 
 
 def measure(item, facts):
@@ -33,44 +27,34 @@ def measure(item, facts):
             "context_tokens": estimate_tokens(context), "facts": len(texts)}
 
 
-def paired_retrieve(engine, query, stamp):
-    fused = []
-    original = engine_module.weighted_rrf
-
-    def capture(*args, **kwargs):
-        candidates = original(*args, **kwargs)
-        fused.append(candidates)
-        return candidates
-
-    with patch.object(engine_module, "weighted_rrf", capture):
-        retrieved = engine.retrieve(query, timestamp=stamp, read_only=True,
-                                    top_k=TOP_K, token_budget=TOKEN_BUDGET)
-    candidates = fused[0] if fused else []
-    assert len(fused) == (retrieved["route"] == "TASK_POISON_CIRCLE")
-    assert len({fact["id"] for fact in candidates}) == len(candidates)
-    assert all(left["rrf_score"] >= right["rrf_score"] for left, right in zip(candidates, candidates[1:]))
-    baseline = _fit_context(candidates, TOP_K, TOKEN_BUDGET)
-    for facts in (retrieved["ranked"], baseline):
-        assert len(facts) <= TOP_K
-        assert estimate_tokens("\n".join(fact["text"] for fact in facts)) <= TOKEN_BUDGET
-        assert bool(facts) == bool(candidates)
-    return retrieved, baseline, candidates
-
-
-def compare(item):
-    engine = CognitiveMemoryEngine(llm=MockLLMClient(), vector=HashedTfidfEmbedder())
+def compare(item, backend="hashed", consolidate=False, *, compare_consolidation=False):
+    engine = make_engine("mock", allow_casual=True, backend=backend)
     with closing(engine.store):
-        for turn in item["turns"]:
-            engine.add(turn["text"], timestamp=turn["ts"])
+        raw_ids = {}
+        for index, turn in enumerate(item["turns"]):
+            added = engine.add(turn["text"], timestamp=turn["ts"])
+            raw_ids[added["turn_id"]] = evidence_turn(turn, index)
         stamp = parse_timestamp(item.get("q_time"), max((turn["ts"] for turn in item["turns"]), default=0) + 1)
-        retrieved, baseline, candidates = paired_retrieve(engine, question_stem(item), stamp)
+        stem = question_stem(item)
+        pair = evaluate_pair(engine, stem, stamp)
+        question = paired_question(item, stamp)
+        with_profile = None
+        if consolidate or compare_consolidation:
+            engine.consolidate(timestamp=stamp)
+            with_profile = attach_consolidated_context(engine, pair, stem)
+            if consolidate:
+                pair = with_profile
+        retrieved, baseline, candidates = pair.retrieved, pair.baseline, pair.candidates
         return {"id": _item_key(item), "tid": item["tid"], "category": item["category"],
                 "ground_truth": item["ground_truth"], "evidence_steps": item["evidence_steps"],
                 "route": retrieved["route"], "n_outer": retrieved["outer_triggered_count"],
                 "n_outer_exception": sum(fact.get("isolated") or fact.get("is_conflict_or_override")
                                          or fact.get("historical") for fact in retrieved["outer"]),
                 "n_belt_compressed": retrieved["belt_compressed_count"], "candidates": len(candidates),
-                "poison": measure(item, retrieved["ranked"]), "rrf": measure(item, baseline)}
+                "poison": measure(item, retrieved["ranked"]), "rrf": measure(item, baseline),
+                "paired": measure_pair(engine, question, pair, raw_ids),
+                **({"consolidated_pair": measure_pair(engine, question, with_profile, raw_ids)}
+                   if compare_consolidation else {})}
 
 
 def summary(rows):
@@ -91,19 +75,19 @@ def summary(rows):
             "rrf_only_correct": sum(row["rrf"]["correct"] and not row["poison"]["correct"] for row in rows), **outcomes}
 
 
-def membench(data_dir, reference, phase_a=False):
+def membench(data_dir, reference, phase_a=False, cohort_only=False, backend="hashed", consolidate=False, *, offline=False):
     seeds = [42, 43, 44, 45, 46]
     results = {}
     cohorts = {}
     for seed in seeds:
-        items = load_sample(5, seed, data_dir)
+        items = load_sample(5, seed, data_dir, offline=True) if offline else load_sample(5, seed, data_dir)
         assert len(items) == 20
         keys = [_item_key(item) for item in items]
         assert len(keys) == len(set(keys))
         cohorts[seed] = keys
         for item, key in zip(items, keys):
             if key not in results:
-                results[key] = compare(item)
+                results[key] = compare(item, backend, consolidate)
         print(f"seed {seed}: 20 samples, {len(results)} unique total", flush=True)
     rows = list(results.values())
     primary = [results[key] for key in cohorts[42]]
@@ -112,61 +96,54 @@ def membench(data_dir, reference, phase_a=False):
         previous = json.loads(reference.read_text())
         assert {int(seed): keys for seed, keys in previous["cohorts"].items()} == cohorts
         for row, logged in zip(rows, previous["items"]):
-            assert row["id"] == logged["id"]
-            if not phase_a:
+            assert row["id"] == logged["id"] and row["evidence_steps"] == logged["evidence_steps"]
+            if not (phase_a or cohort_only):
                 assert row["rrf"] == logged["rrf"], row["id"]
+        print(f"Verified the same 99 question IDs and evidence annotations against {reference}.")
         if phase_a:
             print("Before Phase A, exact same cohort / two-channel RRF:", json.dumps(previous["all_unique"]["rrf"]))
-    report = {"top_k": TOP_K, "token_budget": TOKEN_BUDGET, "mode": "mock", "seeds": seeds,
+    paired = {key: retrieval_report([item["paired"] for item in rows], key) for key in LABELS}
+    report = {"benchmark": "MemBench", "dataset_source": "https://github.com/import-myself/Membench/tree/main/MemData",
+              "top_k": TOP_K, "token_budget": TOKEN_BUDGET, "mode": "mock", "backend": backend, "seeds": seeds,
+              "consolidated": consolidate, "prefix_budget": "separate" if consolidate else "included",
               "seed_42": summary(primary), "all_unique": summary(rows),
+              "paired_retrieval": paired,
               "by_category": {category: summary([row for row in rows if row["category"] == category]) for category in CATEGORIES},
+              "paired_by_category": {category: {key: retrieval_report(
+                  [row["paired"] for row in rows if row["category"] == category], key) for key in LABELS}
+                  for category in CATEGORIES},
               "cohorts": cohorts, "items": rows}
     for label in ("seed_42", "all_unique", "by_category"):
         print(label, json.dumps(report[label], ensure_ascii=False))
+    print(f"MemBench: {len(rows)} unique questions; mode=mock; backend={backend}; seeds={seeds}; source={report['dataset_source']}")
+    print_retrieval_reports(("Overall", label, paired[key]) for key, label in LABELS.items())
     return report
 
 
-def stress_case(index):
-    engine = CognitiveMemoryEngine(llm=MockLLMClient(), vector=HashedTfidfEmbedder())
+def stress_case(index, backend="hashed"):
+    engine = make_engine("mock", allow_casual=True, backend=backend)
     with closing(engine.store):
-        person = ["老周", "张敏", "李楠", "王宁", "苏晚"][index % 5]
-        food = ["花生", "牛奶", "海鲜", "芝麻", "杏仁"][index // 5]
-        tick = 0
-
-        def add(text):
-            nonlocal tick
-            result = engine.add(f"[step {tick}] {text}", timestamp=tick)
-            tick += 1
-            return result
-
-        habit = f"{person}每周三下午三点开周会，周会餐饮安排照常。"
-        habit_id = add(habit)["operations"][0]["line_id"]
-        for _ in range(5 + index % 5):
-            add(habit)
+        case = stress_dialogue(index)
         background_ids = set()
-        for note in range(14 + index % 5):
-            marker = "甲乙丙丁戊己庚辛壬癸"[note // 10] + "甲乙丙丁戊己庚辛壬癸"[note % 10]
-            text = f"{person}周会餐饮方案{marker}的预算为{1000 + note}元，周会餐饮安排计划讨论与通知下达。"
-            for _ in range(2):
-                output = add(text)
-            assert output["operations"][0]["action"] == "NOOP"
-            background_ids.add(output["operations"][0]["target_line_id"])
-        for note in range(12):
-            add(f"通用资讯栏目报道第{note:02d}期城市公共服务进展与社区节庆活动。")
-        exception = add(f"{person}对{food}过敏。")
-        exception_id = exception["operations"][0]["line_id"]
+        for index_in_chat, (kind, text) in enumerate(case.turns):
+            result = engine.add(f"[step {index_in_chat}] {text}", timestamp=index_in_chat)
+            if index_in_chat == 0:
+                habit_id = result["operations"][0]["line_id"]
+            elif kind == "background" and result["operations"][0]["action"] == "NOOP":
+                background_ids.add(result["operations"][0]["target_line_id"])
+            elif kind == "taboo":
+                exception_id = result["operations"][0]["line_id"]
+        tick = len(case.turns)
         assert engine.store.get_line(exception_id)["isolated"]
         assert consolidation_count(engine.store.get_line(habit_id)) == 6 + index % 5
-        queries = (f"{person}周会餐饮安排有什么需要注意的例外？", f"请确认{person}周会餐饮的特别情况。",
-                   f"{person}周会餐饮方案有哪些限制？", f"安排周会餐饮时，{person}有什么饮食限制？")
-        query = queries[index // 5]
-        retrieved, baseline, candidates = paired_retrieve(engine, query, tick + 1)
+        retrieved, baseline, candidates = paired_retrieve(engine, case.positive, tick + 1)
         c_max = max(consolidation_count(fact) for fact in candidates if not is_noise(fact))
         ring = retrieved["poison_circle"]
         belt = {fact["id"] for fact in candidates
                 if ring["radius_r"] < compute_bipolar_radius(fact, c_max) < ring["radius_out"]}
         assert exception_id in {fact["id"] for fact in candidates}
-        assert background_ids <= belt and engine.store.get_line(habit_id)["hit_count"] == 0
+        assert len(background_ids) == 14 + index % 5 and background_ids <= belt
+        assert engine.store.get_line(habit_id)["hit_count"] == 0
 
         def metrics(facts):
             ids = [fact["id"] for fact in facts]
@@ -180,12 +157,14 @@ def stress_case(index):
                 "mid_frequency_candidates": len(belt.intersection(background_ids)),
                 "bipolar": metrics(retrieved["ranked"]), "rrf": metrics(baseline),
                 "belt_pruned": retrieved["belt_pruned_count"],
+                "cliff_dropped": retrieved["gate_stats"]["cliff_dropped_count"],
+                "empty_recall": retrieved["empty_recall"],
                 "outer_triggered_count": retrieved["outer_triggered_count"],
                 "exception_triggered": any(fact["id"] == exception_id for fact in retrieved["outer"])}
 
 
-def stress():
-    rows = [stress_case(index) for index in range(20)]
+def stress(backend="hashed"):
+    rows = [stress_case(index, backend) for index in range(20)]
     keys = ("recall_at_3", "recall_at_5", "mrr", "belt_compression", "tokens")
     aggregate = {mode: {key: mean([row[mode][key] for row in rows]) for key in keys} for mode in ("bipolar", "rrf")}
     print("| Case | Turns | Belt pool | Exception rank (bipolar / RRF) | Belt compression (bipolar / RRF) |")
@@ -203,7 +182,9 @@ def stress():
     exceptions = sum(row["exception_triggered"] for row in rows)
     print(f"\nOuter selections: {outer}; explicit one-off exceptions selected: {exceptions}/{len(rows)}")
     print(f"Belt candidates removed by relative pruning: {sum(row['belt_pruned'] for row in rows)}")
-    return {"n": len(rows), "outer_triggered_count": outer, "exception_triggered_count": exceptions,
+    print(f"Candidates dropped at cliffs: {sum(row['cliff_dropped'] for row in rows)}; "
+          f"empty recalls: {sum(row['empty_recall'] for row in rows)}/{len(rows)}")
+    return {"n": len(rows), "backend": backend, "outer_triggered_count": outer, "exception_triggered_count": exceptions,
             "aggregate": aggregate, "items": rows}
 
 
@@ -214,10 +195,19 @@ def main():
     parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--reference", type=Path, help="Previous 99-item report, to verify the same samples and RRF baseline.")
     parser.add_argument("--phase-a", action="store_true", help="Compare the same cohort without asserting the new four-channel RRF equals the old two-channel baseline.")
+    parser.add_argument("--cohort-only", action="store_true", help="Verify question IDs and gold evidence against --reference, allowing changed ranking.")
+    add_backend_argument(parser)
+    parser.add_argument("--offline", action="store_true", help="Require local files and hashed retrieval")
+    parser.add_argument("--consolidate", action="store_true", help="Measure MemBench observations and the additional cached prefix")
     args = parser.parse_args()
     if args.mode == "membench" and not args.data_dir:
         parser.error("--data-dir is required in membench mode")
-    report = membench(args.data_dir, args.reference, args.phase_a) if args.mode == "membench" else stress()
+    if args.cohort_only and not args.reference:
+        parser.error("--cohort-only requires --reference")
+    if args.offline and args.backend != "hashed":
+        parser.error("--offline requires the hashed backend")
+    backend = cli_backend(parser, args.backend)
+    report = membench(args.data_dir, args.reference, args.phase_a, args.cohort_only, backend, args.consolidate, offline=args.offline) if args.mode == "membench" else stress(backend)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if args.mode == "membench":
         overall = report["all_unique"]

@@ -14,6 +14,7 @@ import re
 from memengine.store import DEFAULT_SCOPE
 
 ACTIONS = {
+    "TEMPORARY_OVERRIDE",
     "OVERWRITE_SAME_LINE",
     "APPEND_ADJACENT_LINE",
     "INSERT_ISOLATED_LINE",
@@ -55,7 +56,8 @@ def _resolve_block(store, block_id: str, topic: str, timestamp: float, alias: di
 
 def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, plain: str, timestamp: float,
                    alias: dict | None = None, fact_zkeys=None, scope=DEFAULT_SCOPE, role="user",
-                   event_time=None, source_step_ids=None, source_turn_id=None) -> str | None:
+                   event_time=None, source_step_ids=None, source_turn_id=None, source_turn_ids=(),
+                   epistemic_scope=None, valid_from=None, expires_at=None, chronicle=None) -> str | None:
     """Apply one layout operation. Returns the line id, or None for NOOP."""
     action = op.get("action")
     if action not in ACTIONS or action == "NOOP":
@@ -72,19 +74,20 @@ def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, p
             zkeys.append(key)
     is_conflict = op.get("is_conflict_or_override") is True
     surprise = (0.08 if topic == "时事杂讯" else 0.95 if is_conflict else
-                {"OVERWRITE_SAME_LINE": 0.85, "INSERT_ISOLATED_LINE": 0.90, "APPEND_ADJACENT_LINE": 0.25}[action])
+                {"OVERWRITE_SAME_LINE": 0.85, "INSERT_ISOLATED_LINE": 0.90, "APPEND_ADJACENT_LINE": 0.25, "TEMPORARY_OVERRIDE": 0.90}[action])
     formatted = op.get("formatted_line") or format_fact_line(timestamp, plain)
     formatted = " ".join(formatted.splitlines()).strip()
     plain = line_body(formatted)
     if not plain:
         return None
-    isolated = action == "INSERT_ISOLATED_LINE"
+    isolated = action in {"INSERT_ISOLATED_LINE", "TEMPORARY_OVERRIDE"}
 
     if action == "OVERWRITE_SAME_LINE":
         return store.supersede_fact(line_id, formatted=formatted, plain=plain, attribute=attribute, value=str(value),
                                     surprise=surprise, layout=action, zkeys=zkeys, ingest_time=timestamp,
                                     current_step_ids=source_step_ids, current_turn_id=source_turn_id, scope=scope,
-                                    role=role, event_time_start=event_time, is_conflict=is_conflict)
+                                    role=role, event_time_start=event_time, is_conflict=is_conflict,
+                                    source_turn_ids=source_turn_ids, chronicle=chronicle)
 
     block_id = _resolve_block(store, str(op.get("target_block_id") or "NEW"), topic, timestamp, alias,
                               scope=scope, event_time=event_time, is_conflict=is_conflict)
@@ -102,9 +105,10 @@ def apply_write_op(store, op: dict, *, topic: str, attribute: str, value: str, p
         zkeys=zkeys,
         ingest_time=timestamp,
         source_step_ids=source_step_ids,
-        source_turn_ids=[source_turn_id] if source_turn_id is not None else [],
+        source_turn_ids=[*source_turn_ids, *([source_turn_id] if source_turn_id is not None else [])],
         scope=scope,
         role=role,
         event_time_start=event_time,
         is_conflict=is_conflict,
+        epistemic_scope=epistemic_scope, valid_from=valid_from, expires_at=expires_at, chronicle=chronicle,
     )

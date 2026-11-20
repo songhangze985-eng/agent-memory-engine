@@ -4,13 +4,13 @@ import pytest
 
 from memengine import engine as engine_module
 from memengine.distance import BELT, INNER, NEWS_KEY, OUTER, bipolar_weight, compute_bipolar_radius, score_bipolar
-from memengine.engine import CognitiveMemoryEngine, _fit_context, _prune_belt
+from memengine.engine import CognitiveMemoryEngine, _fit_context
 from memengine.store import Store
 from memengine.vector import HashedTfidfEmbedder
 
 
-def _score(fact, raw_rrf=1.0, c_max=8, radius=0.25):
-    return score_bipolar({**fact, "rrf_score": raw_rrf}, c_max=c_max, rrf_max=1.0,
+def _score(fact, ce_score=1.0, c_max=8, radius=0.25):
+    return score_bipolar({**fact, "ce_score": ce_score}, c_max=c_max,
                          radius=radius, bipolar_lambda=0.50)
 
 
@@ -40,19 +40,25 @@ def test_frequency_geometry_and_outer_overrides_are_not_semantic_distance():
     assert _score({**habit, "layout": "OVERWRITE_SAME_LINE"})["zone"] == OUTER
     for field in ("is_conflict", "historical"):
         revised = _score({**habit, field: True})
-        assert revised["zone"] == OUTER and revised["override_bonus"] == 0.05
+        assert revised["zone"] == OUTER and revised["final_score"] == 1.0
 
 
 def test_low_rrf_singleton_cannot_displace_relevant_top_k():
-    facts = [_score({"id": "irrelevant", "text": "weak"}, raw_rrf=1e-6),
-             _score({"id": "ordinary", "text": "relevant", "hit_count": 1}, raw_rrf=0.85),
-             _score({"id": "habit", "text": "habit", "hit_count": 7}, raw_rrf=1.0)]
+    facts = [_score({"id": "irrelevant", "text": "weak"}, ce_score=1e-6),
+             _score({"id": "ordinary", "text": "relevant", "hit_count": 1}, ce_score=0.85),
+             _score({"id": "habit", "text": "habit", "hit_count": 7}, ce_score=1.0)]
     ranked = sorted(facts, key=lambda fact: -fact["score"])
     assert [fact["id"] for fact in _fit_context(ranked, 2, 100)] == ["habit", "ordinary"]
 
 
-def test_all_singletons_keep_exact_rrf_order_across_z_buckets():
-    engine = CognitiveMemoryEngine(vector=HashedTfidfEmbedder())
+def test_equal_precision_singletons_keep_rrf_tiebreak_across_z_buckets():
+    class EqualScores:
+        is_calibrated = True
+
+        def score(self, query, candidates):
+            return [0.7] * len(candidates)
+
+    engine = CognitiveMemoryEngine(vector=HashedTfidfEmbedder(), reranker=EqualScores())
     for index in range(12):
         engine.add(f"[step {index}] Alice and Casey watched the movie Film{index}.", timestamp=index)
     original = engine_module.weighted_rrf
@@ -81,30 +87,20 @@ def test_belt_only_is_retained_and_tiny_budget_truncates_one_candidate():
     assert engine.retrieve("园艺种植技术？", read_only=True, top_k=0)["empty_retrieval"]
 
 
-def test_belt_prune_keeps_poles_and_refills_in_global_order():
-    ranked = [{"id": name, "zone": zone, "bipolar_score": score} for name, zone, score in
-              (("high", INNER, 1.0), ("at_threshold", BELT, 0.35), ("low", BELT, 0.34), ("outer", OUTER, 0.02))]
-    assert [fact["id"] for fact in _prune_belt(ranked, 0.35, 2)] == ["high", "at_threshold", "outer"]
-    assert _prune_belt(ranked, 0, 2) == ranked
-    assert _prune_belt([], 0.35, 2) == []
-    belt = [{**fact, "zone": BELT, "text": fact["id"]} for fact in ranked]
-    assert _fit_context(_prune_belt(belt, 0.90, 2), 10, 2048) == belt[:2]
+def test_belt_pruning_runs_before_top_k_without_refill():
+    class FixedScores:
+        is_calibrated = True
 
+        def score(self, query, candidates):
+            return [1.0, 0.30, 0.20, 0.10][:len(candidates)]
 
-def test_belt_pruning_runs_before_top_k_and_preserves_empty_floor(monkeypatch):
-    engine = CognitiveMemoryEngine(vector=HashedTfidfEmbedder(), enable_casual_bypass=False)
+    engine = CognitiveMemoryEngine(vector=HashedTfidfEmbedder(), enable_casual_bypass=False,
+                                   reranker=FixedScores(), cliff_ratio=0)
     for number in range(4):
         engine.add(f"城市园艺种植讨论会第{number}期介绍多种家庭绿植养护方法。", timestamp=number)
-    original = engine_module.weighted_rrf
-
-    def ranked(*args, **kwargs):
-        return [{**fact, "rrf_score": score} for fact, score in
-                zip(original(*args, **kwargs), (0.01, 0.003, 0.002, 0.001))]
-
-    monkeypatch.setattr(engine_module, "weighted_rrf", ranked)
     result = engine.retrieve("城市园艺种植讨论会？", read_only=True)
-    assert result["belt_count"] == 2 and not result["empty_retrieval"]
-    assert result["belt_pruned_count"] == result["belt_compressed_count"] == 2
+    assert result["belt_count"] == 1 and not result["empty_retrieval"]
+    assert result["belt_pruned_count"] == result["belt_compressed_count"] == 3
     assert engine.retrieve("城市园艺种植讨论会？", read_only=True, belt_prune_ratio=0)["belt_count"] == 4
 
 
@@ -120,7 +116,7 @@ def test_hit_counts_batch_scope_and_read_only_sql():
     assert len(result["ranked"]) == 3
     assert not any(statement.lstrip().split()[0] in {"UPDATE", "INSERT", "DELETE", "REPLACE"} for statement in sql)
     sql.clear()
-    engine.retrieve(query, user_id="alice")
+    engine.retrieve(query, user_id="alice", mutate_stats=True)
     assert sum("UPDATE facts SET hit_count" in statement for statement in sql) == 1
     assert {fact["hit_count"] for fact in engine.store.snapshot(scope=("alice", "default", None))} == {1}
     assert {fact["hit_count"] for fact in engine.store.snapshot(scope=("bob", "default", None))} == {0}

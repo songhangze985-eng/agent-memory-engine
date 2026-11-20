@@ -58,13 +58,13 @@ def ensure_file(relative: str, data_dir: Path) -> Path:
     return dest
 
 
-def sample_category(category: str, files: list[str], per_category: int, rng: random.Random, data_dir: Path) -> list[dict]:
+def sample_category(category: str, files: list[str], per_category: int, rng: random.Random, data_dir: Path, *, offline=False) -> list[dict]:
     quotas = _quota(per_category, len(files))
     chosen = []
     for relative, quota in zip(files, quotas):
         if quota <= 0:
             continue
-        path = ensure_file(relative, data_dir)
+        path = data_dir / relative if offline else ensure_file(relative, data_dir)
         payload = json.loads(path.read_text(encoding="utf-8"))
         scenarios = list(_iter_scenarios(payload))
         if not scenarios:
@@ -85,9 +85,9 @@ def sample_category(category: str, files: list[str], per_category: int, rng: ran
     return chosen
 
 
-def load_sample(per_category: int, seed: int, data_dir: Path) -> list[dict]:
+def load_sample(per_category: int, seed: int, data_dir: Path, *, offline=False) -> list[dict]:
     rng = random.Random(seed)
     items = []
     for category, files in CATEGORIES.items():
-        items.extend(sample_category(category, files, per_category, rng, data_dir))
+        items.extend(sample_category(category, files, per_category, rng, data_dir, offline=offline))
     return items
