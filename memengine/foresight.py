@@ -26,11 +26,7 @@ def interval(text, now, *, ttl_seconds=None, expires_at=None, valid_from=None):
         duration = _DURATION.search(text)
         if duration:
             number = duration[1] or duration[3] or duration[5]
-            if "十" in number:
-                tens, _, units = number.partition("十")
-                amount = 10 * parse_cn_number(tens or "一") + (parse_cn_number(units) if units else 0)
-            else:
-                amount = parse_cn_number(number)
+            amount = parse_cn_number(number)
             unit = duration[2] or duration[4] or duration[6]
             expires_at = start + amount * (7 if unit == "周" or unit.startswith("week") else 1) * 86400
         elif "这周" in text or "本周" in text:

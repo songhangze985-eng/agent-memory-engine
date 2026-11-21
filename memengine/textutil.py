@@ -6,6 +6,7 @@ import re
 import unicodedata
 
 _CN_NUM = {
+    "零": 0,
     "一": 1,
     "二": 2,
     "两": 2,
@@ -51,15 +52,13 @@ def token_units(text: str) -> int:
     return len(text) + 3 * len(re.findall(r"[\u4e00-\u9fff]", text)) if text else 0
 
 
-# Shared by temporal.parse_temporal_intent and policy.travel_revision.
+# 第N次 … 之前/以前. One phrase so time parsing and revision travel stay aligned.
 ORDINAL_PHRASE = re.compile(r"第\s*([\d一二两三四五六七八九十]+)\s*次")
+_BEFORE_CN = re.compile(ORDINAL_PHRASE.pattern + r".{0,12}(?:之前|以前)")
 
 
 def parse_cn_number(raw: str) -> int:
-    """Arabic digits, or a Chinese numeral from 1 through 99.
-
-    Anything else stays 1, matching the old single-character fallback.
-    """
+    """Arabic digits, or a Chinese numeral from 0 through 99. Anything else is 1."""
     if raw.isdigit():
         return int(raw)
     if raw in _CN_NUM:
@@ -72,6 +71,14 @@ def parse_cn_number(raw: str) -> int:
     tens = _CN_NUM[tens_text] if tens_text else 1
     ones = _CN_NUM[ones_text] if ones_text else 0
     return tens * 10 + ones
+
+
+def parse_before_ordinal(query: str) -> int | None:
+    """Revision before 第N次 … 之前/以前, or None when that phrase is absent."""
+    match = _BEFORE_CN.search(query or "")
+    if not match:
+        return None
+    return max(0, parse_cn_number(match.group(1)) - 1)
 
 
 def split_sentences(text: str) -> list[str]:
