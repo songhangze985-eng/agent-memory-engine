@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import closing, nullcontext
+from contextlib import ExitStack, closing
 from functools import partial
 import hashlib
 from pathlib import Path
@@ -15,8 +15,11 @@ from unittest.mock import patch
 from eval.evidence_ablation import OFFICIAL_SHA256, fact_turns, read_dataset, retain_source_turn
 from eval.longmemeval.run import category, groups
 from eval.metrics import evidence_metrics, mean, percentile
+from eval.packing_replay import replay, replay_table, summarize_replays
 from eval.paired import TOKEN_BUDGET, make_engine
 from eval.static_report import number, table, write_result
+from memengine.assembler import assemble_context
+from memengine.engine import _fit_context
 from memengine.neural_onnx import OnnxCrossEncoderReranker
 
 
@@ -77,7 +80,7 @@ def diagnose(pass_trace, context, sources, gold):
     return details
 
 
-def run_group(group, *, backend, mode):
+def run_group(group, *, backend, mode, packing_replay=False):
     turns, questions = group
     engine = make_engine("mock", backend=backend)
     rows = []
@@ -97,8 +100,12 @@ def run_group(group, *, backend, mode):
             session = engine.reranker._encoder.model.model
         for question in questions:
             passes, batches = [], []
-            observer = observe_onnx(session, batches) if session is not None else nullcontext()
-            with observer:
+            with ExitStack() as stack:
+                if session is not None:
+                    stack.enter_context(observe_onnx(session, batches))
+                if packing_replay:
+                    packer = stack.enter_context(patch("memengine.engine._fit_context", wraps=_fit_context))
+                    assembler = stack.enter_context(patch("memengine.engine.assemble_context", wraps=assemble_context))
                 start = perf_counter()
                 bundle = engine.build_context(question.text, reference_time=question.timestamp, mode=mode,
                                               token_budget=TOKEN_BUDGET, include_short_term=False, _trace=passes)
@@ -113,11 +120,15 @@ def run_group(group, *, backend, mode):
             session_coverage = evidence_metrics([{turn.session for turn in entry} for entry in mapped], gold_sessions)
             pass_trace = passes[-1] if passes else {"fused": [], "ce_scores": {}}
             details = diagnose({**pass_trace, "sources": fact_sources}, items, sources, gold)
+            replay_scores = None
+            if packing_replay and passes:
+                replay_scores = replay(bundle, packer.call_args.args, assembler.call_args, pass_trace["ce_scores"],
+                                       fact_sources, sources, gold, gold_sessions)
             options = session.get_session_options() if session is not None else None
             raw_turn_ids = bundle["evidence_turn_ids"]
             injected_refs = {turn.ref for entry in mapped for turn in entry}
             injected_refs.update(sources[ident].ref for ident in raw_turn_ids if ident in sources)
-            rows.append({"id": question.id, "category": question.category, **metrics,
+            row = {"id": question.id, "category": question.category, **metrics,
                          "session_coverage_at_10": session_coverage["recall_at_10"],
                          "budget_recall": len(injected_refs & gold) / len(gold) if gold else None,
                          "top10_distinct_sessions": len({turn.session for entry in mapped[:10] for turn in entry}),
@@ -130,7 +141,10 @@ def run_group(group, *, backend, mode):
                          "ce_providers": session.get_providers() if session is not None else [],
                          "context_fact_ids": [row["id"] for row in items if row["kind"] == "fact"],
                          "context_raw_turn_ids": raw_turn_ids, "tokens": bundle["token_breakdown"]["total"],
-                         "retrieval_ms": bundle["retrieval_ms"], "latency_ms": elapsed})
+                         "retrieval_ms": bundle["retrieval_ms"], "latency_ms": elapsed}
+            if packing_replay:
+                row["packing_replay"] = replay_scores
+            rows.append(row)
     return rows
 
 
@@ -144,6 +158,7 @@ def summarize(rows):
     pairs = sum(batch["pairs"] for batch in batches)
     input_tokens = sum(batch["input_tokens"] for batch in batches)
     padding_tokens = sum(batch["padding_tokens"] for batch in batches)
+    replays = summarize_replays(rows)
     return {"n": len(rows), **{key: mean(row[key] for row in rows) for key in fields},
             "p50_ms": percentile([row["latency_ms"] for row in rows], .50),
             "p95_ms": percentile([row["latency_ms"] for row in rows], .95),
@@ -155,7 +170,8 @@ def summarize(rows):
             "ce_tokens_per_pair": input_tokens / pairs if pairs else None,
             "ce_padding_fraction": padding_tokens / (input_tokens + padding_tokens) if pairs else None,
             "gold_outcomes": dict(outcomes), "fused_top50_misses": dict(top50_losses),
-            "fused_top50_misses_outside_ce_top10": sum((gold["ranks"]["ce"] or 11) > 10 for gold in missing_top50)}
+            "fused_top50_misses_outside_ce_top10": sum((gold["ranks"]["ce"] or 11) > 10 for gold in missing_top50),
+            **({"packing_replay": replays} if replays else {})}
 
 
 def main():
@@ -166,6 +182,8 @@ def main():
     parser.add_argument("--category", action="append")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--backend", choices=("hashed", "local-neural"), default="hashed")
+    parser.add_argument("--packing-replay", action="store_true",
+                        help="Replay the same budget and admitted candidates in score and gold-first order")
     parser.add_argument("--query-mode", choices=("single_query", "reconstructive"), default="reconstructive")
     args = parser.parse_args()
     sha = hashlib.sha256()
@@ -178,11 +196,11 @@ def main():
     data = [row for row in read_dataset(args.data) if not args.category or category(row) in args.category]
     if not data or args.workers < 1 or args.sample is not None and args.sample < 1:
         parser.error("provide at least one question and a positive number of workers")
-    worker = partial(run_group, backend=args.backend, mode=args.query_mode)
+    worker = partial(run_group, backend=args.backend, mode=args.query_mode, packing_replay=args.packing_replay)
     questions = groups(data, args.sample, 42)
     rows = []
-    pool = ProcessPoolExecutor(args.workers) if args.workers > 1 else nullcontext()
-    with pool as executor:
+    with ExitStack() as stack:
+        executor = stack.enter_context(ProcessPoolExecutor(args.workers)) if args.workers > 1 else None
         batches = executor.map(worker, questions) if executor else map(worker, questions)
         for batch in batches:
             rows.extend(batch)
@@ -197,6 +215,8 @@ def main():
                                      ("candidate_at_50", "recall_at_10", "session_coverage_at_10")),
                    *(number(row[key], ".1f") for key in ("p50_ms", "p95_ms", "rerank_p95_ms")))
                   for name, row in summary.items()))
+    if args.packing_replay:
+        body += "\n\n" + replay_table(summary)
     write_result(report, args.out, body)
 
 
