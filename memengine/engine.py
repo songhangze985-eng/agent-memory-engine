@@ -869,10 +869,6 @@ class CognitiveMemoryEngine(TaskWorkspace):
     def has_facts(self, *, user_id="default", agent_id="default", session_id=None) -> bool:
         return bool(self.store.snapshot(scope=(user_id, agent_id, session_id)))
 
-    def get_recent_facts(self, limit: int = 10, *, snapshot=None) -> list[dict]:
-        facts = self.store.snapshot() if snapshot is None else snapshot
-        return sorted(facts, key=lambda fact: (-fact["updated_at"], fact["id"]))[:max(0, limit)]
-
     def decay_and_archive(self, *, user_id="default", agent_id="default", timestamp=None,
                           half_life_days=30.0, cold_inactive_days=90.0, cold_superseded_days=30.0):
         from math import isfinite

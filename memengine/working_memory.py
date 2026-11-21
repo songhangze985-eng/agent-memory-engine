@@ -113,9 +113,6 @@ class TaskWorkspace:
     def resume_task(self, task_id, **scope):
         return self._change_task(task_id, "active", {"active", "paused"}, **scope)
 
-    def abort_task(self, task_id, **scope):
-        return self._change_task(task_id, "aborted", {"active", "paused"}, **scope)
-
     def _source(self, key, ref):
         scope, ident = key[:3], ref["id"]
         kind = ref["kind"]
