@@ -1049,7 +1049,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
             return {**bundle, "response": response, "reasoning": None, "llm_fallback": False, "claims": [], "abstained": True}
 
         query_type = bundle["parsed_query"]["query_type"]
-        eligible = admissible_evidence(bundle)
+        eligible = admissible_evidence(bundle, query=query)
         facts = [row for row in eligible.values() if row["kind"] == "fact"]
         additional = [row for row in eligible.values() if row["kind"] != "fact" and evidence_matches_query(query, row)]
         temporal = bundle["temporal_intent"]
@@ -1070,10 +1070,10 @@ class CognitiveMemoryEngine(TaskWorkspace):
                                                "temporal_match", "vector_score", "zkeys", "is_conflict_or_override",
                                                "isolated") if key in row} for row in fallback_rows]
         offline = isinstance(self.llm, MockLLMClient)
-        visible = {key: {"text": row["text"], "kind": row["kind"],
+        visible = {key: {"text": eligible.get(key, row)["text"], "kind": row["kind"],
                          "status": row.get("verification_status") or row.get("role")}
                    for key, row in bundle["evidence_map"].items()
-                   if key in eligible or row["kind"] == "working_item"}
+                   if key in eligible or (row["kind"] == "working_item" and row["verification_status"] == "unverified")}
         goal = next((row["text"] for row in bundle["items"] if row["kind"] == "task_goal"), "")
         prompt = render_prompt("reason", query_type=query_type, retrieved_top_k_memories=memories if offline else [],
                                matched_entities=entities,
