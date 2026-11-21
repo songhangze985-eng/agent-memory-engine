@@ -1,5 +1,7 @@
-from eval.online_trace import diagnose
+from eval.evidence_ablation import Question, Turn
+from eval.online_trace import diagnose, run_group
 from eval.paired import make_engine
+from eval.packing_replay import oracle_order
 
 
 def test_retrieval_trace_observes_actual_call_without_changing_it():
@@ -40,3 +42,30 @@ def test_diagnosis_distinguishes_candidate_gate_and_packing_losses():
     assert rows["a:1"]["same_session_above_reranked"] == 1
     assert rows["b:0"]["outcome"] == "missing_from_packed"
     assert rows["c:0"]["outcome"] == "missing_from_fused"
+
+
+def test_packing_replay_reproduces_context_and_keeps_budget():
+    stamp = 1735689500
+    turns = [
+        Turn("a:0", "a", "user", "I prefer quiet history podcasts on my commute.", stamp),
+        Turn("b:0", "b", "user", "My commute lasts forty minutes.", stamp + 10),
+    ]
+    question = Question("test", "preference", "Which podcasts do I prefer for my commute?",
+                        stamp + 20, frozenset({"a:0"}), frozenset({"a"}))
+    row, = run_group((turns, [question]), backend="hashed", mode="reconstructive", packing_replay=True)
+    versions = row["packing_replay"]
+    assert versions["admitted_gold_coverage"] == 1
+    assert versions["baseline"]["recall_at_10"] == row["recall_at_10"]
+    assert versions["baseline"]["tokens"] == row["tokens"]
+    assert versions["ce_order"]["tokens"] <= 2048
+    assert versions["gold_first"]["recall_at_10"] == 1
+
+
+def test_gold_first_reordering_covers_distinct_sources_and_keeps_pool():
+    distractor = {"id": "x", "text": "Related distractor"}
+    long_dup = {"id": "a", "text": "A longer duplicate with the same source"}
+    short = {"id": "b", "text": "Short"}
+    independent = {"id": "c", "text": "Other evidence"}
+    pool = [distractor, long_dup, short, independent]
+    sources = {"x": ["noise"], "a": ["one"], "b": ["one"], "c": ["two"]}
+    assert oracle_order(pool, sources, {"one", "two"}) == [short, independent, distractor, long_dup]
