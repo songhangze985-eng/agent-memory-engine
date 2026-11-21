@@ -533,7 +533,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
                  belt_prune_ratio: float | None = None, min_keep: int | None = None,
                  include_raw_turns: bool = False, include_cold: bool = False, filters: RecallFilter | None = None,
                  scopes: list[str] | None = None, mode: Literal["single_query", "reconstructive"] = "single_query",
-                 reference_time=None, packing_mode=None, version_precision=False, mutate_stats=False) -> dict:
+                 reference_time=None, packing_mode=None, version_precision=False, mutate_stats=False, _trace=None) -> dict:
         if mode not in ("single_query", "reconstructive"):
             raise ValueError("invalid recall mode")
         if scopes is not None and (isinstance(scopes, str) or not set(scopes) <= SCOPES):
@@ -558,6 +558,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
                     belt_prune_ratio=belt_prune_ratio, min_keep=min_keep, include_cold=include_cold,
                     filters=filters, scopes=scopes, include_raw_turns=include_raw_turns,
                     mutate_stats=mutate_stats and not read_only)
+        if _trace is not None:
+            args["_trace"] = _trace
         if mode == "single_query" or graph:
             return self._retrieve_single(query, read_only=read_only, **args)
         started = time.perf_counter()
@@ -578,7 +580,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
 
     def _retrieve_single(self, query, *, user_id, agent_id, session_id, top_k, token_budget, timestamp, read_only,
                          flush_pending, belt_prune_ratio, min_keep, include_raw_turns, include_cold, filters, scopes, plan,
-                         mutate_stats=False, _passes=None, _bridges=(), _primary=()):
+                         mutate_stats=False, _passes=None, _bridges=(), _primary=(), _trace=None):
         prune_ratio = self.belt_prune_ratio if belt_prune_ratio is None else float(belt_prune_ratio)
         keep_floor = self.min_keep if min_keep is None else min_keep
         _validate_belt_config(prune_ratio, keep_floor)
@@ -638,6 +640,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
         parsed = parse_query_rules(query, categories=self.categories)
         if temporal.is_historical:
             parsed["query_type"] = "TIME_TRAVEL"
+        candidate_started = time.perf_counter() if _trace is not None else None
         with self.store.read_snapshot():
             search_cold = include_cold or temporal.is_historical
             if plan:
@@ -668,6 +671,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
                            if cached_maintenance is None else cached_maintenance)
             historical_query = parsed["query_type"] == "TIME_TRAVEL"
             sessions = self.store.session_orders(scope, {fact["session_id"] for fact in merged[:30]})
+        if _trace is not None:
+            candidate_ms = (time.perf_counter() - candidate_started) * 1000
         hints = list(dict.fromkeys(key for fact in merged[:10] for key in fact["entity_z_keys"]))[:15]
         preview = [{"block_id": fact["block_id"], "topic": fact["topic"],
                     "preview": fact["plain"][:180], "preview_attr": fact["attribute"]} for fact in merged[:8]]
@@ -677,7 +682,11 @@ class CognitiveMemoryEngine(TaskWorkspace):
         radius = 0.35 if historical_query else inner_boundary(circle["radius_r"])
         c_max = max((consolidation_count(fact) for fact in merged if not is_noise(fact)), default=1)
         rrf_order = {fact["id"]: rank for rank, fact in enumerate(merged)}
+        rerank_started = time.perf_counter() if _trace is not None else None
         ce_scores, backend = self._rerank(query, merged)
+        if _trace is not None:
+            rerank_ms = (time.perf_counter() - rerank_started) * 1000
+            raw_scores = ce_scores
         blended = bool(plan and plan.wide and backend.is_calibrated)
         if blended:
             local = self.local_reranker.score(query, merged)
@@ -740,6 +749,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
                                      fact.get("version_prerelease", False) if fact.get("version_grade") == "CONTAINED_SPECIFIC" else False,
                                      -fact["exact_hit_ratio"], not fact.get("temporary_priority"), -fact["final_score"],
                                      fact["memory_type"] != "procedural", rrf_order[fact["id"]]))
+        if _trace is not None:
+            reranked_ids = [fact["id"] for fact in ranked]
         tau_abs = self.tau_abs if self.tau_abs is not None else (0.18 if backend.is_calibrated else 0.12)
         mismatches = sum(fact["version_mismatch"] for fact in ranked)
         ranked, identifier_mode = eligible_identifiers(ranked, query, historical_query, self.allow_empty_recall)
@@ -763,6 +774,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
                                           cliff_ratio=self.cliff_ratio, belt_prune_ratio=0 if evidence_floor else prune_ratio,
                                           min_keep=max(keep_floor, min(10, top_k)) if blended else keep_floor,
                                           is_calibrated=backend.is_calibrated and not blended, top_k=top_k)
+        if _trace is not None:
+            gate_kept_ids = [fact["id"] for fact in kept]
         if strict_version and not ranked:
             gate_stats["empty_reason"] = "no_exact_version"
         elif identifier_mode == "symbol" and not ranked:
@@ -793,6 +806,15 @@ class CognitiveMemoryEngine(TaskWorkspace):
                 useful = diversify_episodes(query, useful)
             kept = [_compact_evidence(query, fact) for fact in useful]
         selected = _fit_context(kept, top_k, token_budget)
+        if _trace is not None:
+            _trace.append({"fused": list(rrf_order), "reranked": reranked_ids,
+                           "gate_input": [fact["id"] for fact in ranked], "gate_kept": gate_kept_ids,
+                           "packing_input": [fact["id"] for fact in kept],
+                           "packed": [fact["id"] for fact in selected if not fact.get("context_truncated")],
+                           "truncated": [fact["id"] for fact in selected if fact.get("context_truncated")],
+                           "ce_scores": dict(zip(rrf_order, raw_scores)), "sessions": {fact["id"]: fact["session_id"] for fact in merged},
+                           "candidate_ms": candidate_ms, "rerank_ms": rerank_ms,
+                           "reranker": type(backend).__name__, "rerank_calls": int(bool(merged))})
         if mutate_stats and not read_only:
             self._record_recall(control_scope, origin, radius, selected, now)
         return result(TASK, parsed, ranked=selected, belt_total=sum(fact["zone"] == BELT for fact in ranked),
@@ -958,7 +980,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
                       token_budget=None, drilldown_top_n=2, drilldown_window=0,
                       mode: Literal["single_query", "reconstructive"] = "single_query",
                       scopes=None, filters=None, include_cold=False, top_k=None, timestamp=None, reference_time=None,
-                      packing_mode=None, task_id=None, include_short_term=True, retrieved=None) -> dict:
+                      packing_mode=None, task_id=None, include_short_term=True, retrieved=None, _trace=None) -> dict:
         explicit_budget = token_budget is not None
         token_budget = 4096 if token_budget is None else token_budget
         for name, value in (("token_budget", token_budget), ("drilldown_top_n", drilldown_top_n),
@@ -990,11 +1012,12 @@ class CognitiveMemoryEngine(TaskWorkspace):
             if timestamp is None and reference_time is None and result["validity_as_of"] is not None:
                 as_of = result["validity_as_of"]
         else:
+            trace_options = {"_trace": _trace} if _trace is not None else {}
             result = self.retrieve(query, user_id=user_id, agent_id=agent_id, session_id=session_id,
                                    token_budget=remaining, read_only=True, mutate_stats=False, mode=mode, scopes=scopes,
                                    filters=filters, include_cold=include_cold, top_k=top_k, timestamp=as_of,
                                    reference_time=reference_time, packing_mode=packing_mode or
-                                   ("token_budget" if explicit_budget and top_k is None else "top_k"))
+                                   ("token_budget" if explicit_budget and top_k is None else "top_k"), **trace_options)
         workspace = self.get_task_workspace(task_id, user_id=user_id, agent_id=agent_id,
                                             session_id=workspace_scope[2], limit=32) if task_id is not None else None
         recent = (self.store.session_turns(workspace_scope, limit=self.working_window, as_of=as_of, for_context=True)
