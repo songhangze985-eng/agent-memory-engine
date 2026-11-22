@@ -1,3 +1,4 @@
+from contextlib import closing
 import json
 
 import numpy as np
@@ -110,6 +111,36 @@ def test_onnx_preferred_then_torch_fallback(monkeypatch):
     monkeypatch.setattr(neural, "LocalNeuralEmbedder", lambda: "fallback-embed")
     monkeypatch.setattr(neural, "LocalCrossEncoderReranker", lambda: "fallback-rank")
     assert neural.load_local_backends() == ("fallback-embed", "fallback-rank")
+
+
+def test_onnx_query_encoding_reused_only_in_one_recall_scope(monkeypatch):
+    calls = []
+
+    class Fake:
+        def embed(self, inputs, batch_size):
+            calls.extend(inputs)
+            yield from [[3.0, 4.0]] * len(inputs)
+
+    monkeypatch.setattr(neural_onnx, "_create_model", lambda *args: Fake())
+    embedder = neural_onnx.OnnxNeuralEmbedder("intfloat/multilingual-e5-small")
+    with embedder.cache_query_encodings():
+        first = embedder.encode_queries(["ask"])
+        first[:] = 0
+        assert np.allclose(embedder.encode_queries(["ask"]), [[.6, .8]])
+        embedder.encode_queries(["another"])
+    with embedder.cache_query_encodings():
+        embedder.encode_queries(["ask"])
+    assert calls == ["query: ask", "query: another", "query: ask"]
+
+    memory = CognitiveMemoryEngine(vector=embedder, reranker=CalibratedLocalReranker(), enable_casual_bypass=False)
+    with closing(memory.store):
+        put(memory.store, "Alice: Where was Project Egret calibrated? " + " laboratory instruments" * 28, 1)
+        put(memory.store, "Mina: It was calibrated at Hudson.", 2)
+        calls.clear()
+        for _ in range(2):
+            memory.build_context("Where was Project Egret calibrated?", session_id="conversation",
+                                 timestamp=3, token_budget=512, include_short_term=False)
+        assert len(calls) == 2 and calls[0] == calls[1]
 
 
 def test_guard_checks_cohort_numeric_floor_and_pytest_exit(tmp_path, monkeypatch):
