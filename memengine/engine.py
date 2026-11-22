@@ -268,12 +268,11 @@ class CognitiveMemoryEngine(TaskWorkspace):
         return applied
 
     def _candidate_blocks(self, text, scope, facts):
-        blocks = self.store.blocks_for_prompt(scope=scope, snapshot=[row for row in self.store.snapshot(scope=scope)
-                                                                if row["expires_at"] is None and row["epistemic_scope"] == "world"])
-        graph_keys = {key for block in blocks for line in block["lines"] for key in line["entity_z_keys"]}
-        explicit = {normalize_entity(key) for key in match_entities(text, graph_keys)}
+        keyed = self.store.entity_keys(scope=scope, query=text)
+        explicit = {normalize_entity(key) for key in match_entities(text, keyed)}
         explicit.update(normalize_entity(key) for fact in facts for key in fact.get("zkeys", []) if key_type(key) == "entity")
-        topics = {fact.get("topic") for fact in facts}
+        topics = {fact.get("topic") for fact in facts if fact.get("topic")}
+        blocks = self.store.candidate_blocks(scope=scope, topics=topics, explicit=explicit)
         query_grams = char_bigrams(text)
         ranked = sorted(blocks, key=lambda block: (block["topic"] in topics, jaccard(
             query_grams, char_bigrams(block["topic"] + " " + " ".join(line["plain"] for line in block["lines"][-3:])))), reverse=True)

@@ -159,7 +159,11 @@ bash scripts/run_static_matrix.sh /path/to/results /path/to/locomo10.json \
 
 ## Retain / Recall / Reflect 服务
 
-默认使用 SQLite。可通过构造参数 `db_url`、CLI 的 `--db-url` 或 `MEMENGINE_DB_URL` 选择后端。SQLite 接受 `:memory:`、文件路径与 `sqlite:///relative.db`。PostgreSQL 接受 `postgresql://` 与 `postgres://`，使用 PostgreSQL 16 时可启用 pgvector HNSW、全文 GIN 与 Trigram。没有 pgvector 时在数据库侧以数组点积检索，`health` 显示当前能力。
+默认使用 SQLite。可通过构造参数 `db_url`、CLI 的 `--db-url` 或 `MEMENGINE_DB_URL` 选择后端：
+
+- **SQLite**：接受 `:memory:`、文件路径与 `sqlite:///relative.db`。
+- **SQLite + LanceDB（Rust + Apache Arrow 嵌入式混合模式）**：接受 `lancedb:///path/to/dir`、`lance:///path/to/dir` 或 `sqlite+lance:///path/to/ledger.db`。SQLite 负责强 ACID 双时态账本与关系图，LanceDB 接管磁盘零拷贝向量检索与 RaBitQ (`IVF_RQ`) 量化 ANN（超阈值自动建索引，亦支持 `store.optimize_index()`），无须外部服务即可缓解大库查询发热与内存抖动。
+- **PostgreSQL 16+（服务端单库多模模式）**：接受 `postgresql://` 与 `postgres://`。启动时按能力自动升级：**向量层**优先 `vchordrq`（VectorChord RaBitQ）→ `diskann`（pgvectorscale）→ `hnsw`（pgvector）→ SQL 数组点积；**词法层**优先 `pg_search`（ParadeDB Tantivy BM25）→ `vchord_bm25`（VectorChord Block-Max WAND BM25）→ `tsvector` GIN。`docker-compose.yml` 默认使用 `tensorchord/vchord-suite:pg16-latest`，可用 `MEMENGINE_PG_IMAGE` 切换为 `paradedb/paradedb:latest` 或 `pgvector/pgvector:pg16`，`/health` 返回当前生效引擎。
 
 ```bash
 pip install -e '.[dev]'
@@ -177,7 +181,7 @@ pip install -e '.[all]'
 MEMENGINE_DB_URL=./memory.db MEMENGINE_API_KEY=your-key memengine serve
 ```
 
-`[postgres]` 安装数据库驱动与连接池，`[server]` 安装 FastAPI 和 Uvicorn，`[all]` 包含两组。容器部署可复制 `.env.example` 为 `.env`，填入密码和 API Key，再执行 `docker compose up --build`。Bearer Key 是服务级凭据，调用方须可信并负责其租户映射。
+`[lance]` 安装嵌入式 LanceDB 与 PyArrow，`[postgres]` 安装数据库驱动与连接池，`[server]` 安装 FastAPI 和 Uvicorn，`[all]` 包含全部三组。容器部署可复制 `.env.example` 为 `.env`，填入密码和 API Key，再执行 `docker compose up --build`。Bearer Key 是服务级凭据，调用方须可信并负责其租户映射。
 
 | 方法 | 路径 | 输入与输出 |
 | --- | --- | --- |

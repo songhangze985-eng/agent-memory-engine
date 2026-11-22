@@ -20,7 +20,7 @@ from memengine.textutil import (ensure_step_tags, estimate_tokens, merge_step_id
                                 step_ids_in, strip_step_tags, tokenize_for_fts)
 from memengine.storage.base import DEFAULT_SCOPE, IDS as _IDS, SCOPES, scope_where as _scope_where
 from memengine.storage.chronicle import Chronicle
-from memengine.storage.vector_cache import IncrementalVectorCache
+from memengine.storage.vector_cache import EntityKeyIndex, IncrementalVectorCache
 from memengine.storage.workspace import WorkspaceStore
 from memengine.vector import HashedTfidfEmbedder, normalize_vectors
 
@@ -174,9 +174,11 @@ class SQLiteStore(Chronicle, WorkspaceStore):
         self.fallback_embedder = HashedTfidfEmbedder()
         self._write_vectors = None
         self.vector_cache = IncrementalVectorCache()
+        self.entity_cache = EntityKeyIndex()
         self.enable_vector_cache = True
         self._vector_view = None
         self._write_depth = 0
+        self._write_seq = 0
         self._snapshot_depth = 0
         self.conn = sqlite3.connect(self.path, timeout=5, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -200,6 +202,8 @@ class SQLiteStore(Chronicle, WorkspaceStore):
                 yield
         finally:
             self._write_depth -= 1
+            if self._write_depth == 0:
+                self._write_seq += 1
 
     @contextmanager
     def _transaction(self):
@@ -537,7 +541,7 @@ class SQLiteStore(Chronicle, WorkspaceStore):
         where, args = _scope_where(scope, "f.")
         if filters is not None:
             where, args = filters.sql(where, args)
-        rows = self.conn.execute(f"""SELECT f.id,count(*) AS exact_ident_hit FROM exact_identifiers e JOIN facts f ON f.id=e.memory_id
+        rows = self.conn.execute(f"""SELECT f.id,count(*) AS exact_ident_hit FROM exact_identifiers e CROSS JOIN facts f ON f.id=e.memory_id
             WHERE e.ident_norm IN ({_IDS}) AND {where} AND {self._searchable(include_superseded, include_cold, filters)}
             GROUP BY f.id ORDER BY exact_ident_hit DESC,f.event_time_start DESC,f.id LIMIT ?""",
             (_dump([item.ident_norm for item in identifiers]), *args, top_n))
@@ -836,6 +840,46 @@ class SQLiteStore(Chronicle, WorkspaceStore):
             block["lines"].append(fact)
         return list(blocks.values())
 
+    def candidate_blocks(self, *, scope=DEFAULT_SCOPE, topics=(), explicit=(), max_recent_blocks=24, lines_per_block=5):
+        """Bounded write-path block fetch avoiding O(N) full-session snapshots."""
+        where, args = _scope_where(scope, "f.")
+        base_where = f"{where} AND f.status='active' AND f.memory_type='fact' AND f.expires_at IS NULL AND f.epistemic_scope='world'"
+        block_where, block_args = _scope_where(scope, "b.")
+        block_ids = [row[0] for row in self.conn.execute(
+            f"SELECT b.id FROM blocks b WHERE {block_where} ORDER BY b.created_at DESC, b.id DESC LIMIT ?",
+            (*block_args, max_recent_blocks))]
+        clean_topics = sorted({topic for topic in topics if topic})
+        if clean_topics:
+            block_ids.extend(row[0] for row in self.conn.execute(
+                f"SELECT b.id FROM blocks b WHERE {block_where} AND b.topic IN ({_IDS}) ORDER BY b.created_at DESC LIMIT 16",
+                (*block_args, _dump(clean_topics))))
+        pinned_ids = set()
+        clean_entities = sorted({entity for entity in explicit if entity})
+        if clean_entities:
+            for row in self.conn.execute(
+                f"""SELECT DISTINCT f.id, f.block_id FROM fact_entities e JOIN facts f ON f.id=e.fact_id
+                    WHERE e.user_id=? AND e.agent_id=? AND e.key_type='entity' AND e.entity_norm IN ({_IDS})
+                      AND {base_where}""",
+                (*scope[:2], _dump(clean_entities), *args)):
+                pinned_ids.add(row["id"])
+                block_ids.append(row["block_id"])
+        unique_blocks = list(dict.fromkeys(block_ids))
+        if not unique_blocks and not pinned_ids:
+            return []
+        fact_ids = set(pinned_ids)
+        if unique_blocks:
+            for row in self.conn.execute(
+                f"""WITH ranked AS (
+                      SELECT f.id, row_number() OVER (PARTITION BY f.block_id ORDER BY f.seq DESC, f.revision DESC) AS rn
+                      FROM facts f WHERE {base_where} AND f.block_id IN ({_IDS})
+                    ) SELECT id FROM ranked WHERE rn<=?""",
+                (*args, _dump(unique_blocks), lines_per_block)):
+                fact_ids.add(row["id"])
+        if not fact_ids:
+            return []
+        facts = self._load_facts(f"{where} AND f.id IN ({_IDS})", (*args, _dump(sorted(fact_ids))))
+        return self.blocks_for_prompt(scope=scope, snapshot=facts)
+
     def z_index(self, *, scope=DEFAULT_SCOPE, snapshot=None):
         index = {}
         for fact in self.snapshot(scope=scope) if snapshot is None else snapshot:
@@ -850,12 +894,60 @@ class SQLiteStore(Chronicle, WorkspaceStore):
                  WHERE e.user_id=? AND e.agent_id=? AND e.key_type='entity' {tier}
                  AND {where} AND {self._searchable(True, include_cold)}""", (*scope[:2], *args))
 
+    def _can_use_local_cache(self):
+        return (self.enable_vector_cache and hasattr(self, "entity_cache") and not self._write_depth
+                and (not self.conn.in_transaction or self._snapshot_depth > 0))
+
+    def _cached_entity_candidates(self, query, scope, include_cold, external_version=None):
+        if external_version is None:
+            external_version = self.conn.execute("PRAGMA data_version").fetchone()[0]
+        stamp = (external_version, self._write_seq)
+        cache_key = (*scope, bool(include_cold))
+        payload = self.entity_cache.get(cache_key, stamp)
+        if payload is None:
+            select, args = self._entity_keys_select(scope, include_cold)
+            raw_keys = [row[0] for row in self.conn.execute(f"{select} ORDER BY e.raw_key", args)]
+            payload = self.entity_cache.put(cache_key, stamp, raw_keys)
+        return self.entity_cache.candidates(payload, query)
+
     def entity_keys(self, *, scope=DEFAULT_SCOPE, include_cold=False, query=None):
+        if query is not None and self._can_use_local_cache():
+            return self._cached_entity_candidates(query, scope, include_cold)
         select, args = self._entity_keys_select(scope, include_cold)
         rows = self.conn.execute(f"{select} ORDER BY e.raw_key", args)
         return [row[0] for row in rows]
 
     def recall_entity_keys(self, query, *, scope, include_cold=False):
+        if self._can_use_local_cache():
+            cache_key = (*scope, bool(include_cold))
+            cached = self.entity_cache._entries.get(cache_key)
+            if cached is not None and cached[0][1] == self._write_seq:
+                rows = self.conn.execute(f"""WITH matched AS (
+                      SELECT min(entity_id) AS id FROM entity_aliases WHERE user_id=? AND agent_id=? AND alias IN ({_IDS})
+                      GROUP BY alias HAVING count(*)=1
+                    ), dv AS (SELECT data_version FROM pragma_data_version)
+                    SELECT 'entity:' || a.alias AS key, dv.data_version AS ver
+                    FROM entity_aliases a JOIN matched m ON a.entity_id=m.id CROSS JOIN dv
+                    UNION ALL SELECT NULL, data_version FROM dv
+                    ORDER BY key""", self._alias_arguments(query, scope)).fetchall()
+                external_version = rows[0]["ver"] if rows else 0
+                if cached[0][0] == external_version:
+                    aliases = sorted({row["key"] for row in rows if row["key"] is not None})
+                    return self.entity_cache.candidates(cached[1], query), aliases
+            select, args = self._entity_keys_select(scope, include_cold)
+            hits = self.conn.execute(f"""WITH matched AS (
+                  SELECT min(entity_id) AS id FROM entity_aliases WHERE user_id=? AND agent_id=? AND alias IN ({_IDS})
+                  GROUP BY alias HAVING count(*)=1
+                ), dv AS (SELECT data_version FROM pragma_data_version)
+                SELECT raw_key AS key, 0 AS is_alias, dv.data_version AS ver FROM ({select}) direct_keys CROSS JOIN dv
+                UNION ALL SELECT DISTINCT 'entity:' || a.alias, 1, dv.data_version FROM entity_aliases a JOIN matched m ON a.entity_id=m.id CROSS JOIN dv
+                UNION ALL SELECT NULL, 2, data_version FROM dv
+                ORDER BY is_alias, key""", (*self._alias_arguments(query, scope), *args)).fetchall()
+            external_version = hits[0]["ver"] if hits else 0
+            direct = [row["key"] for row in hits if row["is_alias"] == 0 and row["key"] is not None]
+            aliases = [row["key"] for row in hits if row["is_alias"] == 1 and row["key"] is not None]
+            payload = self.entity_cache.put(cache_key, (external_version, self._write_seq), direct)
+            return self.entity_cache.candidates(payload, query), aliases
         select, args = self._entity_keys_select(scope, include_cold)
         hits = self.conn.execute(f"""WITH matched AS (
               SELECT min(entity_id) AS id FROM entity_aliases WHERE user_id=? AND agent_id=? AND alias IN ({_IDS})
@@ -878,7 +970,7 @@ class SQLiteStore(Chronicle, WorkspaceStore):
         if filters is not None:
             where, args = filters.sql(where, args)
         tier = "" if include_cold else "AND e.tier='hot'"
-        rows = self.conn.execute(f"""SELECT f.id,count(*) AS entity_matches FROM fact_entities e JOIN facts f ON f.id=e.fact_id
+        rows = self.conn.execute(f"""SELECT f.id,count(*) AS entity_matches FROM fact_entities e CROSS JOIN facts f ON f.id=e.fact_id
              WHERE e.user_id=? AND e.agent_id=? AND e.key_type='entity' {tier} AND e.entity_norm IN ({_IDS})
                AND {where} AND {self._searchable(include_superseded, include_cold, filters)} GROUP BY f.id
              ORDER BY entity_matches DESC, f.ingest_time DESC,f.id LIMIT ?""",
