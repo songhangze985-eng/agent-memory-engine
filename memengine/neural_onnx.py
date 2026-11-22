@@ -1,6 +1,8 @@
 """Optional FastEmbed models backed by ONNX Runtime, without Torch imports."""
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import numpy as np
 
@@ -23,7 +25,7 @@ def _create_model(model, component):
             from fastembed.rerank.cross_encoder import TextCrossEncoder as factory
         model_path = os.getenv(f"LOCAL_{component.upper()}_MODEL_PATH")
         options = {"specific_model_path": model_path} if model_path else {}
-        if threads := os.getenv("LOCAL_NEURAL_THREADS"):
+        if threads := os.getenv(f"LOCAL_{component.upper()}_THREADS") or os.getenv("LOCAL_NEURAL_THREADS"):
             options["threads"] = int(threads)
         if os.getenv("HF_HUB_OFFLINE", "").upper() in {"1", "YES", "TRUE", "ON"}:
             options["local_files_only"] = True
@@ -41,6 +43,7 @@ class OnnxNeuralEmbedder:
         self._encoder = _create_model(self.model, "embed")
         self.batch_size = batch_size
         self._e5 = "multilingual-e5-" in self.model.casefold()
+        self._query_vectors = ContextVar("onnx_query_vectors", default=None)
 
     @property
     def model_name(self):
@@ -58,8 +61,22 @@ class OnnxNeuralEmbedder:
     def encode(self, texts):
         return self._encode(texts, "passage: ")
 
+    @contextmanager
+    def cache_query_encodings(self):
+        token = self._query_vectors.set({})
+        try:
+            yield
+        finally:
+            self._query_vectors.reset(token)
+
     def encode_queries(self, texts):
-        return self._encode(texts, "query: ")
+        cache = self._query_vectors.get()
+        if cache is None or not isinstance(texts, (list, tuple)) or len(texts) != 1:
+            return self._encode(texts, "query: ")
+        query = texts[0]
+        if query not in cache:
+            cache[query] = self._encode(texts, "query: ")
+        return cache[query].copy()
 
 
 class OnnxCrossEncoderReranker:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
 from html import escape
@@ -834,8 +835,11 @@ class CognitiveMemoryEngine(TaskWorkspace):
             self.origin, self.radius = origin, radius
 
     def _recall(self, query, parsed, temporal, scope, direct, *, include_cold=False, filters=None, plan=None):
-        return recall(self.store, 55 if plan and plan.wide and self.per_channel_k == 35 else self.per_channel_k, query, parsed, temporal, scope, direct,
-                      vector_search=self.search_vector, fuse=weighted_rrf, include_cold=include_cold, filters=filters, plan=plan)
+        depth = 55 if plan and plan.wide and self.per_channel_k == 35 else self.per_channel_k
+        cache = getattr(self.store.embedder, "cache_query_encodings", nullcontext)
+        with cache():
+            return recall(self.store, depth, query, parsed, temporal, scope, direct, vector_search=self.search_vector,
+                          fuse=weighted_rrf, include_cold=include_cold, filters=filters, plan=plan)
 
     def _rerank(self, query, candidates):
         if not candidates:
