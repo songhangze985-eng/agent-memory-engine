@@ -79,3 +79,35 @@ def test_calibration_counts_source_groups_once_and_keeps_threshold_ties():
     assert measured["unsupported"]["baseline_empty"] == 1
     assert measured["unsupported"]["additional_rejected"] == 1
     assert measured["unsupported"]["total_rejection_rate"] == 1
+
+
+def test_coordinated_queries_reuse_scope_without_matching_a_different_choice():
+    from memengine.retrieval.abstention import abstention_features
+
+    engine = make_engine("mock")
+    with closing(engine.store):
+        engine.retain("On the Harbor Line trip I chose the book The Lantern Atlas.", timestamp=100, session_id="book")
+        engine.retain("On the Quarry Line trip I chose the podcast Morning Signals.", timestamp=101, session_id="other")
+        engine.retain("On the Harbor Line trip I discussed several podcasts.", timestamp=102, session_id="discussion")
+        query = "Which book and which podcast did I choose on the Harbor Line trip?"
+        context = engine.answer(query, timestamp=110, token_budget=256, include_short_term=False)
+        book = "Which book did I choose on the Harbor Line trip"
+        podcast = "which podcast did I choose on the Harbor Line trip"
+        assert context["parsed_query"]["facets"] == [book, podcast]
+        assert set(context["answered_facets"]) == {book}
+        assert context["unanswered_facets"] == [podcast]
+        assert abstention_features(query, context["ranked"], [book, podcast])["facet_support"] == 1.0
+
+
+def test_facet_support_requires_one_visible_statement_with_a_value():
+    from memengine.retrieval.coverage import supported_facet
+
+    template = {"role": "user", "status": "active", "source_turn_ids": [1], "speaker": "Alice", "entity_anchor": True}
+    target = ["Which book did I choose on the Harbor Line trip"]
+    for text in (
+        "[2024-05-01 | Alice] The book I chose on the Harbor Line trip.",
+        "I discussed a book on the Harbor Line trip. I chose a podcast called Morning Signals.",
+        "I did not choose the book The Lantern Atlas on the Harbor Line trip.",
+        "I chose the book The Lantern Atlas on the Quarry Line trip.",
+    ):
+        assert not supported_facet(target, [{**template, "text": text, "plain": text}], require_entity=True)

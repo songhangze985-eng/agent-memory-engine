@@ -7,13 +7,18 @@ from memengine.lifecycle import normalized_content
 from memengine.linguistics import stem, strip_speaker_prefix
 from memengine.temporal import competition_terms
 from memengine.textutil import strip_step_tags, token_units
+from memengine.verification import claims_from_text
 
 _LIST_INTRO = re.compile(r"\b(?:tell me about|say about|details about|cover|include|both)\s+|关于|分别(?:是|提到(?:了)?(?:哪些|什么)?)?", re.I)
 _SEPARATOR = re.compile(r"[,，;；、]\s*(?:and\s+)?|\s+(?:and|as well as)\s+|以及", re.I)
 _QUESTION = re.compile(r"^(?:what|which|when|where|who|why|how)\b|^(?:什么|哪|何时|为何|怎么|多久)", re.I)
+_WHICH = re.compile(r"^which\s+", re.I)
+_AUXILIARY = re.compile(r"\b(?:did|does|do|has|have|had|is|are|was|were|can|could|will|would|should)\b", re.I)
 _AGGREGATE = re.compile(
     r"\b(?:what|which|where|who|how many)\b.{1,90}\b(?:both|have|has|types|kinds|different|various|done|visited)\b|"
     r"\b(?:activities|events|cities|countries|books|places|hobbies|reasons)\b|哪些|分别|一共", re.I)
+_EVIDENCE_HEADER = re.compile(r"^\[\d{4}-\d{2}-\d{2}(?: \| [^\]]+)?\]\s*")
+_NEGATED = re.compile(r"\b(?:not|never)\b|n['’]t\b|从未|不曾|没有", re.I)
 _PRONOUNS = {"i", "me", "my", "he", "she", "his", "her", "they", "their", "we", "our"}
 _UNCERTAIN = re.compile(
     r"\b(?:unknown|not sure|not recorded|not been established|(?:don['’]t|do not) (?:know|remember))\b|"
@@ -34,6 +39,11 @@ def explicit_facets(query):
     parts = [part.strip(" .!?。！？") for part in _SEPARATOR.split(body)]
     if not 2 <= len(parts) <= 4 or not (intro or all(_QUESTION.match(part) for part in parts)):
         return []
+    if not intro and all(_WHICH.match(part) for part in parts):
+        predicate = _AUXILIARY.search(parts[-1])
+        if predicate:
+            suffix = parts[-1][predicate.start():]
+            parts[:-1] = [part if _AUXILIARY.search(part) else f"{part} {suffix}" for part in parts[:-1]]
     terms = [_facet_terms(part) for part in parts]
     return parts if all(terms) and len({frozenset(group) for group in terms}) == len(parts) else []
 
@@ -130,3 +140,25 @@ def answered_facets(facets, claims, evidence, matched_entities):
                         keys.append(key)
     return ({facet: keys for facet, keys in answered.items() if keys},
             [{**claims[index], "evidence_ids": keys} for index, keys in claim_citations.items()])
+
+
+def supported_facet(facets, candidates, *, require_entity):
+    """Check if a source-backed statement visibly supplies an explicit facet."""
+    targets = [_facet_terms(facet) for facet in facets]
+    for fact in candidates:
+        if not _facet_source(fact, require_entity):
+            continue
+        speaker = fact.get("speaker") or ""
+        text = _EVIDENCE_HEADER.sub("", strip_step_tags(fact["text"]).strip())
+        if speaker:
+            text = text.removeprefix(f"[{speaker}]").lstrip()
+        text = strip_speaker_prefix(text.removeprefix(fact.get("state_tag", "")).lstrip(), speaker)
+        speaker_terms = _facet_terms(speaker)
+        for clause in claims_from_text(text):
+            if _UNCERTAIN.search(clause) or _NEGATED.search(clause):
+                continue
+            body = _facet_terms(clause)
+            terms = body | speaker_terms
+            if any(target <= terms and body - target - speaker_terms for target in targets):
+                return True
+    return False

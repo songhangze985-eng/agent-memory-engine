@@ -4,8 +4,8 @@ import unicodedata
 
 from memengine.textutil import strip_step_tags
 
-_IRREGULAR = dict(zip("went gone bought taught ran made took taken saw seen did done had wrote written got gotten brought felt left met kept ate eaten drank drunk drove driven spoke spoken thought knew known gave given children people men women mice teeth feet better".split(),
-                      "go go buy teach run make take take see see do do have write write get get bring feel leave meet keep eat eat drink drink drive drive speak speak think know know give give child person man woman mouse tooth foot good".split()))
+_IRREGULAR = dict(zip("went gone bought taught ran made took taken saw seen did done had wrote written got gotten brought felt left met kept ate eaten drank drunk drove driven spoke spoken thought knew known gave given children people men women mice teeth feet better chose chosen".split(),
+                      "go go buy teach run make take take see see do do have write write get get bring feel leave meet keep eat eat drink drink drive drive speak speak think know know give give child person man woman mouse tooth foot good choose choose".split()))
 _WORD = re.compile(r"(?<![\w./_@+-])[A-Za-z]{3,}(?![\w/_@+-]|\.[A-Za-z0-9])")
 _PRONOUN = re.compile(r"\b(I(?:['’](?:m|ve|d|ll))?|my|me|mine|we|us|our|ours)\b|我们的|我们|我的|我", re.I)
 

@@ -8,14 +8,14 @@ from itertools import groupby
 from math import floor
 from pathlib import Path
 
-from eval.abstention_cohort import build_cases
+from eval.abstention_cohort import SEED, build_cases
 from memengine.engine import CognitiveMemoryEngine
 from memengine.reranker import CalibratedLocalReranker
 from memengine.retrieval.abstention import abstention_features, abstention_group
 from memengine.vector import HashedTfidfEmbedder
 
 ALPHA = 0.02
-SCORES = ("ce", "support", "combined")
+SCORES = ("ce", "support", "combined", "facet_support")
 
 
 def score_case(case):
@@ -37,7 +37,8 @@ def score_case(case):
         "id": case["id"], "group": case["group"], "split": case["split"], "intent": case["intent"],
         "outcome": case["outcome"], "variant": case["variant"],
         "runtime_group": abstention_group(query, parsed, recall["temporal_intent"]),
-        "features": abstention_features(query, head, parsed["facets"]),
+        "features": abstention_features(query, head, parsed["facets"],
+                                        require_entity=bool(recall["matched_entities"])),
         "empty": not head, "expected_slots": len(expected),
         "retrieved_slots": sum(ref in source_refs for ref in expected),
     }
@@ -119,8 +120,9 @@ def report(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--seed", type=int, default=SEED, help="Seed for the grouped synthetic cohort")
     args = parser.parse_args()
-    outcome = report([score_case(case) for case in build_cases()])
+    outcome = {"seed": args.seed, **report([score_case(case) for case in build_cases(seed=args.seed)])}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(outcome, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({name: scores["holdout"] for name, scores in outcome["scores"].items()}, indent=2))
