@@ -32,8 +32,11 @@ FUSION_ABLATIONS = {
     "baseline": {},
     "quotas_only": {"channel_quotas": True},
     "weights_only": {"semantic_weighting": True},
-    "graph_off_only": {"entity_graph": False},
-    "combined": {"channel_quotas": True, "semantic_weighting": True, "entity_graph": False},
+    "graph_off_only": {"query_entity_inverted": False, "passive_expansion": False},
+    "passive_expansion_off_only": {"passive_expansion": False},
+    "entity_inverted_off_only": {"query_entity_inverted": False},
+    "combined": {"channel_quotas": True, "semantic_weighting": True,
+                 "query_entity_inverted": False, "passive_expansion": False},
 }
 FUSION_VARIANTS = {
     **FUSION_ABLATIONS,
@@ -227,7 +230,7 @@ def main():
                         help="Replay the same budget and admitted candidates in score and gold-first order")
     fusion = parser.add_mutually_exclusive_group()
     fusion.add_argument("--fusion-ablation", action="store_true",
-                        help="Compare channel quotas, weights and graph removal on the same ingested histories")
+                        help="Compare quotas, weights and each entity read path on the same ingested histories")
     fusion.add_argument("--fusion-variant", choices=FUSION_VARIANTS, default="baseline")
     parser.add_argument("--query-mode", choices=("single_query", "reconstructive"), default="reconstructive")
     args = parser.parse_args()

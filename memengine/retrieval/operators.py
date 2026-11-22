@@ -32,8 +32,8 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
     dense = vector_search(semantic_query, **{**options, "top_n": dense_limit})
     lexical = store.search_lexical(query_index, **{**options, "top_n": lexical_limit})
     entities = direct or parsed["entities"]
-    use_entity_graph = plan is None or plan.entity_graph
-    inverted = store.search_entity_inverted(entities, **options) if use_entity_graph else []
+    use_entity_inverted = plan is None or plan.query_entity_inverted
+    inverted = store.search_entity_inverted(entities, **options) if use_entity_inverted else []
     timed = []
     previous = (temporal.is_historical and temporal.order_hint == "latest"
                 and temporal.start_ts is None and temporal.end_ts is None)
@@ -89,7 +89,7 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
                 scoped = scoped_facts(hits)
                 directed = [hit for hit in hits if hit["id"] in scoped and supported_facet(
                     [gap], [scoped[hit["id"]]], require_entity=bool(direct))][:2]
-        elif plan.graph and use_entity_graph:
+        elif plan.graph and plan.passive_expansion:
             seeds = fuse(lexical, dense, w_vec=lexical_weight, w_hash=semantic_weight,
                          extra_channels=((.16, anchor_lex), (.07, inverted), (.22, calendar_hits)))[:16]
             hydrated = {row["id"]: row for row in store.recall_facts_by_ids([row["id"] for row in seeds], scope=scope)}

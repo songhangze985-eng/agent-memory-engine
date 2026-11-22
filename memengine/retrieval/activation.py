@@ -20,7 +20,8 @@ class RecallPlan:
     wide: bool = False
     channel_quotas: bool = False
     semantic_weighting: bool = False
-    entity_graph: bool = True
+    query_entity_inverted: bool = True
+    passive_expansion: bool = True
     score_quantiles: bool = False
     preserve_candidate_at_50: bool = False
 
