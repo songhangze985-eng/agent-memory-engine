@@ -1,28 +1,36 @@
-"""Core relational VFS store (SQLite + PostgreSQL) with optimistic locking, snapshots, and L2-only indexing."""
+"""Core relational VFS store (SQLite + PostgreSQL) with optimistic locking, snapshots, L2-only vector/BM25/identifier indexing, and 3-stage retrieval."""
 from __future__ import annotations
 
 import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from http.client import HTTPException
 from pathlib import Path
 
 import numpy as np
 
-from memengine.textutil import tokenize_for_fts
+from memengine.chrono import DAY, interval_score, parse_session_clock, resolve_temporal_spans
+from memengine.identifiers import compares_versions, extract_identifiers
+from memengine.textutil import estimate_tokens, tokenize_for_fts
 from memengine.vector import HashedTfidfEmbedder, normalize_vectors
+from memengine.versioning import extract_versions, score_version_match
 from memengine.vfs.models import (
     MemoryNode,
     OptimisticLockError,
+    make_index_summary,
     normalize_dir_path,
     normalize_node_path,
     validate_node_fields,
 )
+
+W_VERIFIED = 1.35
+W_UNVERIFIED = 0.55
 
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memory_nodes (
@@ -38,6 +46,11 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
   confidence_score REAL NOT NULL DEFAULT 0.7 CHECK(confidence_score BETWEEN 0 AND 1),
   verification_status TEXT NOT NULL DEFAULT 'unverified' CHECK(verification_status IN ('unverified','verified')),
   salience_tag TEXT NOT NULL DEFAULT 'normal',
+  always_active INTEGER NOT NULL DEFAULT 0,
+  occurrence_start REAL,
+  occurrence_end REAL,
+  attribute_slot TEXT NOT NULL DEFAULT '',
+  content_tokens INTEGER NOT NULL DEFAULT 0,
   source_transcript_ids TEXT NOT NULL DEFAULT '[]',
   version INTEGER NOT NULL DEFAULT 1,
   is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -47,6 +60,7 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
 );
 CREATE INDEX IF NOT EXISTS idx_mn_scope_dir ON memory_nodes(user_id, agent_id, parent_path, is_deleted);
 CREATE INDEX IF NOT EXISTS idx_mn_scope_layer ON memory_nodes(user_id, agent_id, layer, is_deleted);
+CREATE INDEX IF NOT EXISTS idx_mn_always_active ON memory_nodes(user_id, agent_id, always_active, is_deleted);
 
 CREATE TABLE IF NOT EXISTS memory_node_snapshots (
   snapshot_id TEXT PRIMARY KEY,
@@ -65,6 +79,10 @@ CREATE TABLE IF NOT EXISTS memory_node_snapshots (
   confidence_score REAL NOT NULL,
   verification_status TEXT NOT NULL,
   salience_tag TEXT NOT NULL,
+  always_active INTEGER NOT NULL DEFAULT 0,
+  occurrence_start REAL,
+  occurrence_end REAL,
+  attribute_slot TEXT NOT NULL DEFAULT '',
   source_transcript_ids TEXT NOT NULL,
   is_deleted INTEGER NOT NULL,
   reason TEXT NOT NULL DEFAULT '',
@@ -82,6 +100,17 @@ CREATE TABLE IF NOT EXISTS memory_node_vectors (
   vec BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mnv_scope ON memory_node_vectors(user_id, agent_id, model_name, dim);
+
+CREATE TABLE IF NOT EXISTS memory_node_identifiers (
+  node_id TEXT NOT NULL REFERENCES memory_nodes(node_id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  ident TEXT NOT NULL,
+  ident_norm TEXT NOT NULL,
+  ident_type TEXT NOT NULL,
+  UNIQUE(node_id, ident_norm, ident_type)
+);
+CREATE INDEX IF NOT EXISTS idx_mni_lookup ON memory_node_identifiers(user_id, agent_id, ident_norm);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_nodes_fts USING fts5(
   node_id UNINDEXED,
@@ -107,6 +136,11 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
   confidence_score DOUBLE PRECISION NOT NULL DEFAULT 0.7 CHECK(confidence_score BETWEEN 0 AND 1),
   verification_status TEXT NOT NULL DEFAULT 'unverified' CHECK(verification_status IN ('unverified','verified')),
   salience_tag TEXT NOT NULL DEFAULT 'normal',
+  always_active INTEGER NOT NULL DEFAULT 0,
+  occurrence_start DOUBLE PRECISION,
+  occurrence_end DOUBLE PRECISION,
+  attribute_slot TEXT NOT NULL DEFAULT '',
+  content_tokens INTEGER NOT NULL DEFAULT 0,
   source_transcript_ids TEXT NOT NULL DEFAULT '[]',
   version INTEGER NOT NULL DEFAULT 1,
   is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -116,6 +150,7 @@ CREATE TABLE IF NOT EXISTS memory_nodes (
 );
 CREATE INDEX IF NOT EXISTS idx_mn_scope_dir ON memory_nodes(user_id, agent_id, parent_path, is_deleted);
 CREATE INDEX IF NOT EXISTS idx_mn_scope_layer ON memory_nodes(user_id, agent_id, layer, is_deleted);
+CREATE INDEX IF NOT EXISTS idx_mn_always_active ON memory_nodes(user_id, agent_id, always_active, is_deleted);
 
 CREATE TABLE IF NOT EXISTS memory_node_snapshots (
   snapshot_id TEXT PRIMARY KEY,
@@ -134,6 +169,10 @@ CREATE TABLE IF NOT EXISTS memory_node_snapshots (
   confidence_score DOUBLE PRECISION NOT NULL,
   verification_status TEXT NOT NULL,
   salience_tag TEXT NOT NULL,
+  always_active INTEGER NOT NULL DEFAULT 0,
+  occurrence_start DOUBLE PRECISION,
+  occurrence_end DOUBLE PRECISION,
+  attribute_slot TEXT NOT NULL DEFAULT '',
   source_transcript_ids TEXT NOT NULL,
   is_deleted INTEGER NOT NULL,
   reason TEXT NOT NULL DEFAULT '',
@@ -152,6 +191,17 @@ CREATE TABLE IF NOT EXISTS memory_node_vectors (
 );
 CREATE INDEX IF NOT EXISTS idx_mnv_scope ON memory_node_vectors(user_id, agent_id, model_name, dim);
 
+CREATE TABLE IF NOT EXISTS memory_node_identifiers (
+  node_id TEXT NOT NULL REFERENCES memory_nodes(node_id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  ident TEXT NOT NULL,
+  ident_norm TEXT NOT NULL,
+  ident_type TEXT NOT NULL,
+  UNIQUE(node_id, ident_norm, ident_type)
+);
+CREATE INDEX IF NOT EXISTS idx_mni_lookup ON memory_node_identifiers(user_id, agent_id, ident_norm);
+
 CREATE TABLE IF NOT EXISTS memory_nodes_fts (
   rowid BIGINT PRIMARY KEY REFERENCES memory_nodes(rowid) ON DELETE CASCADE,
   node_id TEXT NOT NULL,
@@ -166,18 +216,29 @@ CREATE INDEX IF NOT EXISTS idx_mn_fts_doc ON memory_nodes_fts USING GIN(document
 _FTS_STOP = frozenset(
     "a an the is was were am are be to of in it at on with for and or i my me you your we our what which when where how who".split()
 )
-_SALIENCE_BONUS = {"taboo": 0.14, "core_rule": 0.12, "warning": 0.08, "preference": 0.06, "normal": 0.0}
 _SAFE_LISTS = re.compile(r"^\s*(?:\d+\s*(?:,\s*\d+\s*)*)?$")
+_EXTRA_COLUMNS = {
+    "always_active": "INTEGER NOT NULL DEFAULT 0",
+    "occurrence_start": "DOUBLE PRECISION",
+    "occurrence_end": "DOUBLE PRECISION",
+    "attribute_slot": "TEXT NOT NULL DEFAULT ''",
+    "content_tokens": "INTEGER NOT NULL DEFAULT 0",
+}
 
 
 def _dump(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _version_prefix_key(digits: tuple[int, ...]) -> str:
+    return "version-prefix:" + ".".join(map(str, digits))
+
+
 def _row_to_node(row) -> MemoryNode:
     sources = row["source_transcript_ids"]
     if isinstance(sources, str):
         sources = json.loads(sources)
+    keys = row.keys() if hasattr(row, "keys") else ()
     return MemoryNode(
         node_id=row["node_id"],
         user_id=row["user_id"],
@@ -196,6 +257,10 @@ def _row_to_node(row) -> MemoryNode:
         is_deleted=bool(row["is_deleted"]),
         created_at=float(row["created_at"]),
         updated_at=float(row["updated_at"]),
+        always_active=bool(row["always_active"]) if "always_active" in keys else False,
+        occurrence_start=None if ("occurrence_start" not in keys or row["occurrence_start"] is None) else float(row["occurrence_start"]),
+        occurrence_end=None if ("occurrence_end" not in keys or row["occurrence_end"] is None) else float(row["occurrence_end"]),
+        attribute_slot=row["attribute_slot"] if "attribute_slot" in keys and row["attribute_slot"] else "",
     )
 
 
@@ -204,13 +269,26 @@ def _l2_index_text(title: str, summary: str, content: str) -> str:
     return "\n".join(parts)
 
 
+def _recency_weight(node: MemoryNode, *, reference_ts: float, half_life_days: float = 45.0) -> float:
+    """Timeless guardrails (always_active/taboo/core_rule) stay at 1.0; normal notes decay gently by updated_at.
+
+    Bounded to [0.82, 1.00] so fresh updates reliably win tie-breaks over stale versions of the same topic
+    without allowing weak recent noise to drown out high-relevance memories from months earlier.
+    """
+    if node.always_active or node.salience_tag in {"taboo", "core_rule"}:
+        return 1.0
+    age_days = max(0.0, (reference_ts - node.updated_at) / DAY)
+    return 0.82 + 0.18 * (0.5 ** (age_days / max(1.0, half_life_days)))
+
+
 class SQLiteVFSStore:
-    """Zero-dependency SQLite WAL implementation of the relational VFS + L2-only index."""
+    """Zero-dependency SQLite WAL implementation of the relational VFS + L2-only hybrid index."""
 
     def __init__(self, path: str | Path = ":memory:", *, embedder=None, external_vector_index=None):
         self.path = str(path)
         self.embedder = embedder if hasattr(embedder, "encode") and hasattr(embedder, "model_name") else HashedTfidfEmbedder()
         self.external_vector_index = external_vector_index
+        self._lock = threading.RLock()
         self.conn = sqlite3.connect(self.path, timeout=5, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         try:
@@ -218,37 +296,57 @@ class SQLiteVFSStore:
                 "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; "
                 "PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;" + _SQLITE_SCHEMA
             )
+            self._migrate_sqlite()
         except BaseException:
             self.conn.close()
             raise
 
+    def _migrate_sqlite(self) -> None:
+        for table in ("memory_nodes", "memory_node_snapshots"):
+            existing = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+            for col, ddl in _EXTRA_COLUMNS.items():
+                if col not in existing:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
     @contextmanager
     def transaction(self):
-        if self.conn.in_transaction:
-            self.conn.execute("SAVEPOINT vfs_write")
-            try:
-                yield
-            except BaseException:
-                self.conn.execute("ROLLBACK TO vfs_write")
-                raise
-            finally:
-                self.conn.execute("RELEASE vfs_write")
-        else:
-            with self.conn:
-                self.conn.execute("BEGIN IMMEDIATE")
-                yield
+        with self._lock:
+            if self.conn.in_transaction:
+                self.conn.execute("SAVEPOINT vfs_write")
+                try:
+                    yield
+                except BaseException:
+                    self.conn.execute("ROLLBACK TO vfs_write")
+                    raise
+                finally:
+                    self.conn.execute("RELEASE vfs_write")
+            else:
+                with self.conn:
+                    self.conn.execute("BEGIN IMMEDIATE")
+                    yield
 
     @contextmanager
     def read_snapshot(self):
-        if self.conn.in_transaction:
-            yield
-        else:
-            with self.conn:
-                self.conn.execute("BEGIN")
+        with self._lock:
+            if self.conn.in_transaction:
                 yield
+            else:
+                with self.conn:
+                    self.conn.execute("BEGIN")
+                    yield
+
+    def optimize_index(self) -> dict:
+        if self.external_vector_index is not None and hasattr(self.external_vector_index, "optimize_index"):
+            return self.external_vector_index.optimize_index()
+        return {"indexed": False, "index_type": "native"}
 
     def close(self):
-        self.conn.close()
+        with self._lock:
+            try:
+                if self.external_vector_index is not None and hasattr(self.external_vector_index, "close"):
+                    self.external_vector_index.close()
+            finally:
+                self.conn.close()
 
     def _encode_l2(self, text: str) -> tuple[str, int, np.ndarray]:
         vec = normalize_vectors(self.embedder.encode([text]))[0].astype(np.float32, copy=False)
@@ -259,10 +357,36 @@ class SQLiteVFSStore:
         vec = normalize_vectors(encode([query]))[0].astype(np.float32, copy=False)
         return self.embedder.model_name, len(vec), vec
 
+    def _index_l2_identifiers(self, node: MemoryNode, body: str) -> None:
+        rows = []
+        seen = set()
+        for item in extract_identifiers(body):
+            key = (item.ident_norm, item.ident_type)
+            if key not in seen:
+                seen.add(key)
+                rows.append((node.node_id, node.user_id, node.agent_id, item.ident, item.ident_norm, item.ident_type))
+        for version in extract_versions(body):
+            for depth in range(1, version.precision_depth + 1):
+                key = (_version_prefix_key(version.numeric_tuple[:depth]), "version_precision")
+                if key not in seen:
+                    seen.add(key)
+                    rows.append((node.node_id, node.user_id, node.agent_id, version.literal, key[0], key[1]))
+            if version.qualifier_op != "==":
+                key = ("version-range:" + version.product_family, "version_precision")
+                if key not in seen:
+                    seen.add(key)
+                    rows.append((node.node_id, node.user_id, node.agent_id, version.literal, key[0], key[1]))
+        if rows:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO memory_node_identifiers(node_id, user_id, agent_id, ident, ident_norm, ident_type) VALUES(?,?,?,?,?,?)",
+                rows,
+            )
+
     def _sync_l2_indexes(self, node: MemoryNode) -> None:
-        """Hard invariant: ONLY active L2 nodes exist in vector & FTS indexes."""
+        """Hard invariant: ONLY active L2 nodes exist in vector, FTS, and exact-identifier indexes."""
         self.conn.execute("DELETE FROM memory_node_vectors WHERE node_id=?", (node.node_id,))
         self.conn.execute("DELETE FROM memory_nodes_fts WHERE node_id=?", (node.node_id,))
+        self.conn.execute("DELETE FROM memory_node_identifiers WHERE node_id=?", (node.node_id,))
         if node.layer != "L2" or node.is_deleted:
             if self.external_vector_index is not None:
                 self.external_vector_index.delete(node.node_id)
@@ -279,6 +403,7 @@ class SQLiteVFSStore:
             "INSERT INTO memory_nodes_fts(node_id, user_id, agent_id, fts_tokens) VALUES(?,?,?,?)",
             (node.node_id, node.user_id, node.agent_id, tokenize_for_fts(body)),
         )
+        self._index_l2_identifiers(node, body)
         if self.external_vector_index is not None:
             self.external_vector_index.upsert_l2(node.to_dict(), vec.tolist())
 
@@ -296,14 +421,17 @@ class SQLiteVFSStore:
             """INSERT INTO memory_node_snapshots(
                 snapshot_id, node_id, user_id, agent_id, dream_batch_id, snapshot_kind, prev_version,
                 parent_path, path, title, summary, content, layer, confidence_score,
-                verification_status, salience_tag, source_transcript_ids, is_deleted, reason, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                verification_status, salience_tag, always_active, occurrence_start, occurrence_end,
+                attribute_slot, source_transcript_ids, is_deleted, reason, created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 sid, row_or_node.node_id, row_or_node.user_id, row_or_node.agent_id, dream_batch_id,
                 kind, row_or_node.version, row_or_node.parent_path, row_or_node.path,
                 row_or_node.title, row_or_node.summary, row_or_node.content, row_or_node.layer,
                 row_or_node.confidence_score, row_or_node.verification_status, row_or_node.salience_tag,
-                _dump(list(row_or_node.source_transcript_ids)), int(row_or_node.is_deleted), reason, now,
+                int(row_or_node.always_active), row_or_node.occurrence_start, row_or_node.occurrence_end,
+                row_or_node.attribute_slot, _dump(list(row_or_node.source_transcript_ids)),
+                int(row_or_node.is_deleted), reason, now,
             ),
         )
         return sid
@@ -313,15 +441,37 @@ class SQLiteVFSStore:
         sql = "SELECT * FROM memory_nodes WHERE user_id=? AND agent_id=? AND path=?"
         if not include_deleted:
             sql += " AND is_deleted=0"
-        row = self.conn.execute(sql, (user_id, agent_id, norm_path)).fetchone()
+        with self._lock:
+            row = self.conn.execute(sql, (user_id, agent_id, norm_path)).fetchone()
         return _row_to_node(row) if row is not None else None
 
     def get_node_by_id(self, node_id: str, *, user_id: str, agent_id: str, include_deleted: bool = False) -> MemoryNode | None:
         sql = "SELECT * FROM memory_nodes WHERE user_id=? AND agent_id=? AND node_id=?"
         if not include_deleted:
             sql += " AND is_deleted=0"
-        row = self.conn.execute(sql, (user_id, agent_id, node_id)).fetchone()
+        with self._lock:
+            row = self.conn.execute(sql, (user_id, agent_id, node_id)).fetchone()
         return _row_to_node(row) if row is not None else None
+
+    def get_preloaded_nodes(self, *, user_id: str, agent_id: str) -> tuple[MemoryNode | None, list[MemoryNode]]:
+        """Stage 1 Deterministic Pre-load: unconditionally fetch L1 /global.md + L2 always_active rules."""
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT * FROM memory_nodes
+                   WHERE user_id=? AND agent_id=? AND is_deleted=0
+                     AND ((layer='L1' AND path='/global.md') OR (layer='L2' AND always_active=1))
+                   ORDER BY CASE WHEN path='/global.md' THEN 0 ELSE 1 END, path""",
+                (user_id, agent_id),
+            ).fetchall()
+        global_node = None
+        always_active = []
+        for row in rows:
+            node = _row_to_node(row)
+            if node.layer == "L1" and node.path == "/global.md":
+                global_node = node
+            elif node.layer == "L2" and node.always_active:
+                always_active.append(node)
+        return global_node, always_active
 
     def list_nodes(
         self,
@@ -349,11 +499,40 @@ class SQLiteVFSStore:
             else:
                 clauses.append("parent_path=?")
                 args.append(norm_dir)
-        rows = self.conn.execute(
-            f"SELECT * FROM memory_nodes WHERE {' AND '.join(clauses)} ORDER BY path",
-            tuple(args),
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM memory_nodes WHERE {' AND '.join(clauses)} ORDER BY path",
+                tuple(args),
+            ).fetchall()
         return [_row_to_node(row) for row in rows]
+
+    def directory_stats(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        layer: str = "L2",
+        parent_path: str | None = None,
+    ) -> list[dict]:
+        """Compute per-directory note count and token footprint via indexed SQL GROUP BY (O(dirs), zero full-body scan)."""
+        clauses = ["user_id=?", "agent_id=?", "layer=?", "is_deleted=0"]
+        args: list = [user_id, agent_id, layer]
+        if parent_path is not None:
+            clauses.append("parent_path=?")
+            args.append(normalize_dir_path(parent_path))
+        with self._lock:
+            rows = self.conn.execute(
+                f"""SELECT parent_path, count(*) AS note_count, COALESCE(SUM(content_tokens), 0) AS tokens
+                    FROM memory_nodes
+                    WHERE {' AND '.join(clauses)}
+                    GROUP BY parent_path
+                    ORDER BY parent_path""",
+                tuple(args),
+            ).fetchall()
+        return [
+            {"parent_path": row["parent_path"], "note_count": int(row["note_count"]), "tokens": int(row["tokens"])}
+            for row in rows
+        ]
 
     def upsert_node(
         self,
@@ -368,6 +547,10 @@ class SQLiteVFSStore:
         confidence_score: float = 0.7,
         verification_status: str = "unverified",
         salience_tag: str = "normal",
+        always_active: bool = False,
+        occurrence_start: float | None = None,
+        occurrence_end: float | None = None,
+        attribute_slot: str = "",
         source_transcript_ids: list[str] | tuple[str, ...] = (),
         expected_version: int | None = None,
         dream_batch_id: str | None = None,
@@ -383,6 +566,13 @@ class SQLiteVFSStore:
         )
         now = time.time() if timestamp is None else float(timestamp)
         sources = list(dict.fromkeys(str(tid) for tid in source_transcript_ids if str(tid).strip()))
+        # Maintain concise <=50-char index_summary for L2 progressive disclosure
+        index_summary = make_index_summary(title, content, summary) if layer == "L2" else (summary or title[:50])
+        content_tokens = estimate_tokens(content)
+        if occurrence_start is None and layer == "L2":
+            spans = resolve_temporal_spans(f"{title}\n{index_summary}\n{content[:1500]}", now)
+            if spans:
+                occurrence_start, occurrence_end = spans[0].start, spans[0].end
         with self.transaction():
             existing_row = self.conn.execute(
                 "SELECT * FROM memory_nodes WHERE user_id=? AND agent_id=? AND path=?",
@@ -392,18 +582,25 @@ class SQLiteVFSStore:
                 if expected_version is not None and expected_version != 0:
                     raise OptimisticLockError(norm_path, expected_version, 0)
                 node_id = f"node_{uuid.uuid4().hex[:14]}"
-                self.conn.execute(
-                    """INSERT INTO memory_nodes(
-                        node_id, user_id, agent_id, parent_path, path, title, summary, content,
-                        layer, confidence_score, verification_status, salience_tag,
-                        source_transcript_ids, version, is_deleted, created_at, updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,?)""",
-                    (
-                        node_id, user_id, agent_id, parent_path, norm_path, title, summary, content,
-                        layer, float(confidence_score), verification_status, salience_tag,
-                        _dump(sources), now, now,
-                    ),
-                )
+                try:
+                    self.conn.execute(
+                        """INSERT INTO memory_nodes(
+                            node_id, user_id, agent_id, parent_path, path, title, summary, content,
+                            layer, confidence_score, verification_status, salience_tag,
+                            always_active, occurrence_start, occurrence_end, attribute_slot,
+                            content_tokens, source_transcript_ids, version, is_deleted, created_at, updated_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,?)""",
+                        (
+                            node_id, user_id, agent_id, parent_path, norm_path, title, index_summary, content,
+                            layer, float(confidence_score), verification_status, salience_tag,
+                            int(bool(always_active)), occurrence_start, occurrence_end, attribute_slot or "",
+                            content_tokens, _dump(sources), now, now,
+                        ),
+                    )
+                except Exception as exc:
+                    if isinstance(exc, sqlite3.IntegrityError) or getattr(exc, "sqlstate", None) == "23505":
+                        raise OptimisticLockError(norm_path, expected_version or 0, 1) from exc
+                    raise
                 node = self.get_node_by_id(node_id, user_id=user_id, agent_id=agent_id, include_deleted=True)
                 self._record_snapshot(node, kind="created", dream_batch_id=dream_batch_id, reason=reason, now=now)
                 self._sync_l2_indexes(node)
@@ -422,12 +619,14 @@ class SQLiteVFSStore:
                 """UPDATE memory_nodes SET
                     parent_path=?, title=?, summary=?, content=?, layer=?,
                     confidence_score=?, verification_status=?, salience_tag=?,
-                    source_transcript_ids=?, version=version+1, is_deleted=0, updated_at=?
+                    always_active=?, occurrence_start=?, occurrence_end=?, attribute_slot=?,
+                    content_tokens=?, source_transcript_ids=?, version=version+1, is_deleted=0, updated_at=?
                    WHERE node_id=? AND user_id=? AND agent_id=? AND version=?""",
                 (
-                    parent_path, title, summary, content, layer,
+                    parent_path, title, index_summary, content, layer,
                     float(confidence_score), verification_status, salience_tag,
-                    _dump(merged_sources), now,
+                    int(bool(always_active)), occurrence_start, occurrence_end, attribute_slot or "",
+                    content_tokens, _dump(merged_sources), now,
                     existing.node_id, user_id, agent_id, existing.version,
                 ),
             )
@@ -487,10 +686,11 @@ class SQLiteVFSStore:
         if dream_batch_id is not None:
             clauses.append("dream_batch_id=?")
             args.append(dream_batch_id)
-        rows = self.conn.execute(
-            f"SELECT * FROM memory_node_snapshots WHERE {' AND '.join(clauses)} ORDER BY created_at DESC, snapshot_id DESC LIMIT ?",
-            (*args, int(limit)),
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT * FROM memory_node_snapshots WHERE {' AND '.join(clauses)} ORDER BY created_at DESC, snapshot_id DESC LIMIT ?",
+                (*args, int(limit)),
+            ).fetchall()
         return [
             {**dict(row), "source_transcript_ids": json.loads(row["source_transcript_ids"]), "is_deleted": bool(row["is_deleted"])}
             for row in rows
@@ -498,16 +698,23 @@ class SQLiteVFSStore:
 
     def _restore_snapshot_row(self, snap, *, now: float) -> MemoryNode:
         is_deleted = 1 if snap["snapshot_kind"] == "created" else int(snap["is_deleted"])
+        keys = snap.keys() if hasattr(snap, "keys") else ()
+        always_active = int(snap["always_active"]) if "always_active" in keys else 0
+        occ_start = snap["occurrence_start"] if "occurrence_start" in keys else None
+        occ_end = snap["occurrence_end"] if "occurrence_end" in keys else None
+        attr_slot = snap["attribute_slot"] if "attribute_slot" in keys and snap["attribute_slot"] else ""
         self.conn.execute(
             """UPDATE memory_nodes SET
                 parent_path=?, path=?, title=?, summary=?, content=?, layer=?,
                 confidence_score=?, verification_status=?, salience_tag=?,
-                source_transcript_ids=?, is_deleted=?, version=version+1, updated_at=?
+                always_active=?, occurrence_start=?, occurrence_end=?, attribute_slot=?,
+                content_tokens=?, source_transcript_ids=?, is_deleted=?, version=version+1, updated_at=?
                WHERE node_id=? AND user_id=? AND agent_id=?""",
             (
                 snap["parent_path"], snap["path"], snap["title"], snap["summary"], snap["content"], snap["layer"],
                 float(snap["confidence_score"]), snap["verification_status"], snap["salience_tag"],
-                snap["source_transcript_ids"], is_deleted, now,
+                always_active, occ_start, occ_end, attr_slot,
+                estimate_tokens(snap["content"]), snap["source_transcript_ids"], is_deleted, now,
                 snap["node_id"], snap["user_id"], snap["agent_id"],
             ),
         )
@@ -551,7 +758,7 @@ class SQLiteVFSStore:
         dream_batch_id: str,
         timestamp: float | None = None,
     ) -> list[MemoryNode]:
-        """Atomically revert every node touched by a dreaming/consolidation batch."""
+        """Atomically revert every node touched by a dreaming/compaction batch."""
         now = time.time() if timestamp is None else float(timestamp)
         with self.transaction():
             rows = self.conn.execute(
@@ -562,11 +769,47 @@ class SQLiteVFSStore:
             ).fetchall()
             if not rows:
                 return []
-            # Keep the earliest pre-batch snapshot per node so multi-step edits revert cleanly to pre-batch state.
             earliest_by_node = {}
             for row in rows:
                 earliest_by_node.setdefault(row["node_id"], row)
             return [self._restore_snapshot_row(snap, now=now) for snap in earliest_by_node.values()]
+
+    def _l2_identifier_hits(
+        self,
+        ident_norms: list[str],
+        *,
+        user_id: str,
+        agent_id: str,
+        path_prefix: str | None,
+        verified_only: bool,
+        salience_tags: tuple[str, ...] | None,
+        top_k: int,
+    ) -> list[dict]:
+        if not ident_norms:
+            return []
+        placeholders = ",".join("?" for _ in ident_norms)
+        clauses = [
+            "i.user_id=?", "i.agent_id=?", f"i.ident_norm IN ({placeholders})",
+            "n.layer='L2'", "n.is_deleted=0",
+        ]
+        args: list = [user_id, agent_id, *ident_norms]
+        if path_prefix and path_prefix != "/":
+            clauses.append("n.path LIKE ?")
+            args.append(path_prefix + "%")
+        if verified_only:
+            clauses.append("n.verification_status='verified'")
+        if salience_tags:
+            sp = ",".join("?" for _ in salience_tags)
+            clauses.append(f"n.salience_tag IN ({sp})")
+            args.extend(salience_tags)
+        rows = self.conn.execute(
+            f"""SELECT n.node_id, count(DISTINCT i.ident_norm) AS ident_hits
+                FROM memory_node_identifiers i JOIN memory_nodes n ON n.node_id=i.node_id
+                WHERE {' AND '.join(clauses)}
+                GROUP BY n.node_id ORDER BY ident_hits DESC, n.updated_at DESC, n.node_id LIMIT ?""",
+            (*args, int(top_k)),
+        ).fetchall()
+        return [{"node_id": row["node_id"], "ident_hits": int(row["ident_hits"])} for row in rows]
 
     def _l2_vector_hits(
         self,
@@ -663,14 +906,61 @@ class SQLiteVFSStore:
         path_prefix: str | None = None,
         verified_only: bool = False,
         salience_tags: tuple[str, ...] | None = None,
+        reference_time: float | str | None = None,
         top_k: int = 10,
     ) -> list[dict]:
-        """Hybrid vector + BM25 search strictly restricted to active L2 Markdown notes."""
+        """Stage 3 Hybrid Dense + BM25 + Exact-Identifier/Version search strictly over L2 nodes.
+
+        Rerank formula: ``Final_Score = Semantic_Sim * W_verified * W_recency``.
+        Enforces strict missing-version / missing-standalone-symbol abstention and zero version cross-talk.
+        """
         if not query.strip() or top_k <= 0:
             return []
         norm_prefix = normalize_dir_path(path_prefix) if path_prefix else None
-        fetch_k = max(top_k * 2, 20)
+        fetch_k = max(top_k * 3, 30)
+        wanted_idents = extract_identifiers(query)
+        wanted_versions = extract_versions(query)
+        compare = compares_versions(query)
+        standalone_symbol = (
+            len(wanted_idents) == 1
+            and query.strip().strip("`\"' ") == wanted_idents[0].ident
+        )
+
+        # Build exact-identifier & version-precision lookup keys
+        wanted_key_set = {item.ident_norm for item in wanted_idents}
+        version_lookup_keys = set()
+        for ver in wanted_versions:
+            version_lookup_keys.add(_version_prefix_key(ver.numeric_tuple[: min(2, ver.precision_depth)]))
+            version_lookup_keys.add("version-range:" + ver.product_family)
+        ident_lookup_keys = wanted_key_set | version_lookup_keys
+
         with self.read_snapshot():
+            ident_hits = (
+                self._l2_identifier_hits(
+                    sorted(ident_lookup_keys),
+                    user_id=user_id, agent_id=agent_id, path_prefix=norm_prefix,
+                    verified_only=verified_only, salience_tags=salience_tags, top_k=fetch_k,
+                )
+                if ident_lookup_keys
+                else []
+            )
+            exact_ident_hits = (
+                ident_hits
+                if ident_lookup_keys == wanted_key_set
+                else (
+                    self._l2_identifier_hits(
+                        sorted(wanted_key_set),
+                        user_id=user_id, agent_id=agent_id, path_prefix=norm_prefix,
+                        verified_only=verified_only, salience_tags=salience_tags, top_k=fetch_k,
+                    )
+                    if wanted_key_set
+                    else []
+                )
+            )
+            # Strict missing-symbol abstention for standalone technical symbols (e.g. `ERR_SYNC_25`)
+            if standalone_symbol and not exact_ident_hits:
+                return []
+
             vec_hits = self._l2_vector_hits(
                 query, user_id=user_id, agent_id=agent_id, path_prefix=norm_prefix,
                 verified_only=verified_only, salience_tags=salience_tags, top_k=fetch_k,
@@ -679,49 +969,135 @@ class SQLiteVFSStore:
                 query, user_id=user_id, agent_id=agent_id, path_prefix=norm_prefix,
                 verified_only=verified_only, salience_tags=salience_tags, top_k=fetch_k,
             )
-            rrf: dict[str, float] = {}
+
             vec_scores = {h["node_id"]: h["vector_score"] for h in vec_hits}
+            exact_ident_counts = {h["node_id"]: h["ident_hits"] for h in exact_ident_hits}
+            version_candidate_ids = {h["node_id"] for h in ident_hits} if wanted_versions else set()
+            lex_rank_scores = {h["node_id"]: 1.0 / (1.0 + 0.15 * (rank - 1)) for rank, h in enumerate(lex_hits, start=1)}
+            rrf: dict[str, float] = {}
             for rank, hit in enumerate(vec_hits, start=1):
-                rrf[hit["node_id"]] = rrf.get(hit["node_id"], 0.0) + 0.55 / (60 + rank)
-            for rank, hit in enumerate(lex_hits, start=1):
                 rrf[hit["node_id"]] = rrf.get(hit["node_id"], 0.0) + 0.45 / (60 + rank)
+            for rank, hit in enumerate(lex_hits, start=1):
+                rrf[hit["node_id"]] = rrf.get(hit["node_id"], 0.0) + 0.40 / (60 + rank)
+            for rank, hit in enumerate(ident_hits, start=1):
+                rrf[hit["node_id"]] = rrf.get(hit["node_id"], 0.0) + 0.75 / (60 + rank)
             if not rrf:
                 return []
+
             ids = list(rrf)
             placeholders = ",".join("?" for _ in ids)
             rows = self.conn.execute(
                 f"SELECT * FROM memory_nodes WHERE user_id=? AND agent_id=? AND layer='L2' AND is_deleted=0 AND node_id IN ({placeholders})",
                 (user_id, agent_id, *ids),
             ).fetchall()
-        results = []
-        for row in rows:
-            node = _row_to_node(row)
-            base = rrf[node.node_id] * 61.0
-            salience = _SALIENCE_BONUS.get(node.salience_tag, 0.0)
-            verified_bonus = 0.06 if node.verification_status == "verified" else 0.0
-            score = base * (0.75 + 0.25 * node.confidence_score) + salience + verified_bonus
-            results.append({
+
+        nodes = [_row_to_node(row) for row in rows]
+        ref_ts = parse_session_clock(reference_time) if reference_time is not None else None
+        if ref_ts is None:
+            ref_ts = max((n.updated_at for n in nodes), default=time.time())
+        query_spans = tuple(
+            span for span in resolve_temporal_spans(query, ref_ts)
+            if span.start is not None or span.end is not None
+        )
+        strict_version_query = bool(wanted_versions and not compare)
+        query_wants_stable = all(qv.prerelease is None for qv in wanted_versions)
+
+        scored = []
+        for node in nodes:
+            version_grade = None
+            version_boost = 0.0
+            version_mult = 1.0
+
+            if strict_version_query:
+                if version_candidate_ids and node.node_id not in version_candidate_ids:
+                    continue
+                body = _l2_index_text(node.title, node.summary, node.content)
+                mem_versions = extract_versions(body)
+                if not mem_versions:
+                    continue
+                grades = [(score_version_match(qv, mv), mv) for qv in wanted_versions for mv in mem_versions]
+                best = max(grades, key=lambda item: (item[0].confidence, item[1].prerelease is None), default=None)
+                if best is None or best[0].confidence <= 0:
+                    # Hard mismatch (sibling / cross-product / prerelease): exclude completely -> zero cross-talk
+                    continue
+                version_grade = best[0].match_type
+                version_boost = best[0].boost
+                version_mult = best[0].multiplier
+                # When query asks for a stable branch (e.g. Python v3.11), stable releases strictly outrank prereleases
+                if version_grade == "CONTAINED_SPECIFIC" and query_wants_stable and best[1].prerelease is not None:
+                    version_boost = 0.0
+                    version_mult *= 0.55
+
+            # O(1) exact identifier coverage ratio directly from indexed memory_node_identifiers
+            exact_hits = exact_ident_counts.get(node.node_id, 0)
+            exact_ratio = exact_hits / len(wanted_key_set) if wanted_key_set else 0.0
+
+            # Compute normalized Semantic_Sim in (0, 1+] combining Dense + BM25 + exact/calendar match
+            dense_sim = max(0.0, min(1.0, vec_scores.get(node.node_id, 0.0)))
+            bm25_sim = lex_rank_scores.get(node.node_id, 0.0)
+            rrf_norm = rrf[node.node_id] * 61.0
+            semantic_sim = (0.45 * dense_sim + 0.35 * bm25_sim + 0.20 * min(1.0, rrf_norm)) * version_mult
+            if exact_ratio > 0:
+                semantic_sim += 0.65 * exact_ratio
+            if version_boost > 0:
+                semantic_sim += version_boost
+            if query_spans and node.occurrence_start is not None:
+                occ_end = node.occurrence_end if node.occurrence_end is not None else node.occurrence_start
+                cal_overlap = max(interval_score(node.occurrence_start, occ_end, span) for span in query_spans)
+                if cal_overlap > 0:
+                    semantic_sim += 0.25 * cal_overlap
+
+            # Exact user-specified Rerank formula: Final Score = Semantic_Sim * W_verified * W_recency
+            w_verified = W_VERIFIED if node.verification_status == "verified" else W_UNVERIFIED
+            w_recency = _recency_weight(node, reference_ts=ref_ts)
+            final_score = semantic_sim * w_verified * w_recency
+
+            scored.append({
                 **node.to_dict(),
-                "score": round(score, 6),
-                "vector_score": round(vec_scores.get(node.node_id, 0.0), 6),
+                "score": round(final_score, 6),
+                "vector_score": round(dense_sim, 6),
+                "exact_ident_hit": exact_hits,
+                "version_grade": version_grade,
+                "score_breakdown": {
+                    "semantic_sim": round(semantic_sim, 6),
+                    "w_verified": w_verified,
+                    "w_recency": round(w_recency, 6),
+                    "final_score": round(final_score, 6),
+                },
             })
-        results.sort(key=lambda item: (-item["score"], item["path"]))
-        return results[:top_k]
+
+        # Strict missing-symbol abstention for technical symbols (error_code / code_symbol / file_path)
+        if wanted_key_set and not strict_version_query:
+            has_exact = any(row["exact_ident_hit"] > 0 for row in scored)
+            technical_symbols = [
+                item for item in wanted_idents
+                if item.ident_type in {"error_code", "code_symbol", "file_path"}
+            ]
+            if not has_exact and technical_symbols and not exact_ident_hits:
+                return []
+
+        scored.sort(key=lambda item: (-item["score"], item["path"]))
+        return scored[:top_k]
 
     def vector_index_count(self, *, user_id: str, agent_id: str) -> int:
-        row = self.conn.execute(
-            "SELECT count(*) FROM memory_node_vectors WHERE user_id=? AND agent_id=?",
-            (user_id, agent_id),
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT count(*) FROM memory_node_vectors WHERE user_id=? AND agent_id=?",
+                (user_id, agent_id),
+            ).fetchone()
         return int(row[0])
 
     def health_check(self) -> dict:
+        with self._lock:
+            ok = self.conn.execute("SELECT 1").fetchone()[0] == 1
+        vec = getattr(self.external_vector_index, "engine_name", "external-l2") if self.external_vector_index is not None else "sqlite-l2-numpy"
         return {
-            "ok": self.conn.execute("SELECT 1").fetchone()[0] == 1,
+            "ok": ok,
             "backend": "sqlite-vfs",
-            "vector": "qdrant-l2" if self.external_vector_index is not None else "sqlite-l2-numpy",
+            "vector": vec,
             "lexical": "sqlite-fts5-l2",
             "l2_only_embedding": True,
+            "exact_identifiers_l2": True,
         }
 
 
@@ -766,11 +1142,22 @@ class _PGConn:
                     self.connection.reset(token)
 
     def execute(self, sql: str, args=()):
-        statement = sql.replace("%", "%%").replace("?", "%s")
+        statement = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+        if sql.startswith("INSERT OR IGNORE"):
+            statement += " ON CONFLICT DO NOTHING"
+        statement = statement.replace("%", "%%").replace("?", "%s")
         with self.checkout() as connection, connection.cursor() as cursor:
             cursor.execute(statement, args)
             rows = cursor.fetchall() if cursor.description else []
             return _PGResult(rows, cursor.rowcount)
+
+    def executemany(self, sql: str, params):
+        statement = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+        if sql.startswith("INSERT OR IGNORE"):
+            statement += " ON CONFLICT DO NOTHING"
+        statement = statement.replace("%", "%%").replace("?", "%s")
+        with self.checkout() as connection, connection.cursor() as cursor:
+            cursor.executemany(statement, params)
 
 
 class PostgresVFSStore(SQLiteVFSStore):
@@ -790,6 +1177,7 @@ class PostgresVFSStore(SQLiteVFSStore):
             raise RuntimeError("PostgreSQL VFS store requires pip install 'memengine[postgres]'") from exc
         self.embedder = embedder if hasattr(embedder, "encode") and hasattr(embedder, "model_name") else HashedTfidfEmbedder()
         self.external_vector_index = external_vector_index
+        self._lock = nullcontext()
         self.pool = ConnectionPool(
             dsn, min_size=1, max_size=8, open=False,
             kwargs={"autocommit": True, "row_factory": _pg_row_factory},
@@ -821,7 +1209,7 @@ class PostgresVFSStore(SQLiteVFSStore):
 
     def _vector_engine(self) -> str:
         if self.external_vector_index is not None:
-            return "qdrant-l2"
+            return getattr(self.external_vector_index, "engine_name", "external-l2")
         if self.pgvector and self.vchord:
             return "vchordrq"
         if self.pgvector and self.vectorscale:
@@ -841,6 +1229,9 @@ class PostgresVFSStore(SQLiteVFSStore):
         for stmt in _PG_SCHEMA.split(";"):
             if stmt.strip():
                 self.conn.execute(stmt.strip())
+        for table in ("memory_nodes", "memory_node_snapshots"):
+            for col, ddl in _EXTRA_COLUMNS.items():
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}")
         lexical = self._lexical_engine()
         if lexical == "pg_search":
             self.conn.execute(
@@ -898,11 +1289,16 @@ class PostgresVFSStore(SQLiteVFSStore):
                 yield
 
     def close(self):
-        self.pool.close()
+        try:
+            if self.external_vector_index is not None and hasattr(self.external_vector_index, "close"):
+                self.external_vector_index.close()
+        finally:
+            self.pool.close()
 
     def _sync_l2_indexes(self, node: MemoryNode) -> None:
         self.conn.execute("DELETE FROM memory_node_vectors WHERE node_id=?", (node.node_id,))
         self.conn.execute("DELETE FROM memory_nodes_fts WHERE node_id=?", (node.node_id,))
+        self.conn.execute("DELETE FROM memory_node_identifiers WHERE node_id=?", (node.node_id,))
         if node.layer != "L2" or node.is_deleted:
             if self.external_vector_index is not None:
                 self.external_vector_index.delete(node.node_id)
@@ -922,6 +1318,7 @@ class PostgresVFSStore(SQLiteVFSStore):
             "INSERT INTO memory_nodes_fts(rowid, node_id, user_id, agent_id, fts_tokens) VALUES(?,?,?,?,?)",
             (row["rowid"], node.node_id, node.user_id, node.agent_id, tokenize_for_fts(body)),
         )
+        self._index_l2_identifiers(node, body)
         if self.external_vector_index is not None:
             self.external_vector_index.upsert_l2(node.to_dict(), vec.tolist())
 
@@ -1039,13 +1436,35 @@ class PostgresVFSStore(SQLiteVFSStore):
             "lexical": self._lexical_engine(),
             "indexed_dimensions": list(self.indexed_dimensions),
             "l2_only_embedding": True,
+            "exact_identifiers_l2": True,
         }
 
 
 def open_vfs_store(db_url: str | Path | None = None, *, embedder=None, external_vector_index=None):
+    from urllib.parse import unquote
+
     target = str(db_url or os.getenv("MEMENGINE_VFS_DB_URL") or ":memory:")
     if target.startswith(("postgresql://", "postgres://")):
         return PostgresVFSStore(target, embedder=embedder, external_vector_index=external_vector_index)
+    if target.startswith(("lancedb://", "lance://", "sqlite+lance://")):
+        from memengine.vfs.index import LanceL2Index
+
+        for prefix in ("lancedb:///", "lance:///", "sqlite+lance:///", "lancedb://", "lance://", "sqlite+lance://"):
+            if target.startswith(prefix):
+                raw_path = unquote(target.removeprefix(prefix))
+                break
+        base = Path(raw_path).expanduser().resolve()
+        if base.suffix in {".db", ".sqlite", ".sqlite3"}:
+            sqlite_path = base
+            lance_dir = base.parent / (base.stem + ".lancedb")
+        else:
+            base.mkdir(parents=True, exist_ok=True)
+            sqlite_path = base / "vfs_meta.db"
+            lance_dir = base / "l2_vectors.lancedb"
+        l2_index = external_vector_index or LanceL2Index(lance_dir)
+        return SQLiteVFSStore(sqlite_path, embedder=embedder, external_vector_index=l2_index)
     if target.startswith("sqlite:///"):
-        target = target.removeprefix("sqlite:///")
-    return SQLiteVFSStore(target, embedder=embedder, external_vector_index=external_vector_index)
+        target = unquote(target.removeprefix("sqlite:///"))
+    elif "://" in target:
+        raise ValueError(f"unsupported VFS database URL scheme: {target!r}")
+    return SQLiteVFSStore(target or ":memory:", embedder=embedder, external_vector_index=external_vector_index)

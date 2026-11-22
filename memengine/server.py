@@ -14,6 +14,7 @@ from memengine.chrono import parse_session_clock
 from memengine.engine import CognitiveMemoryEngine
 from memengine.storage.base import RecallFilter
 from memengine.tools import _timestamp
+from memengine.vfs import OptimisticLockError, VFSMemoryEngine
 
 
 class Owner(BaseModel):
@@ -131,18 +132,107 @@ class Dispatch(Owner):
     tool_call_id: str | None = None
 
 
-def create_app(*, db_url=None, api_key=None, engine=None):
+class VFSTranscript(Owner):
+    text: str = Field(min_length=1)
+    role: str = "user"
+    timestamp: float | None = None
+    speaker: str | None = Field(default=None, min_length=1, max_length=128)
+    metadata: dict = Field(default_factory=dict)
+
+
+class VFSWrite(Owner):
+    path: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    summary: str = ""
+    layer: Literal["L1", "L2", "L3"] = "L2"
+    confidence_score: float = Field(default=0.7, ge=0, le=1)
+    verification_status: Literal["unverified", "verified"] = "unverified"
+    salience_tag: Literal["normal", "preference", "taboo", "core_rule", "warning"] = "normal"
+    always_active: bool = False
+    source_transcript_ids: list[str] = Field(default_factory=list, max_length=128)
+    expected_version: int | None = Field(default=None, ge=0)
+
+
+class VFSWriteRule(Owner):
+    path: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    trigger_condition: str = Field(min_length=1)
+    action: str = Field(min_length=1)
+    verification_result: str = ""
+    notes: str = ""
+    index_summary: str = ""
+    layer: Literal["L1", "L2", "L3"] = "L2"
+    confidence_score: float = Field(default=0.85, ge=0, le=1)
+    verification_status: Literal["unverified", "verified"] = "verified"
+    salience_tag: Literal["normal", "preference", "taboo", "core_rule", "warning"] = "core_rule"
+    always_active: bool = False
+    visible_in_context: bool = False
+    reusable_pattern: bool = True
+    future_pitfall_risk: bool = True
+    source_transcript_ids: list[str] = Field(default_factory=list, max_length=128)
+    expected_version: int | None = Field(default=None, ge=0)
+
+
+class VFSPath(Owner):
+    path: str = Field(default="/", min_length=1)
+    layer: Literal["L1", "L2", "L3"] | None = None
+
+
+class VFSSearch(Owner):
+    query: str = Field(min_length=1)
+    path_prefix: str | None = None
+    verified_only: bool = False
+    salience_tags: list[Literal["normal", "preference", "taboo", "core_rule", "warning"]] | None = None
+    reference_time: float | str | None = None
+    top_k: int = Field(default=8, ge=1, le=50)
+
+
+class VFSContext(Owner):
+    query: str = Field(min_length=1)
+    token_budget: int = Field(default=2048, ge=64, le=32768)
+    path_prefix: str | None = None
+    verified_only: bool = False
+    reference_time: float | str | None = None
+    disclosure: Literal["progressive", "full"] = "progressive"
+    include_tree_outline: bool = True
+    include_l1_working: bool = True
+    top_k: int = Field(default=8, ge=1, le=30)
+
+
+class VFSCompact(Owner):
+    dir_path: str = Field(min_length=1)
+
+
+class VFSRollback(Owner):
+    path: str | None = None
+    snapshot_id: str | None = None
+    dream_batch_id: str | None = None
+
+
+def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_engine=None):
     key = os.getenv("MEMENGINE_API_KEY") if api_key is None else api_key
     lock = RLock()
+
+    def _get_vfs(app) -> VFSMemoryEngine:
+        if app.state.vfs is None:
+            target = vfs_db_url or os.getenv("MEMENGINE_VFS_DB_URL") or db_url
+            app.state.vfs = VFSMemoryEngine(db_url=target)
+            app.state.vfs_owned = True
+        return app.state.vfs
 
     @asynccontextmanager
     async def lifespan(app):
         app.state.engine = engine or CognitiveMemoryEngine(db_url=db_url)
+        app.state.vfs = vfs_engine
+        app.state.vfs_owned = False
         try:
             yield
         finally:
             if engine is None:
                 app.state.engine.store.close()
+            if app.state.vfs is not None and app.state.vfs_owned:
+                app.state.vfs.close()
 
     def authenticate(authorization: str | None = Header(default=None)):
         if key and not compare_digest((authorization or "").encode(), f"Bearer {key}".encode()):
@@ -154,6 +244,19 @@ def create_app(*, db_url=None, api_key=None, engine=None):
     async def bad_input(request, error):
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": str(error)}, status_code=422)
+
+    @app.exception_handler(OptimisticLockError)
+    async def lock_conflict(request, error):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            {"detail": str(error), "path": error.path, "expected_version": error.expected_version, "actual_version": error.actual_version},
+            status_code=409,
+        )
+
+    @app.exception_handler(FileNotFoundError)
+    async def not_found(request, error):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": str(error)}, status_code=404)
 
     @app.get("/health")
     def health():
@@ -309,5 +412,83 @@ def create_app(*, db_url=None, api_key=None, engine=None):
         with lock:
             return app.state.engine.dispatch_tool(body.name, body.arguments, **body.owner(),
                                                   session_id=body.session_id, tool_call_id=body.tool_call_id)
+
+    # ---- v2 VFS Memory Engine endpoints ----
+
+    @app.get("/v2/vfs/health")
+    def vfs_health():
+        with lock:
+            return _get_vfs(app).store.health_check()
+
+    @app.post("/v2/vfs/transcripts")
+    def vfs_append_transcript(body: VFSTranscript):
+        with lock:
+            rec = _get_vfs(app).append_transcript(
+                body.text, role=body.role, timestamp=body.timestamp, speaker=body.speaker,
+                metadata=body.metadata, **body.session_owner(),
+            )
+            return {"transcript_id": rec.transcript_id, "session_id": rec.session_id, "timestamp": rec.timestamp}
+
+    @app.post("/v2/vfs/write")
+    def vfs_write(body: VFSWrite):
+        with lock:
+            return _get_vfs(app).write(**body.model_dump(exclude={"user_id", "agent_id", "session_id"}), **body.owner())
+
+    @app.post("/v2/vfs/write-rule")
+    def vfs_write_rule(body: VFSWriteRule):
+        with lock:
+            return _get_vfs(app).write_rule(**body.model_dump(exclude={"user_id", "agent_id", "session_id"}), **body.owner())
+
+    @app.post("/v2/vfs/read-note")
+    def vfs_read_note(body: VFSPath):
+        with lock:
+            node = _get_vfs(app).read_note(body.path, **body.owner())
+            if node is None:
+                raise FileNotFoundError(f"VFS node not found: {body.path}")
+            return node
+
+    @app.post("/v2/vfs/tree")
+    def vfs_tree(body: VFSPath):
+        with lock:
+            return {"path": body.path, "outline": _get_vfs(app).tree_outline(path=body.path, layer=body.layer or "L2", **body.owner())}
+
+    @app.post("/v2/vfs/search")
+    def vfs_search(body: VFSSearch):
+        with lock:
+            tags = tuple(body.salience_tags) if body.salience_tags else None
+            return _get_vfs(app).search(
+                body.query, path_prefix=body.path_prefix, verified_only=body.verified_only,
+                salience_tags=tags, reference_time=body.reference_time, top_k=body.top_k, **body.owner(),
+            )
+
+    @app.post("/v2/vfs/context")
+    def vfs_context(body: VFSContext):
+        with lock:
+            return _get_vfs(app).build_context(**body.model_dump(exclude={"user_id", "agent_id", "session_id"}), **body.owner())
+
+    @app.post("/v2/vfs/compact")
+    def vfs_compact(body: VFSCompact):
+        with lock:
+            return _get_vfs(app).compact_directory(body.dir_path, **body.owner())
+
+    @app.post("/v2/vfs/rollback")
+    def vfs_rollback(body: VFSRollback):
+        with lock:
+            vfs = _get_vfs(app)
+            if body.dream_batch_id:
+                return {"restored": vfs.rollback_batch(body.dream_batch_id, **body.owner())}
+            if body.path:
+                return vfs.rollback(body.path, snapshot_id=body.snapshot_id, **body.owner())
+            raise ValueError("rollback requires either dream_batch_id or path")
+
+    @app.get("/v2/vfs/tools/schema")
+    def vfs_tools_schema():
+        with lock:
+            return _get_vfs(app).as_tools()
+
+    @app.post("/v2/vfs/tools/dispatch")
+    def vfs_tools_dispatch(body: Dispatch):
+        with lock:
+            return _get_vfs(app).as_tools(**body.owner()).dispatch_tool(body.name, body.arguments)
 
     return app

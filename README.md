@@ -196,6 +196,36 @@ MEMENGINE_DB_URL=./memory.db MEMENGINE_API_KEY=your-key memengine serve
 | GET / DELETE | `/v1/history/{target}` / `/v1/memories/{id}` | 查看版本链或遗忘 |
 | GET / POST | `/v1/tools/schema` / `/v1/tools/dispatch` | 导出工具协议或执行工具 |
 | GET | `/health` | 当前数据库、索引能力与降级状态 |
+| GET / POST | `/v2/vfs/health`、`/transcripts`、`/write`、`/write-rule` | v2 VFS 健康检查、L0 分块日志写入、Markdown 节点与显著性门控规则写入（乐观锁冲突返回 HTTP 409） |
+| POST | `/v2/vfs/tree`、`/read-note`、`/search`、`/context`、`/compact`、`/rollback` | Stage 2 目录导航、`read_note` 渐进式披露拉取、Stage 3 三阶段混合检索、目录合并重构与原子批次回滚 |
+| GET / POST | `/v2/vfs/tools/schema` / `/v2/vfs/tools/dispatch` | 导出 12 个 Claude 风格 VFS 工具（OpenAI / MCP）或执行工具调用 |
+
+## v2 虚拟文件系统记忆引擎（`VFSMemoryEngine`）
+
+面向强模型的下一代分层混合记忆架构，融合**关系型元数据与状态机（SQLite / PostgreSQL `memory_nodes`）+ 虚拟文件系统（L1/L2/L3 Markdown 树）+ 仅 L2 向量/BM25/精确标识符索引（pgvector / VectorChord / Qdrant / LanceDB `IVF_RQ`）+ 解耦 L0 分块日志（本地 JSONL.GZ / S3）**：
+
+- **三阶段混合检索**：Stage 1 强制预加载（L1 `/global.md` + L2 `always_active`）→ Stage 2 结构化目录导航（`tree_outline()` `ls -R` + `read_note(path)`）→ Stage 3 混合语义 + 元数据过滤 + 公式重排（`Final Score = Semantic_Sim * W_verified * W_recency`，嫁接 L2 精确标识符与版本分级零串台门禁）。
+- **高密度输出与渐进式披露**：写入端三问显著性门控与 `[触发条件] + [动作] + [验证结果]` 假设/规则状态机；读取端以 `<=50` 字 `index_summary` 替代粗暴硬截断，单目录超过 `10` 条或 `3,000` Tokens 时可调用 `compact_directory()` 原子重构为单份 `GUIDE.md` 并支持 `rollback_batch()` 整批回滚。
+- **快速使用**：
+
+```python
+from memengine import VFSMemoryEngine
+
+# 支持 SQLite（默认）、lancedb:///path（嵌入式 RaBitQ ANN）、postgresql://...
+vfs = VFSMemoryEngine("lancedb:///tmp/agent_vfs")
+vfs.write("/global.md", title="Global", content="变更数据库前必须执行演练。", layer="L1", verification_status="verified")
+vfs.write_rule(
+    "/strategies/db/rabitq.md",
+    title="L2 仅索引精炼笔记",
+    trigger_condition="构建高规模 Agent 记忆检索",
+    action="仅向量化 L2 Markdown 规则，L0 原始对话按块落冷存",
+    verification_result="10K 压测 CPU 下降 70%",
+    always_active=True,
+)
+ctx = vfs.build_context("如何防止大库向量检索发烫？", disclosure="progressive")
+```
+
+CLI 同样内置 `memengine vfs {health,tree,read-note,write-rule,search,context,compact}`。完整存储优化、账本/SQLite 消融与三阶段检索实测报告见 [存储优化与 VFS 消融实测报告](eval/results/ablation_storage_and_vfs_report.md)。
 
 `MemoryClient(url, api_key=...)` 提供同名六个操作，使用 Python 标准库。有效期为左闭右开。日历发生区间独立记录，按 UTC 解析并用于区间召回。显式按认知域筛选时仅注入对应证据。传 `token_budget` 且省略 `top_k` 可按预算装填至多 60 条候选。开启 `reconstructive` 后，两跳关系图与桥接召回共享最终预算。架构和验证见 [设计文档](docs/DESIGN.md#真实日历版本与记忆闭环)。
 

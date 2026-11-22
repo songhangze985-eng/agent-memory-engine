@@ -43,3 +43,28 @@ class MemoryClient:
 
     def health(self):
         return self._request("/health")
+
+    def vfs_health(self):
+        return self._request("/v2/vfs/health")
+
+    def vfs_write_rule(self, path, *, title, trigger_condition, action, **kwargs):
+        return self._request(
+            "/v2/vfs/write-rule",
+            "POST",
+            payload={"path": path, "title": title, "trigger_condition": trigger_condition, "action": action, **kwargs},
+        )
+
+    def vfs_read_note(self, path, **kwargs):
+        return self._request("/v2/vfs/read-note", "POST", payload={"path": path, **kwargs})
+
+    def vfs_tree(self, path="/", **kwargs):
+        return self._request("/v2/vfs/tree", "POST", payload={"path": path, **kwargs})
+
+    def vfs_search(self, query, **kwargs):
+        return self._request("/v2/vfs/search", "POST", payload={"query": query, **kwargs})
+
+    def vfs_context(self, query, **kwargs):
+        return self._request("/v2/vfs/context", "POST", payload={"query": query, **kwargs})
+
+    def vfs_compact(self, dir_path, **kwargs):
+        return self._request("/v2/vfs/compact", "POST", payload={"dir_path": dir_path, **kwargs})

@@ -9,3 +9,7 @@ __pycache__/
 eval/membench/.cache/
 eval/locomo/.cache/
 eval/longmemeval/.cache/
+.env*
+*.pem
+*.key
+.DS_Store
