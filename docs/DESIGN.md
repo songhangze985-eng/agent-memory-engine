@@ -238,6 +238,8 @@ flowchart LR
 
 本地 ONNX 精排在预算模式下融合神经与确定性分数，保留由其他检索路支持的候选。原文交叉打分使用有界相关片段。SQLite 的图查询由有界前沿驱动，避免先扫描大范围的事实表。`eval.engineering_bench --graph` 在 10,000 条记录运行 60 道重构和日历查询，门禁校验 100 ms P95 与最多 15 条 SQL。
 
+宽检索的候选深度、CE 对数和上下文 Token 预算独立。可用 `load_local_backends(onnx_wide_pairs=20)` 构造有预算的本地组合，将返回的 `vector` 和 `reranker` 传入 `CognitiveMemoryEngine`。用 `answer(query, token_budget=2048)` 走宽检索。ONNX 每对至多 250 个模型 Token，每批至多 10 对。一次召回中的重构轮次共享对数预算，已评分且正文一致的候选复用分数。调用结果的 `gate_stats` 提供 `ce_pair_limit` 和 `ce_pairs_scored`。
+
 [检索失分报告](../eval/results/failure_autopsy.md) 记录冻结评测和显式预算检索的口径、先验诊断以及相应源码位置。
 
 ### 短期会话、任务工作区与长期记忆
