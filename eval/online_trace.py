@@ -28,14 +28,18 @@ from memengine.retrieval.rerank_budget import PAIR_TOKENS
 
 BENCHMARK = "LongMemEval-S"
 STAGES = ("fused", "ce", "reranked", "gate_input", "gate_kept", "packing_input", "packed", "context")
+ALL_QUOTAS = frozenset(("dense", "lexical", "anchors"))
 FUSION_ABLATIONS = {
     "baseline": {},
-    "quotas_only": {"channel_quotas": True},
+    "quotas_only": {"channel_quotas": ALL_QUOTAS},
     "weights_only": {"semantic_weighting": True},
     "graph_off_only": {"query_entity_inverted": False, "passive_expansion": False},
     "passive_expansion_off_only": {"passive_expansion": False},
     "entity_inverted_off_only": {"query_entity_inverted": False},
-    "combined": {"channel_quotas": True, "semantic_weighting": True,
+    "routed_dense_quotas": {"channel_quotas": frozenset(("dense",)), "route_channel_quotas": True},
+    "routed_anchor_quotas": {"channel_quotas": frozenset(("anchors",)), "route_channel_quotas": True},
+    "routed_dense_anchor_quotas": {"channel_quotas": frozenset(("dense", "anchors")), "route_channel_quotas": True},
+    "combined": {"channel_quotas": ALL_QUOTAS, "semantic_weighting": True,
                  "query_entity_inverted": False, "passive_expansion": False},
 }
 FUSION_VARIANTS = {

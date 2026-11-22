@@ -1,4 +1,6 @@
 from contextlib import closing
+from dataclasses import replace
+from unittest.mock import Mock
 
 from memengine.chrono import parse_session_clock, resolve_temporal_spans
 from memengine.engine import CognitiveMemoryEngine
@@ -61,8 +63,6 @@ def test_compatible_and_wildcard_ranges_recall_only_satisfying_versions():
 
 
 def test_reconstructive_ablation_separates_inverted_lookup_and_graph_expansion(monkeypatch):
-    from dataclasses import replace
-
     engine = CognitiveMemoryEngine()
     with closing(engine.store) as store:
         retain(engine, "Alice works on the Atlas launch.", speaker="Alice")
@@ -99,6 +99,45 @@ def test_reconstructive_ablation_separates_inverted_lookup_and_graph_expansion(m
             subjects = set(result["matched_entities"])
             executed = {kind for kind, entities in tracked if kind == "graph" or entities == subjects}
             assert executed == expected
+
+
+def test_routed_ablation_caps_only_selected_channels_for_unconstrained_recall(monkeypatch):
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        retain(engine, "Alice works on the Atlas launch.", speaker="Alice")
+        vector = Mock(wraps=engine.search_vector)
+        lexical = Mock(wraps=store.search_lexical)
+        anchors = Mock(wraps=store.search_turn_anchors)
+        recall = engine._recall
+        monkeypatch.setattr(engine, "search_vector", vector)
+        monkeypatch.setattr(store, "search_lexical", lexical)
+        monkeypatch.setattr(store, "search_turn_anchors", anchors)
+        channels = (vector, lexical, anchors)
+        query = "What happened with the Atlas launch?"
+        reconstructive = {"mode": "reconstructive"}
+        both = ("dense", "anchors")
+        uncapped = (55, 55, 55)
+        for selected, question, options, expected in (
+            ((), query, reconstructive, uncapped),
+            (("dense",), query, reconstructive, (42, 55, 55)),
+            (("anchors",), query, reconstructive, (55, 55, 12)),
+            (both, query, reconstructive, (42, 55, 12)),
+            (both, query, {}, uncapped),
+            (both, "What happened with the Atlas launch before last year?", reconstructive, uncapped),
+            (both, "What happened with the Atlas launch tomorrow?", reconstructive, uncapped),
+            (both, "How many weeks did the Atlas launch take?", reconstructive, uncapped),
+            (both, "What happened with Atlas incident CVE-2024-12345?", reconstructive, uncapped),
+            (both, query, {**reconstructive, "filters": RecallFilter(time_start=0)}, uncapped),
+        ):
+            def ablated(*args, plan, **options):
+                return recall(*args, plan=replace(plan, channel_quotas=frozenset(selected), route_channel_quotas=True),
+                              **options)
+
+            monkeypatch.setattr(engine, "_recall", ablated if selected else recall)
+            for channel in channels:
+                channel.reset_mock()
+            engine.recall(question, token_budget=256, reference_time="2024-06-16", **options)
+            assert tuple(channel.call_args_list[0].kwargs["top_n"] for channel in channels) == expected
 
 
 def test_four_graph_edges_and_two_hop_owner_isolation():
