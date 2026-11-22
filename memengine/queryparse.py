@@ -9,6 +9,7 @@ from memengine.categories import (
     extract_explicit_entities,
     map_categories,
 )
+from memengine.retrieval.coverage import explicit_facets
 
 _REFLECTIVE = re.compile(
     r"\b(prefer|preference|kind of|type of|what kind|probably|might|overall|in common|personality|habit|style)\b"
@@ -47,6 +48,7 @@ def parse_query_rules(stem: str, *, categories=()) -> dict:
     return {
         "query_type": query_type,
         "preference_query": bool(_PREFERENCE_QUERY.search(text)),
+        "facets": explicit_facets(text),
         "entities": extract_explicit_entities(text),
         "categories": keys,
         "semantic_vector_query": expand_semantic_query(text, keys),

@@ -36,7 +36,8 @@ from memengine.reranker import (
 from memengine.router import CASUAL, TASK, match_entities, route_query
 from memengine.storage.base import DEFAULT_SCOPE, RecallFilter, SCOPES
 from memengine.storage.factory import open_store
-from memengine.retrieval.activation import RecallPlan, calendar_relevance, diversify_episodes, query_overlap
+from memengine.retrieval.activation import RecallPlan, calendar_relevance, query_overlap
+from memengine.retrieval.coverage import cover_evidence
 from memengine.retrieval.operators import recall
 from memengine.retrieval.rerank_budget import RerankBudget
 from memengine.versioning import extract_versions
@@ -793,6 +794,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
             elif self.allow_empty_recall:
                 ranked = []
         exact_query = any(fact["exact_ident_hit"] for fact in ranked)
+        allow_coverage = not (historical_query or exact_query or strict_version or plan and (plan.versions or plan.windows))
+        facets = parsed["facets"] if allow_coverage else ()
         recurrent_belt = sum(fact["zone"] == BELT and consolidation_count(fact) > 1 and not is_noise(fact)
                              for fact in ranked) >= 3 and c_max >= 4
         evidence_floor = not plan and not backend.is_calibrated and not exact_query and not strict_version and not recurrent_belt and not contextual and not _bridges and not any(f.get("temporary_priority") for f in ranked)
@@ -812,8 +815,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
             gate_stats["empty_reason"] = "no_exact_version"
         elif identifier_mode == "symbol" and not ranked:
             gate_stats["empty_reason"] = "no_exact_identifier"
-        if evidence_floor and kept and not wide_evidence:
-            floor_ids = {fact["id"] for fact in floor}
+        floor_ids = {fact["id"] for fact in floor} if evidence_floor and kept and not wide_evidence else None
+        if floor_ids is not None and not facets:
             kept = [fact for fact in kept if fact["id"] in floor_ids or fact.get("attention_weight", 1.0) > 1.0]
         if historical_query and not (plan and plan.windows):
             def temporal_order(fact):
@@ -834,8 +837,6 @@ class CognitiveMemoryEngine(TaskWorkspace):
             kept = select_bridged(query, _primary, kept, _bridges)
         if plan and plan.wide:
             useful = [fact for fact in kept if fact["final_score"] >= .045 or fact.get("exact_ident_hit")]
-            if plan.graph and not plan.versions and not plan.windows:
-                useful = diversify_episodes(query, useful)
             kept = [_compact_evidence(query, fact) for fact in useful]
         if parsed["preference_query"] and not (historical_query or exact_query or strict_version):
             preferred, distinct = [], set()
@@ -857,6 +858,12 @@ class CognitiveMemoryEngine(TaskWorkspace):
             if preferred:
                 preferred_ids = {fact["id"] for fact in preferred}
                 kept = [*preferred, *(fact for fact in kept if fact["id"] not in preferred_ids)]
+        if allow_coverage:
+            kept = cover_evidence(kept, facets, query, aggregate=bool(plan and plan.graph and plan.wide),
+                                  require_entity=bool(direct), tau=tau_abs, top_k=top_k, token_budget=token_budget)
+        if floor_ids is not None and facets:
+            kept = [fact for fact in kept if "coverage_priority" in fact or fact["id"] in floor_ids
+                    or fact.get("attention_weight", 1.0) > 1.0]
         selected = _fit_context(kept, top_k, token_budget)
         if _ce_budget is not None:
             gate_stats.update(ce_pair_limit=_ce_budget.limit, ce_pairs_scored=_ce_budget.limit - _ce_budget.remaining)
@@ -1061,7 +1068,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
             current = {row["id"]: row for row in self.store.facts_by_ids(
                 [row["id"] for row in ranking], scope=(user_id, agent_id, session_id))}
             metadata = ("entity_anchor", "zone", "final_score", "vector_score", "ce_score", "temporal_match",
-                        "exact_ident_hit", "temporal_role", "context_anchor_turn_id", "preference_priority")
+                        "exact_ident_hit", "temporal_role", "context_anchor_turn_id", "preference_priority", "coverage_priority")
             result = {**retrieved, "ranked": [{**current[row["id"]], **{k: row[k] for k in metadata if k in row}}
                                               for row in ranking if row["id"] in current]}
             if timestamp is None and reference_time is None and result["validity_as_of"] is not None:
@@ -1120,13 +1127,16 @@ class CognitiveMemoryEngine(TaskWorkspace):
                 and temporal.get("start_ts") is None and temporal.get("end_ts") is None))
         # Preserve the notebook selection rules for fact synthesis. Fresh session and task evidence
         # can answer directly when long-term recall lacks a relevant fact.
-        fallback_rows = facts if facts and (revision_ask or any(evidence_matches_query(query, row) for row in facts)) else additional[:1]
+        facet_support = any(key in eligible for facet in bundle["lexical_facet_coverage"]["facets"]
+                            for key in facet["evidence_ids"])
+        fallback_rows = facts if facts and (revision_ask or facet_support
+                                            or any(evidence_matches_query(query, row) for row in facts)) else additional[:1]
         if fallback_rows and fallback_rows[0]["kind"] != "fact":
             fallback_rows = [{**row, "id": row["evidence_id"]} for row in fallback_rows]
         # The dated presentation is visible in the bundle. The deterministic planner
         # quotes only the complete ledger statement when it is present in the excerpt.
         for index, row in enumerate(fallback_rows):
-            if row["kind"] == "fact" and (bundle["parsed_query"].get("preference_query")
+            if row["kind"] == "fact" and (bundle["parsed_query"].get("preference_query") or facet_support
                                           or (row.get("attribute_slot") or "").startswith("allergy:")):
                 quote = strip_speaker_prefix(strip_step_tags(row["plain"]).strip(), row.get("speaker"))
                 if row["text"].endswith(quote):
