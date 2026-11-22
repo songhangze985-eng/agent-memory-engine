@@ -50,7 +50,7 @@ def refresh_profile(store, scope, now):
     rules = sorted((fact for fact in facts if fact["memory_type"] == "procedural"),
                    key=lambda fact: (-fact["success_count"], fact["plain"]))
     constraints = sorted({fact["plain"] for fact in facts if fact["memory_type"] == "fact" and fact["is_constraint"] and fact["expires_at"] is None
-                          and fact["epistemic_scope"] == "world"})
+                          and fact["epistemic_scope"] == "world" and not (fact["attribute_slot"] or "").startswith("allergy:")})
     # Stable order and text, with counts used only for choosing the rule set.
     profile, selected_rules = [], []
     stable = [fact["content"] for fact in observations if fact["confidence"] >= 0.8 and not fact.get("canonical_entity_id") and not fact.get("is_stale")
@@ -113,7 +113,8 @@ def consolidate(store, *, user_id, agent_id, now, min_new_facts, force):
         active_roots = {fact["root_fact_id"] for fact in history if fact["status"] == "active"}
         for fact in history:
             if (fact.get("canonical_entity_id") and fact["epistemic_scope"] in ("world", "experience")
-                    and fact["expires_at"] is None and fact["root_fact_id"] in active_roots):
+                    and fact["expires_at"] is None and fact["root_fact_id"] in active_roots
+                    and (fact["status"] == "active" or not (fact["attribute_slot"] or "").startswith("allergy:"))):
                 entity_groups[fact["canonical_entity_id"]].append(fact)
         existing = {row["canonical_entity_id"]: row for row in store.list_observations(user_id=user_id, agent_id=agent_id, include_stale=True)
                     if row.get("canonical_entity_id")}

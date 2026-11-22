@@ -9,6 +9,7 @@ from math import exp
 import numpy as np
 
 from memengine.chrono import DAY, date_iso, occurrence, resolve_temporal_spans
+from memengine.lifecycle import allergy_slot
 from memengine.linguistics import entity_name, index_text, stem_terms
 from memengine.storage.base import IDS, scope_where
 from memengine.textutil import merge_step_ids, normalize_entity, strip_step_tags
@@ -153,6 +154,10 @@ class Chronicle:
             if preference := _PREFERENCE.match(strip_step_tags(data["plain"])):
                 slot = " ".join(preference[1].casefold().split())
                 data["attribute_slot"] = f"preference:{slot}"
+            if data["role"] == "user" and data.get("memory_type", "fact") == "fact":
+                slot = allergy_slot(data["plain"], speaker)
+                if slot:
+                    data["attribute_slot"] = slot
         if "derived_from_ids" in details:
             self.validate_fact_ids(details["derived_from_ids"], (data["user_id"], data["agent_id"], None))
             data["derived_from_ids"] = dump(details["derived_from_ids"])
@@ -161,17 +166,45 @@ class Chronicle:
         return list(dict.fromkeys(keys))
 
     def revise_slot(self, data):
-        row = self.conn.execute("""SELECT id,root_fact_id,revision,ingest_time,source_turn_ids,source_step_ids FROM facts
+        allergy = data["attribute_slot"].startswith("allergy:")
+        row = self.conn.execute("""SELECT id,root_fact_id,revision,ingest_time,source_turn_ids,source_step_ids,plain FROM facts
             WHERE user_id=? AND agent_id=? AND canonical_entity_id=? AND attribute_slot=? AND status='active'
             ORDER BY mention_time DESC,id DESC LIMIT 1""",
             tuple(data[key] for key in ("user_id", "agent_id", "canonical_entity_id", "attribute_slot"))).fetchone()
-        if row is None or row["ingest_time"] > data["ingest_time"]:
+        if row is None:
+            return
+        if row["ingest_time"] > data["ingest_time"]:
+            if allergy:
+                data.update(status="superseded", valid_until=row["ingest_time"])
             return
         self.conn.execute("UPDATE facts SET status='superseded',valid_until=? WHERE id=?", (data["ingest_time"], row["id"]))
-        self.invalidate_observations((data["user_id"], data["agent_id"]), [row["id"]], data["ingest_time"])
+        self.invalidate_observations((data["user_id"], data["agent_id"]), [row["id"]], data["ingest_time"],
+                                     compiled_line=row["plain"] if allergy else "")
         data.update(supersedes_id=row["id"], revision=row["revision"]+1, root_fact_id=row["root_fact_id"])
-        for field in ("source_turn_ids", "source_step_ids"):
-            data[field] = dump(merge_step_ids(json.loads(row[field]), json.loads(data[field])))
+        if not allergy:
+            for field in ("source_turn_ids", "source_step_ids"):
+                data[field] = dump(merge_step_ids(json.loads(row[field]), json.loads(data[field])))
+
+    def migrate_allergy_slots(self):
+        if self.get_meta("allergy_slots_version") == "1":
+            return
+        rows = self.conn.execute("""SELECT id,plain,speaker,user_id,agent_id,canonical_entity_id,ingest_time,
+                status,valid_until,root_fact_id,revision,supersedes_id FROM facts
+            WHERE status='active' AND memory_type='fact' AND epistemic_scope='world' AND role='user'
+              AND speaker IS NOT NULL AND canonical_entity_id IS NOT NULL AND expires_at IS NULL
+              AND attribute_slot IS NULL AND revision=0 AND (lower(plain) LIKE ? OR plain LIKE ?)
+            ORDER BY ingest_time,length(id),id""", ("%allerg%", "%过敏%")).fetchall()
+        for row in rows:
+            slot = allergy_slot(row["plain"], row["speaker"])
+            if slot is None:
+                continue
+            data = {**dict(row), "attribute_slot": slot}
+            self.revise_slot(data)
+            self.conn.execute("""UPDATE facts SET attribute_slot=?,status=?,valid_until=?,root_fact_id=?,
+                revision=?,supersedes_id=? WHERE id=?""",
+                tuple(data[key] for key in ("attribute_slot", "status", "valid_until", "root_fact_id",
+                                            "revision", "supersedes_id", "id")))
+        self.set_meta("allergy_slots_version", "1")
 
     def index_versions(self, fact_id, text):
         rows = []

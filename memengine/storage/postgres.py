@@ -204,6 +204,7 @@ class PostgresStore(SQLiteStore):
                 self.conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_trgm ON {table} USING gin(fts_tokens gin_trgm_ops)")
         self.migrate_chronicle(postgres=True)
         self.migrate_workspace(postgres=True)
+        self.migrate_allergy_slots()
         self.indexed_dimensions = {dim for dim in (self.fallback_embedder.dim, getattr(self.embedder, "dim", None))
                                    if type(dim) is int and 0 < dim <= 2000}
         if self.pgvector:

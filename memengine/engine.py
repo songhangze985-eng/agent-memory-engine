@@ -21,7 +21,7 @@ from memengine.embeddings import OpenAICompatibleEmbedder
 from memengine.extract import extract_facts, is_greeting
 from memengine.gate import precision_gate
 from memengine.identifiers import compares_versions, eligible_identifiers, extract_identifiers
-from memengine.lifecycle import changes_state, content_hash, decay_factor, matching_attributes
+from memengine.lifecycle import allergy_slot, changes_state, content_hash, decay_factor, matching_attributes
 from memengine.llm import FatalLLMError, MockLLMClient, loads_json_object
 from memengine.notebook import ACTIONS, apply_write_op, format_fact_line, line_body, render_block
 from memengine.policy import REFUSAL, decide_layout, decide_origin, plan_answer
@@ -342,6 +342,13 @@ class CognitiveMemoryEngine(TaskWorkspace):
         step_ids = step_ids_in(text)
         greeting = is_greeting(text)
         offline = isinstance(self.llm, MockLLMClient) or job.get("offline", False)
+        slot = _allergy_slot_for_turn(job)
+        if slot:
+            # A state declaration goes through the ledger's slot revision, including cross-session claims.
+            offline = True
+            extracted = facts or extract_facts(text)
+            note = extracted[0] if extracted else {"topic": "健康禁忌", "zkeys": [], "isolated": False, "is_greeting": False}
+            facts = [{**note, "text": text.strip(), "attribute": "", "value": slot.removeprefix("allergy:"), "delete": False}]
         candidates = [] if greeting else self._candidate_blocks(text, scope, facts)
         if greeting:
             ops = []
@@ -477,6 +484,9 @@ class CognitiveMemoryEngine(TaskWorkspace):
         if not isinstance(self.llm, MockLLMClient):
             unresolved = {}
             for turn_id, job in jobs.items():
+                if _allergy_slot_for_turn(job):
+                    operations.extend(self._apply_job(job)["operations"])
+                    continue
                 with self.store.reuse_write_vectors():
                     duplicate = self._deduplicate(job) if not job.get("validity", (None, None))[1] and not job.get("chronicle") else None
                 if duplicate is None:
@@ -1085,6 +1095,13 @@ class CognitiveMemoryEngine(TaskWorkspace):
         fallback_rows = facts if facts and (revision_ask or any(evidence_matches_query(query, row) for row in facts)) else additional[:1]
         if fallback_rows and fallback_rows[0]["kind"] != "fact":
             fallback_rows = [{**row, "id": row["evidence_id"]} for row in fallback_rows]
+        # The dated presentation is visible in the bundle. The deterministic planner
+        # quotes only the complete ledger statement when it is present in the excerpt.
+        for index, row in enumerate(fallback_rows):
+            if (row.get("attribute_slot") or "").startswith("allergy:"):
+                quote = strip_step_tags(row["plain"]).strip()
+                if row["text"].endswith(quote):
+                    fallback_rows[index] = {**row, "text": quote}
         entities = bundle["matched_entities"]
         memories = [{key: row[key] for key in ("id", "evidence_id", "text", "attribute", "entity_z_keys", "topic",
                                                "historical", "revision", "root_fact_id", "entity_anchor",
@@ -1164,6 +1181,12 @@ class CognitiveMemoryEngine(TaskWorkspace):
         self.fallback_count += 1
         return fallback(), True
 
+
+
+def _allergy_slot_for_turn(turn):
+    if turn.get("chronicle") and turn["role"] == "user" and turn.get("validity", (None, None))[1] is None:
+        return allergy_slot(turn["text"], turn["chronicle"].get("speaker"))
+    return None
 
 
 def _epistemic_scope(source, plain):
