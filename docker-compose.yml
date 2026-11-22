@@ -1,6 +1,9 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # Default: VectorChord Suite (PostgreSQL 16 + pgvector + vchord RaBitQ + vchord_bm25 + pg_tokenizer).
+    # Override with MEMENGINE_PG_IMAGE=paradedb/paradedb:latest (ParadeDB pg_search + pgvector)
+    # or MEMENGINE_PG_IMAGE=pgvector/pgvector:pg16 (classic pgvector HNSW).
+    image: ${MEMENGINE_PG_IMAGE:-tensorchord/vchord-suite:pg16-latest}
     environment:
       POSTGRES_DB: memengine
       POSTGRES_USER: memengine

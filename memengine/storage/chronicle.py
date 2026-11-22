@@ -222,7 +222,7 @@ class Chronicle:
         where, args = filters.sql(where, args)
         keys = {version_key(v.numeric_tuple[:min(2, v.precision_depth)]) for v in wanted}
         keys.update("version-range:" + v.product_family for v in wanted)
-        rows = self.conn.execute(f"""SELECT f.id FROM exact_identifiers e JOIN facts f ON f.id=e.memory_id
+        rows = self.conn.execute(f"""SELECT f.id FROM exact_identifiers e CROSS JOIN facts f ON f.id=e.memory_id
             WHERE {where} AND {self._searchable(True, include_cold, filters)} AND e.ident_type='version_precision'
               AND e.ident_norm IN ({IDS}) GROUP BY f.id ORDER BY f.ingest_time DESC,f.id LIMIT ?""",
             (*args, dump(sorted(keys)), top_n))

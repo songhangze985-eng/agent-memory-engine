@@ -1,6 +1,7 @@
-"""PostgreSQL ledger with pooled transactions and database-side index queries."""
+"""PostgreSQL ledger with pooled transactions and database-side quantized ANN + BM25 queries."""
 from __future__ import annotations
 
+import os
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -9,8 +10,8 @@ from http.client import HTTPException
 import numpy as np
 
 from memengine.identifiers import extract_identifiers
-from memengine.storage.base import DEFAULT_SCOPE, scope_where
-from memengine.storage.sqlite import SQLiteStore, _FTS_STOP, _SCHEMA
+from memengine.storage.base import DEFAULT_SCOPE, IDS as _IDS, scope_where
+from memengine.storage.sqlite import SQLiteStore, _FTS_STOP, _SCHEMA, _dump
 from memengine.textutil import tokenize_for_fts
 from memengine.vector import HashedTfidfEmbedder, normalize_vectors
 
@@ -61,6 +62,8 @@ _FIELDS = {
     "valid_from": "DOUBLE PRECISION",
     "expires_at": "DOUBLE PRECISION",
 }
+_FTS_TABLES = ("facts_fts", "facts_cold_fts", "facts_anchor_fts")
+_SAFE_LISTS = re.compile(r"^\s*(?:\d+\s*(?:,\s*\d+\s*)*)?$")
 
 
 class _Row(dict):
@@ -148,11 +151,21 @@ class _LedgerConnection:
 
 
 class PostgresStore(SQLiteStore):
-    """Use the common ledger operations with PostgreSQL-specific persistence."""
+    """Use the common ledger operations with PostgreSQL-specific persistence.
+
+    Automatically upgrades to modern disk-friendly vector & BM25 extensions when available:
+    - Vector tier: ``vchordrq`` (VectorChord RaBitQ) > ``diskann`` (pgvectorscale) > ``hnsw`` (pgvector) > ``sql-array``
+    - Lexical tier: ``pg_search`` (ParadeDB Tantivy BM25) > ``vchord_bm25`` (Block-Max WAND BM25) > ``tsvector`` GIN
+    """
 
     supports_local_vector = False
     _json_aggregate = "json_agg"
     _json_pair = "json_build_array"
+    vchord = False
+    vectorscale = False
+    pg_search = False
+    pg_tokenizer = False
+    vchord_bm25 = False
 
     def __init__(self, dsn, *, embedder=None):
         try:
@@ -171,6 +184,11 @@ class PostgresStore(SQLiteStore):
             self.pool.wait(timeout=8)
             with self.transaction():
                 self.pgvector = self._enable_extension("vector", Error)
+                self.vchord = self._enable_extension("vchord", Error) if self.pgvector else False
+                self.vectorscale = self._enable_extension("vectorscale", Error) if self.pgvector else False
+                self.pg_search = self._enable_extension("pg_search", Error)
+                self.pg_tokenizer = self._enable_extension("pg_tokenizer", Error)
+                self.vchord_bm25 = self._enable_extension("vchord_bm25", Error) if self.pg_tokenizer else False
                 self.trigram = self._enable_extension("pg_trgm", Error)
                 self._bootstrap()
         except BaseException:
@@ -180,11 +198,33 @@ class PostgresStore(SQLiteStore):
     def _enable_extension(self, extension, error):
         try:
             with self.transaction():
-                self.conn.execute(f"CREATE EXTENSION IF NOT EXISTS {extension}")
+                self.conn.execute(f"CREATE EXTENSION IF NOT EXISTS {extension} CASCADE")
         except error as exc:
-            if exc.sqlstate not in {"0A000", "42501", "58P01", "22023"}:
+            if exc.sqlstate not in {"0A000", "42501", "58P01", "22023", "42704"}:
                 raise
         return self.conn.execute("SELECT 1 FROM pg_extension WHERE extname=?", (extension,)).fetchone() is not None
+
+    def _vector_engine(self) -> str:
+        if self.pgvector and self.vchord:
+            return "vchordrq"
+        if self.pgvector and self.vectorscale:
+            return "diskann"
+        if self.pgvector:
+            return "pgvector"
+        return "sql-array"
+
+    def _lexical_engine(self) -> str:
+        if self.pg_search:
+            return "pg_search"
+        if self.vchord_bm25:
+            return "vchord_bm25"
+        return "tsvector"
+
+    def _vchord_options(self) -> str:
+        raw_lists = os.getenv("MEMENGINE_VCHORD_LISTS", "").strip()
+        if raw_lists and not _SAFE_LISTS.match(raw_lists):
+            raise ValueError("MEMENGINE_VCHORD_LISTS must be comma-separated positive integers")
+        return f"residual_quantization = true\n[build.internal]\nlists = [{raw_lists}]"
 
     def _bootstrap(self):
         for sql in (_RELATIONAL + _TEXT_SCHEMA).split(";"):
@@ -199,15 +239,57 @@ class PostgresStore(SQLiteStore):
                      "validity ON facts(user_id,agent_id,event_time_start,expires_at)",
                      "scope_hash ON facts(user_id,agent_id,content_hash,tier,status,session_id)"):
             self.conn.execute(f"CREATE INDEX IF NOT EXISTS idx_facts_{spec}")
-        if self.trigram:
-            for table in ("facts_fts", "facts_cold_fts", "facts_anchor_fts"):
+
+        # Lexical tier: ParadeDB pg_search > VectorChord vchord_bm25 > tsvector GIN (+ optional pg_trgm)
+        lexical = self._lexical_engine()
+        if lexical == "pg_search":
+            for table in _FTS_TABLES:
+                self.conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{table}_bm25 ON {table} "
+                    f"USING bm25 (rowid, fts_tokens) WITH (key_field='rowid')"
+                )
+        elif lexical == "vchord_bm25":
+            self.conn.execute(
+                "SELECT create_tokenizer('memengine_ws', '{\"pre_tokenizer\": \"unicode_segmentation\"}')"
+            )
+            for table in _FTS_TABLES:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS bm25_tokens bm25vector "
+                    f"GENERATED ALWAYS AS (tokenize(fts_tokens, 'memengine_ws')::bm25vector) STORED"
+                )
+                self.conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{table}_vchord_bm25 ON {table} "
+                    f"USING bm25 (bm25_tokens bm25_ops)"
+                )
+        elif self.trigram:
+            for table in _FTS_TABLES:
                 self.conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_trgm ON {table} USING gin(fts_tokens gin_trgm_ops)")
+
         self.migrate_chronicle(postgres=True)
         self.migrate_workspace(postgres=True)
         self.migrate_allergy_slots()
+
+        # Vector tier: VectorChord RaBitQ (vchordrq) > pgvectorscale DiskANN > pgvector HNSW
         self.indexed_dimensions = {dim for dim in (self.fallback_embedder.dim, getattr(self.embedder, "dim", None))
                                    if type(dim) is int and 0 < dim <= 2000}
-        if self.pgvector:
+        vector_engine = self._vector_engine()
+        if vector_engine == "vchordrq":
+            options = self._vchord_options()
+            for table in ("fact_vectors", "fact_anchors"):
+                for dim in sorted(self.indexed_dimensions):
+                    self.conn.execute(
+                        f"CREATE INDEX IF NOT EXISTS idx_{table}_vchordrq_{dim} ON {table} "
+                        f"USING vchordrq ((vec::vector({dim})) vector_cosine_ops) "
+                        f"WITH (options = $${options}$$) WHERE dim={dim}"
+                    )
+        elif vector_engine == "diskann":
+            for table in ("fact_vectors", "fact_anchors"):
+                for dim in sorted(self.indexed_dimensions):
+                    self.conn.execute(
+                        f"CREATE INDEX IF NOT EXISTS idx_{table}_diskann_{dim} ON {table} "
+                        f"USING diskann ((vec::vector({dim})) vector_cosine_ops) WHERE dim={dim}"
+                    )
+        elif vector_engine == "pgvector":
             for table in ("fact_vectors", "fact_anchors"):
                 for dim in sorted(self.indexed_dimensions):
                     self.conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_hnsw_{dim} ON {table} "
@@ -239,21 +321,52 @@ class PostgresStore(SQLiteStore):
         return None
 
     def health_check(self):
-        return {"ok": self.conn.execute("SELECT 1").fetchone()[0] == 1, "backend": "postgresql",
-                "vector": "pgvector" if self.pgvector else "sql-array",
-                "hnsw_dimensions": sorted(self.indexed_dimensions) if self.pgvector else [],
-                "trigram": self.trigram, "degraded": not (self.pgvector and self.trigram)}
+        vector_engine = self._vector_engine()
+        lexical_engine = self._lexical_engine()
+        dims = sorted(self.indexed_dimensions) if self.pgvector else []
+        return {
+            "ok": self.conn.execute("SELECT 1").fetchone()[0] == 1,
+            "backend": "postgresql",
+            "vector": vector_engine,
+            "lexical": lexical_engine,
+            "hnsw_dimensions": dims,
+            "indexed_dimensions": dims,
+            "vchord": self.vchord,
+            "vectorscale": self.vectorscale,
+            "pg_search": self.pg_search,
+            "vchord_bm25": self.vchord_bm25,
+            "trigram": self.trigram,
+            "degraded": not (self.pgvector and (self.pg_search or self.vchord_bm25 or self.trigram)),
+        }
 
     def entity_keys(self, *, scope=DEFAULT_SCOPE, include_cold=False, query=None):
         if query is None:
             return super().entity_keys(scope=scope, include_cold=include_cold)
         where, args = self._eligible(scope, True, include_cold, None)
         tier = "" if include_cold else "AND e.tier='hot'"
+        compact = re.sub(r"\s+", "", query).casefold()
         rows = self.conn.execute(f"""SELECT DISTINCT e.raw_key FROM fact_entities e JOIN facts f ON f.id=e.fact_id
             WHERE e.user_id=? AND e.agent_id=? AND e.key_type='entity' {tier}
-              AND strpos(lower(?),e.entity_norm)>0 AND {where} ORDER BY e.raw_key""",
-                                 (*scope[:2], query, *args))
+              AND (strpos(lower(?),e.entity_norm)>0 OR strpos(?,e.entity_norm)>0) AND {where} ORDER BY e.raw_key""",
+                                 (*scope[:2], query, compact, *args))
         return [row["raw_key"] for row in rows]
+
+    def recall_entity_keys(self, query, *, scope, include_cold=False):
+        where, args = self._eligible(scope, True, include_cold, None)
+        tier = "" if include_cold else "AND e.tier='hot'"
+        compact = re.sub(r"\s+", "", query).casefold()
+        hits = self.conn.execute(f"""WITH matched AS (
+              SELECT min(entity_id) AS id FROM entity_aliases WHERE user_id=? AND agent_id=? AND alias IN ({_IDS})
+              GROUP BY alias HAVING count(*)=1
+            ) SELECT DISTINCT e.raw_key AS key, 0 AS is_alias FROM fact_entities e JOIN facts f ON f.id=e.fact_id
+              WHERE e.user_id=? AND e.agent_id=? AND e.key_type='entity' {tier}
+                AND (strpos(lower(?),e.entity_norm)>0 OR strpos(?,e.entity_norm)>0) AND {where}
+            UNION ALL SELECT DISTINCT 'entity:' || a.alias, 1 FROM entity_aliases a JOIN matched m ON a.entity_id=m.id
+            ORDER BY is_alias, key""", (*self._alias_arguments(query, scope), *scope[:2], query, compact, *args))
+        direct, aliases = [], []
+        for row in hits:
+            (aliases if row["is_alias"] else direct).append(row["key"])
+        return direct, aliases
 
     def _eligible(self, scope, include_superseded, include_cold, filters):
         where, args = scope_where(scope, "f.")
@@ -267,10 +380,31 @@ class PostgresStore(SQLiteStore):
         if not terms or top_n <= 0:
             return []
         text = " ".join(terms[:128])
-        expression = " OR ".join(f'"{term}"' for term in terms[:128])
         anchor = table == "facts_anchor_fts"
         extra = ",a.peer,a.turn_id AS context_anchor_turn_id" if anchor else ""
         joins = "JOIN fact_anchors a ON a.fact_id=f.id" if anchor else ""
+
+        lexical = self._lexical_engine()
+        if lexical == "pg_search":
+            # ParadeDB Rust Tantivy BM25 (negative score so lower ranks first, matching SQLite bm25())
+            expression = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in terms[:128] if term.replace('"', ""))
+            if not expression:
+                return []
+            return self.conn.execute(f"""SELECT f.id, -paradedb.score(x.rowid) AS bm25_score{extra}
+                  FROM {table} x JOIN facts f ON f.rowid=x.rowid {joins}
+                  WHERE x.fts_tokens @@@ ? AND {where}
+                  ORDER BY bm25_score, f.id LIMIT ?""", (expression, *args, top_n)).fetchall()
+
+        if lexical == "vchord_bm25":
+            # VectorChord Block-Max WAND BM25 (<&> returns negative BM25 score; lower is more relevant)
+            index_name = f"idx_{table}_vchord_bm25"
+            return self.conn.execute(f"""SELECT f.id,
+                  (x.bm25_tokens <&> to_bm25query('{index_name}', tokenize(?, 'memengine_ws'))) AS bm25_score{extra}
+                  FROM {table} x JOIN facts f ON f.rowid=x.rowid {joins}
+                  WHERE {where}
+                  ORDER BY bm25_score, f.id LIMIT ?""", (text, *args, top_n)).fetchall()
+
+        expression = " OR ".join(f'"{term}"' for term in terms[:128])
         trigram_rank = " + 0.1*word_similarity(q.raw,x.fts_tokens)" if self.trigram else ""
         trigram_match = " OR q.raw <% x.fts_tokens" if self.trigram and len(terms) <= 8 else ""
         return self.conn.execute(f"""WITH q AS (SELECT websearch_to_tsquery('simple',?) AS ts, ?::text AS raw)
@@ -310,7 +444,7 @@ class PostgresStore(SQLiteStore):
             native = self.pgvector and dim <= 16000
             if native:
                 score = f"1-(v.vec::vector({dim}) <=> ?::real[]::vector({dim}))"
-                # The bare distance ordering keeps the HNSW operator index applicable.
+                # Bare distance ordering lets vchordrq / diskann / hnsw operator indexes execute ANN scans.
                 order = f"v.vec::vector({dim}) <=> ?::real[]::vector({dim})"
                 params = (target, *args, model, target, top_n)
             else:
@@ -321,8 +455,7 @@ class PostgresStore(SQLiteStore):
                 JOIN facts f ON f.id=v.fact_id WHERE {where} AND v.model_name=? AND v.dim={dim}"""
             rows = self.conn.execute(f"{select} ORDER BY {order} LIMIT ?", params).fetchall()
             if native and len(rows) < top_n:
-                # Older pgvector releases can underfill a filtered ANN scan.
-                # Fall back to an exact, still database-side top-k for this scope.
+                # Filtered ANN scans can underfill on highly selective predicates; fall back to exact DB-side top-k.
                 rows = self.conn.execute(f"{select} ORDER BY vector_score DESC,f.id LIMIT ?",
                                          (target, *args, model, top_n)).fetchall()
             hits.extend(dict(hit) for hit in rows if hit["vector_score"] is not None and hit["vector_score"] > 0)
