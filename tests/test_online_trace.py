@@ -1,3 +1,7 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+from eval.ce_budget import limit_cross_encoder, shortlist
 from eval.evidence_ablation import Question, Turn
 from eval.online_trace import FUSION_ABLATIONS, diagnose, run_group
 from eval.paired import make_engine
@@ -84,3 +88,29 @@ def test_fusion_ablation_keeps_control_and_provenance():
     assert results[0]["context_fact_ids"] == control["context_fact_ids"]
     assert results[0]["gold"] == control["gold"]
     assert all(row["tokens"] <= 2048 for row in results)
+
+
+def test_ce_shortlist_protects_pinned_and_same_slot_evidence():
+    candidates = [{"canonical_entity_id": "alice", "attribute_slot": "workplace"},
+                  {}, {}, {}, {}, {}, {},
+                  {"canonical_entity_id": "alice", "attribute_slot": "workplace"},
+                  {"exact_ident_hit": 1}]
+    assert shortlist(candidates, 7) == [0, 1, 2, 3, 4, 7, 8]
+    assert shortlist(candidates, 1) == [8]
+    assert shortlist(candidates, 0) == []
+
+
+def test_ce_budget_does_not_fill_unscored_positions_with_local_scores():
+    tokenizer = Mock(truncation={"max_length": 512})
+    backend = SimpleNamespace(tokenizer=tokenizer)
+    score = Mock(side_effect=lambda query, candidates: [.8] * len(candidates))
+    reranker = SimpleNamespace(_encoder=SimpleNamespace(model=backend), batch_size=16, score=score)
+    engine = SimpleNamespace(reranker=reranker)
+    candidates = [{"id": "first"}, {"id": "exact", "exact_ident_hit": 1}]
+    ids = []
+    with limit_cross_encoder(engine, 1, ids):
+        assert reranker.score("version", candidates) == [0.0, .8]
+        assert reranker.score("version", candidates) == [0.0, 0.0]
+    assert ids == [["exact"], []]
+    assert reranker.score is score and reranker.batch_size == 16
+    assert backend.tokenizer is tokenizer
