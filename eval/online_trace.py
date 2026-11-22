@@ -5,8 +5,10 @@ import argparse
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, closing
+from dataclasses import replace
 from functools import partial
 import hashlib
+from itertools import product
 from pathlib import Path
 import platform
 from time import perf_counter
@@ -25,6 +27,13 @@ from memengine.neural_onnx import OnnxCrossEncoderReranker
 
 BENCHMARK = "LongMemEval-S"
 STAGES = ("fused", "ce", "reranked", "gate_input", "gate_kept", "packing_input", "packed", "context")
+FUSION_ABLATIONS = {
+    "baseline": {},
+    "quotas_only": {"channel_quotas": True},
+    "weights_only": {"semantic_weighting": True},
+    "graph_off_only": {"entity_graph": False},
+    "combined": {"channel_quotas": True, "semantic_weighting": True, "entity_graph": False},
+}
 
 
 def observe_onnx(session, batches):
@@ -80,7 +89,7 @@ def diagnose(pass_trace, context, sources, gold):
     return details
 
 
-def run_group(group, *, backend, mode, packing_replay=False):
+def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=False):
     turns, questions = group
     engine = make_engine("mock", backend=backend)
     rows = []
@@ -98,9 +107,16 @@ def run_group(group, *, backend, mode, packing_replay=False):
             if not isinstance(engine.reranker, OnnxCrossEncoderReranker):
                 raise RuntimeError("local-neural tracing requires the ONNX reranker")
             session = engine.reranker._encoder.model.model
-        for question in questions:
+        recall = engine._recall
+        variants = FUSION_ABLATIONS if fusion_ablation else ("baseline",)
+        for question, variant in product(questions, variants):
             passes, batches = [], []
             with ExitStack() as stack:
+                if parameters := FUSION_ABLATIONS[variant]:
+                    def ablated_recall(*args, plan=None, **kwargs):
+                        return recall(*args, plan=replace(plan, **parameters) if plan else None, **kwargs)
+
+                    stack.enter_context(patch.object(engine, "_recall", ablated_recall))
                 if session is not None:
                     stack.enter_context(observe_onnx(session, batches))
                 if packing_replay:
@@ -144,6 +160,8 @@ def run_group(group, *, backend, mode, packing_replay=False):
                          "retrieval_ms": bundle["retrieval_ms"], "latency_ms": elapsed}
             if packing_replay:
                 row["packing_replay"] = replay_scores
+            if fusion_ablation:
+                row["fusion_variant"] = variant
             rows.append(row)
     return rows
 
@@ -174,6 +192,12 @@ def summarize(rows):
             **({"packing_replay": replays} if replays else {})}
 
 
+def summarize_categories(rows):
+    categories = sorted({row["category"] for row in rows})
+    return {"Overall": summarize(rows), **{name: summarize([row for row in rows if row["category"] == name])
+                                          for name in categories}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", required=True, type=Path)
@@ -184,6 +208,8 @@ def main():
     parser.add_argument("--backend", choices=("hashed", "local-neural"), default="hashed")
     parser.add_argument("--packing-replay", action="store_true",
                         help="Replay the same budget and admitted candidates in score and gold-first order")
+    parser.add_argument("--fusion-ablation", action="store_true",
+                        help="Compare channel quotas, weights and graph removal on the same ingested histories")
     parser.add_argument("--query-mode", choices=("single_query", "reconstructive"), default="reconstructive")
     args = parser.parse_args()
     sha = hashlib.sha256()
@@ -196,18 +222,20 @@ def main():
     data = [row for row in read_dataset(args.data) if not args.category or category(row) in args.category]
     if not data or args.workers < 1 or args.sample is not None and args.sample < 1:
         parser.error("provide at least one question and a positive number of workers")
-    worker = partial(run_group, backend=args.backend, mode=args.query_mode, packing_replay=args.packing_replay)
+    worker = partial(run_group, backend=args.backend, mode=args.query_mode, packing_replay=args.packing_replay,
+                     fusion_ablation=args.fusion_ablation)
     questions = groups(data, args.sample, 42)
     rows = []
+    traced = 0
     with ExitStack() as stack:
         executor = stack.enter_context(ProcessPoolExecutor(args.workers)) if args.workers > 1 else None
         batches = executor.map(worker, questions) if executor else map(worker, questions)
         for batch in batches:
             rows.extend(batch)
-            if len(rows) % 10 == 0:
-                print(f"{len(rows)} questions traced", flush=True)
-    summary = {"Overall": summarize(rows), **{name: summarize([row for row in rows if row["category"] == name])
-                                               for name in sorted({row["category"] for row in rows})}}
+            traced += len(batch) // (len(FUSION_ABLATIONS) if args.fusion_ablation else 1)
+            if traced % 10 == 0:
+                print(f"{traced} questions traced", flush=True)
+    summary = summarize_categories([row for row in rows if row.get("fusion_variant", "baseline") == "baseline"])
     report = {"benchmark": BENCHMARK, "sha256": digest, "backend": args.backend, "mode": args.query_mode,
               "workers": args.workers, "seed": 42, "platform": platform.platform(), "summary": summary, "items": rows}
     body = table(("Category", "N", "Candidate@50", "R@10", "Session coverage@10", "P50 ms", "P95 ms", "Rerank P95 ms"),
@@ -217,6 +245,14 @@ def main():
                   for name, row in summary.items()))
     if args.packing_replay:
         body += "\n\n" + replay_table(summary)
+    if args.fusion_ablation:
+        ablation = {variant: summarize_categories([row for row in rows if row["fusion_variant"] == variant])
+                    for variant in FUSION_ABLATIONS}
+        report["fusion_ablation"] = ablation
+        body += "\n\n" + table(("Variant", "Category", "N", "Candidate@50", "R@10", "Session coverage@10"),
+                               ((variant, category, scores["n"], number(scores["candidate_at_50"], ".2%"),
+                                 number(scores["recall_at_10"], ".2%"), number(scores["session_coverage_at_10"], ".2%"))
+                                for variant, categories in ablation.items() for category, scores in categories.items()))
     write_result(report, args.out, body)
 
 

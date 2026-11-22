@@ -19,12 +19,20 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
     expansions = " ".join(stem_features(query)) if plan and plan.wide else ""
     query_index = f"{query} {expansions}" if expansions else query
     semantic_query = parsed["semantic_vector_query"]
-    if expansions and store.embedder.model_name.startswith("hash-"):
+    quotas = bool(plan and plan.channel_quotas)
+    reweight = bool(plan and plan.semantic_weighting)
+    hashed = bool((expansions or quotas or reweight) and store.embedder.model_name.startswith("hash-"))
+    if expansions and hashed:
         semantic_query = f"{semantic_query} {expansions}"
-    dense = vector_search(semantic_query, **options)
-    lexical = store.search_lexical(query_index, **options)
+    named = bool(plan and any(key.startswith("entity:") and normalize_entity(key) in query.casefold()
+                              for key in direct))
+    dense_limit = min(per_channel_k, 42 if hashed else 50) if quotas else per_channel_k
+    lexical_limit = min(per_channel_k, 36 if hashed or named else 24) if quotas else per_channel_k
+    dense = vector_search(semantic_query, **{**options, "top_n": dense_limit})
+    lexical = store.search_lexical(query_index, **{**options, "top_n": lexical_limit})
     entities = direct or parsed["entities"]
-    inverted = store.search_entity_inverted(entities, **options)
+    use_entity_graph = plan is None or plan.entity_graph
+    inverted = store.search_entity_inverted(entities, **options) if use_entity_graph else []
     timed = []
     previous = (temporal.is_historical and temporal.order_hint == "latest"
                 and temporal.start_ts is None and temporal.end_ts is None)
@@ -40,20 +48,23 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
     exact = store.search_exact_identifiers(wanted, **options)
     use_anchor_channel = not exact and not any(item.ident_type == "version" for item in wanted)
     anchor_options = {key: value for key, value in options.items() if key != "ids_only"}
+    if quotas:
+        anchor_options["top_n"] = min(12, per_channel_k)
     anchor_lex, anchor_vec = (store.search_turn_anchors(query, parsed["semantic_vector_query"], **anchor_options)
                               if use_anchor_channel else ([], []))
     contextual = bool(anchor_lex)
     channels = (dense, lexical, inverted, timed, exact, anchor_lex, anchor_vec) if contextual or plan else (dense, lexical, inverted, timed, exact)
     graph_hits, followup, feedback, calendar_hits, precision_hits, bridges = [], [], [], [], [], []
     if plan:
-        named = any(key.startswith("entity:") and normalize_entity(key) in query.casefold() for key in direct)
         lexical_weight, semantic_weight = (.60, .32) if named else (.46, .44)
+        if reweight and not named and not hashed:
+            lexical_weight, semantic_weight = .30, .60
         if plan.windows:
             calendar_hits = store.occurrence_candidates(plan.windows, scope=scope, filters=filters,
                                                         include_cold=include_cold, top_n=per_channel_k)
         if plan.versions:
             precision_hits = store.version_candidates(plan.versions, scope=scope, filters=filters, include_cold=include_cold)
-        if plan.graph:
+        if plan.graph and use_entity_graph:
             seeds = fuse(lexical, dense, w_vec=lexical_weight, w_hash=semantic_weight,
                          extra_channels=((.16, anchor_lex), (.07, inverted), (.22, calendar_hits)))[:16]
             hydrated = {row["id"]: row for row in store.recall_facts_by_ids([row["id"] for row in seeds], scope=scope)}

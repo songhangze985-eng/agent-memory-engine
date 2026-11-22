@@ -1,5 +1,5 @@
 from eval.evidence_ablation import Question, Turn
-from eval.online_trace import diagnose, run_group
+from eval.online_trace import FUSION_ABLATIONS, diagnose, run_group
 from eval.paired import make_engine
 from eval.packing_replay import oracle_order
 
@@ -69,3 +69,18 @@ def test_gold_first_reordering_covers_distinct_sources_and_keeps_pool():
     pool = [distractor, long_dup, short, independent]
     sources = {"x": ["noise"], "a": ["one"], "b": ["one"], "c": ["two"]}
     assert oracle_order(pool, sources, {"one", "two"}) == [short, independent, distractor, long_dup]
+
+
+def test_fusion_ablation_keeps_control_and_provenance():
+    stamp = 1735689500
+    turns = [Turn("a:0", "a", "user", "I prefer quiet podcasts for my commute.", stamp)]
+    question = Question("test", "preference", "Which podcasts do I prefer for my commute?",
+                        stamp + 20, frozenset({"a:0"}), frozenset({"a"}))
+    group = turns, [question]
+    control, = run_group(group, backend="hashed", mode="reconstructive")
+    results = run_group(group, backend="hashed", mode="reconstructive", fusion_ablation=True)
+    assert [row["fusion_variant"] for row in results] == list(FUSION_ABLATIONS)
+    assert {row["id"] for row in results} == {control["id"]}
+    assert results[0]["context_fact_ids"] == control["context_fact_ids"]
+    assert results[0]["gold"] == control["gold"]
+    assert all(row["tokens"] <= 2048 for row in results)

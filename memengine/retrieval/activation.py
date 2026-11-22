@@ -18,6 +18,9 @@ class RecallPlan:
     versions: tuple = ()
     graph: bool = False
     wide: bool = False
+    channel_quotas: bool = False
+    semantic_weighting: bool = False
+    entity_graph: bool = True
 
 
 _EDGE = {"entity": .78, "temporal": .55, "semantic": .85, "causal": 1.0}
