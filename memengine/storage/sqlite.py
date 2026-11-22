@@ -141,6 +141,21 @@ def _status_where(include_superseded):
     return "f.status IN ('active','superseded')" if include_superseded else "f.status='active'"
 
 
+def _live_observation_sources(alias):
+    return f"""NOT EXISTS (
+        SELECT 1 FROM json_each({alias}.derived_from_ids) j
+        WHERE NOT EXISTS (
+            SELECT 1 FROM facts source WHERE source.id=j.value
+              AND source.user_id={alias}.user_id AND source.agent_id={alias}.agent_id
+              AND (source.status='active' OR ({alias}.canonical_entity_id IS NOT NULL
+                  AND source.status='superseded' AND EXISTS (
+                      SELECT 1 FROM facts active WHERE active.root_fact_id=source.root_fact_id
+                        AND active.status='active'
+                  )))
+        )
+    )"""
+
+
 def _dump(value):
     return json.dumps(value, ensure_ascii=False)
 
@@ -627,14 +642,17 @@ class SQLiteStore(Chronicle, WorkspaceStore):
             ingest_time = max(ingest_time, old["ingest_time"])
             self.conn.execute("UPDATE facts SET status='superseded',valid_until=? WHERE id=?", (ingest_time, old["id"]))
             owner = (old["user_id"], old["agent_id"], old["session_id"])
+            self.invalidate_observations(owner, [old["id"]], ingest_time)
+            replace_sources = old["memory_type"] == "observation" and chronicle is not None and "derived_from_ids" in chronicle
             data = self._version_data(fact_id=self.next_id("l"), block_id=old["block_id"], seq=old["seq"], scope=owner,
                                       formatted=formatted, plain=plain, attribute=attribute, value=value, surprise=surprise,
                                       layout=layout, isolated=old["isolated"] if isolated is None else isolated,
                                       is_conflict=is_conflict, role=role, ingest_time=ingest_time, event_time_start=event_time_start,
                                       event_time_end=event_time_end, root_fact_id=old["root_fact_id"], supersedes_id=old["id"],
                                       revision=old["revision"] + 1, hit_count=old["hit_count"],
-                                      source_turn_ids=merge_step_ids(json.loads(old["source_turn_ids"]), turns),
-                                      source_step_ids=merge_step_ids(json.loads(old["source_step_ids"]), current_step_ids))
+                                      source_turn_ids=turns if replace_sources else merge_step_ids(json.loads(old["source_turn_ids"]), turns),
+                                      source_step_ids=current_step_ids if replace_sources else
+                                      merge_step_ids(json.loads(old["source_step_ids"]), current_step_ids))
             for name in ("memory_type", "confidence", "derived_from_ids", "tool_call_ids", "trigger_text", "success_count", "is_constraint", "epistemic_scope", "valid_from", "expires_at"):
                 data[name] = old[name]
             return self._insert_version(data, zkeys, chronicle=chronicle)
@@ -644,16 +662,35 @@ class SQLiteStore(Chronicle, WorkspaceStore):
             row = self._resolve_fact(fact_id, scope=scope, status="TRUE" if hard else "status='active'")
             if row is None:
                 return False
+            stamp = max(time.time() if ingest_time is None else ingest_time, row["ingest_time"])
             if hard:
                 removed = self.conn.execute("DELETE FROM facts WHERE root_fact_id=? RETURNING id", (row["root_fact_id"],)).fetchall()
-                self._forget_vectors(scope, [item["id"] for item in removed])
+                removed_ids = [item["id"] for item in removed]
             else:
-                stamp = time.time() if ingest_time is None else ingest_time
-                self.conn.execute("UPDATE facts SET status='deleted',valid_until=? WHERE id=?",
-                                  (max(stamp, row["ingest_time"]), row["id"]))
-            if not hard:
-                self._forget_vectors(scope, [row["id"]])
+                removed_ids = [item["id"] for item in self.conn.execute(
+                    "SELECT id FROM facts WHERE root_fact_id=?", (row["root_fact_id"],))]
+                self.conn.execute("UPDATE facts SET status='deleted',valid_until=? WHERE id=?", (stamp, row["id"]))
+            self.invalidate_observations(scope, removed_ids, stamp)
+            self._forget_vectors(scope, removed_ids if hard else [row["id"]])
             return True
+
+    def invalidate_observations(self, scope, source_ids, stamp):
+        rows = self.conn.execute(f"""UPDATE facts AS o SET is_stale=1
+            WHERE o.user_id=? AND o.agent_id=? AND o.memory_type='observation'
+              AND o.status='active' AND o.is_stale=0 AND EXISTS (
+                  SELECT 1 FROM json_each(o.derived_from_ids) j WHERE j.value IN ({_IDS})
+              ) RETURNING plain""", (*scope[:2], _dump(source_ids))).fetchall()
+        if not rows:
+            return
+        # Remove only compiled lines backed by the newly invalidated observations.
+        invalid = {" ".join(strip_step_tags(row["plain"]).split()) for row in rows}
+        user, agent = scope[:2]
+        snapshot = self.get_core_snapshot(user_id=user, agent_id=agent)
+        lines = snapshot["core_profile"].splitlines()
+        retained = [line for line in lines if line not in invalid]
+        if retained != lines:
+            self.set_core_snapshot("\n".join(retained), snapshot["procedural_rules"],
+                                   user_id=user, agent_id=agent, timestamp=stamp)
 
     def _forget_vectors(self, scope, ids):
         if hasattr(self, "vector_cache"):
@@ -763,7 +800,10 @@ class SQLiteStore(Chronicle, WorkspaceStore):
 
     def _searchable(self, include_superseded, include_cold=False, filters=None):
         tier = "" if include_cold else " AND f.tier='hot'"
-        types = " AND f.memory_type!='observation'" if filters is None or filters.memory_types is None and filters.scopes is None else ""
+        if filters is None or filters.memory_types is None and filters.scopes is None:
+            types = " AND f.memory_type!='observation'"
+        else:
+            types = f" AND (f.memory_type!='observation' OR (f.is_stale=0 AND {_live_observation_sources('f')}))"
         return _status_where(include_superseded) + tier + types + (" AND NOT EXISTS (SELECT 1 FROM facts removed "
                  "WHERE removed.root_fact_id=f.root_fact_id AND removed.status='deleted')" if include_superseded else "")
 
@@ -963,17 +1003,16 @@ class SQLiteStore(Chronicle, WorkspaceStore):
                                     memory_type="observation", confidence=confidence, derived_from_ids=derived_from_fact_ids,
                                     source_turn_ids=source_turn_ids, offline=offline)
 
-    def list_observations(self, *, user_id="default", agent_id="default", session_id=None, include_cold=False):
-        sql = "SELECT * FROM facts o WHERE o.user_id=? AND o.agent_id=? AND o.status='active' AND o.memory_type='observation'"
+    def list_observations(self, *, user_id="default", agent_id="default", session_id=None,
+                          include_cold=False, include_stale=False):
+        live = _live_observation_sources("o")
+        selected = f"o.*, NOT ({live}) AS invalid_sources" if include_stale else "o.*"
+        sql = f"SELECT {selected} FROM facts o WHERE o.user_id=? AND o.agent_id=? AND o.status='active' AND o.memory_type='observation'"
         args = (user_id, agent_id)
         if not include_cold:
             sql += " AND o.tier='hot'"
-        sql += """ AND (o.is_stale=1 OR (SELECT count(*) FROM json_each(o.derived_from_ids) j
-                 CROSS JOIN facts f ON f.id=j.value AND f.user_id=o.user_id AND f.agent_id=o.agent_id
-                 WHERE f.status='active' OR (o.canonical_entity_id IS NOT NULL AND f.status='superseded' AND EXISTS (
-                     SELECT 1 FROM facts active WHERE active.root_fact_id=f.root_fact_id AND active.status='active'
-                 ))
-                 )>=min(2,json_array_length(o.derived_from_ids)))"""
+        if not include_stale:
+            sql += f" AND o.is_stale=0 AND {live}"
         if session_id is not None:
             sql += """ AND NOT EXISTS (
                        SELECT 1 FROM json_each(o.derived_from_ids) j
@@ -985,8 +1024,14 @@ class SQLiteStore(Chronicle, WorkspaceStore):
                        WHERE r.turn_id IS NULL)"""
             args += (session_id, session_id)
         rows = self.conn.execute(sql + " ORDER BY ingest_time,id", args)
-        return [{**self._fact(row, []), "content": row["plain"], "created_at": row["ingest_time"],
-                 "derived_from_fact_ids": json.loads(row["derived_from_ids"])} for row in rows]
+        observations = []
+        for row in rows:
+            fact = self._fact(row, [])
+            if fact.pop("invalid_sources", False):
+                fact["is_stale"] = 1
+            observations.append({**fact, "content": fact["plain"], "created_at": fact["ingest_time"],
+                                 "derived_from_fact_ids": fact["derived_from_ids"]})
+        return observations
 
     def get_core_snapshot(self, *, user_id="default", agent_id="default"):
         row = self.conn.execute("SELECT * FROM core_profiles WHERE user_id=? AND agent_id=?", (user_id, agent_id)).fetchone()

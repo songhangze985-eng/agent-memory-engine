@@ -168,6 +168,7 @@ class Chronicle:
         if row is None or row["ingest_time"] > data["ingest_time"]:
             return
         self.conn.execute("UPDATE facts SET status='superseded',valid_until=? WHERE id=?", (data["ingest_time"], row["id"]))
+        self.invalidate_observations((data["user_id"], data["agent_id"]), [row["id"]], data["ingest_time"])
         data.update(supersedes_id=row["id"], revision=row["revision"]+1, root_fact_id=row["root_fact_id"])
         for field in ("source_turn_ids", "source_step_ids"):
             data[field] = dump(merge_step_ids(json.loads(row[field]), json.loads(data[field])))

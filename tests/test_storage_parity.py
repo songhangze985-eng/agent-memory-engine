@@ -59,6 +59,10 @@ def exercise(store):
     assert [row["id"] for row in store.list_observations(user_id="alice", agent_id="agent")] == [observation]
     assert store.delete_fact(successor, scope=scope)
     assert not store.list_observations(user_id="alice", agent_id="agent")
+    stale, = store.list_observations(user_id="alice", agent_id="agent", include_stale=True)
+    assert stale["id"] == observation and stale["is_stale"]
+    for search in (store.search_vector_topk, store.search_lexical):
+        assert not search("Atlas environment history", filters=RecallFilter(memory_types=("observation",)), **opts)
     assert store.health_check()["ok"]
 
 

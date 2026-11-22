@@ -109,7 +109,7 @@ def recent_observation_evidence(store, facts, scope, as_of, observations=None):
     if not entities:
         return []
     if observations is None:
-        observations = store.list_observations(user_id=scope[0], agent_id=scope[1], session_id=scope[2])
+        observations = store.list_observations(user_id=scope[0], agent_id=scope[1], session_id=scope[2], include_stale=True)
     stale = {row["canonical_entity_id"]: max((int(i[1:]) for i in row["derived_from_ids"] if i[1:].isdigit()), default=0)
              for row in observations if row.get("is_stale") and row.get("canonical_entity_id") in entities}
     if not stale:
