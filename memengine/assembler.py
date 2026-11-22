@@ -6,7 +6,7 @@ import re
 from typing import TypedDict
 
 from memengine.reflection import recent_observation_evidence
-from memengine.lifecycle import normalized_content
+from memengine.lifecycle import CURRENT_STATE_SLOT_PREFIXES, LEGACY_PREFERENCE_SUMMARY, normalized_content
 from memengine.temporal import competition_terms
 from memengine.textutil import estimate_tokens, strip_step_tags, token_units
 
@@ -147,7 +147,8 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
 
     historical = result["parsed_query"]["query_type"] == "TIME_TRAVEL"
     facts = [fact for fact in result["ranked"] if not fact.get("is_stale")
-             and (historical or fact["status"] == "active" or not (fact.get("attribute_slot") or "").startswith("allergy:"))]
+             and (historical or fact["status"] == "active"
+                  or not (fact.get("attribute_slot") or "").startswith(CURRENT_STATE_SLOT_PREFIXES))]
     if facts:
         wide = result.get("packing_mode") == "token_budget"
         scope = result["scope"]
@@ -155,7 +156,8 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
         observations = store.list_observations(**scope, include_stale=True) if domains is None or "observation" in domains else []
         fresh = recent_observation_evidence(store, facts, (scope["user_id"], scope["agent_id"], scope["session_id"]),
                                             result.get("validity_as_of"), observations)
-        observations = [item for item in observations if not item.get("is_stale")]
+        observations = [item for item in observations if not item.get("is_stale")
+                        and not item["content"].startswith(LEGACY_PREFERENCE_SUMMARY)]
         if domains is not None:
             fresh = [fact for fact in fresh if fact["epistemic_scope"] in domains]
         fact_ids = {fact["id"] for fact in facts}
@@ -169,6 +171,8 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
                        and fact.get("graph_depth") == 2 and fact.get("entity_anchor")][:3]
             bridge_ids = {fact["id"] for fact in bridges}
             facts = [*facts[:10], *bridges, *(fact for fact in facts[10:] if fact["id"] not in bridge_ids)]
+        if any(fact.get("preference_priority") for fact in facts):
+            facts.sort(key=lambda fact: not fact.get("preference_priority"))
         tau = result["gate_stats"].get("tau_abs")
         if tau is None:
             tau = .12
@@ -185,6 +189,8 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
             label = _fact_label(fact)
             if fact.get("is_taboo"):
                 label = f"[禁忌] {label}".rstrip()
+            if fact.get("preference_priority") and fact.get("explicit_preference"):
+                label = f"[偏好] {label}".rstrip()
             if label and estimate_tokens(label + " ") <= overhead:
                 snippet = f"{label} {body}"
                 overhead -= estimate_tokens(label + " ")

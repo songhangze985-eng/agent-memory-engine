@@ -15,7 +15,7 @@ import numpy as np
 from memengine.anchors import turn_context
 
 from memengine.identifiers import extract_identifiers
-from memengine.lifecycle import DAY, PROTECTED, content_hash, is_constraint, is_taboo
+from memengine.lifecycle import DAY, PROTECTED, content_hash, explicit_preference, is_constraint, is_taboo
 from memengine.textutil import (ensure_step_tags, estimate_tokens, merge_step_ids, normalize_entity,
                                 step_ids_in, strip_step_tags, tokenize_for_fts)
 from memengine.storage.base import DEFAULT_SCOPE, IDS as _IDS, SCOPES, scope_where as _scope_where
@@ -401,7 +401,8 @@ class SQLiteStore(Chronicle, WorkspaceStore):
         if not turn_ids or as_of is None:
             return set()
         where, args = _scope_where(scope, "f.")
-        stale_source = "f.status!='active'" if include_superseded else "f.status='superseded' AND f.attribute_slot LIKE 'allergy:%'"
+        stale_source = ("f.status!='active'" if include_superseded else
+                        "f.status='superseded' AND (f.attribute_slot LIKE 'allergy:%' OR f.attribute_slot LIKE 'preference:%')")
         inactive = f"""((f.expires_at IS NOT NULL AND (f.expires_at<=? OR f.valid_from>?))
             OR ({stale_source} AND (f.origin_turn IS NULL OR f.origin_turn=CAST(j.value AS BIGINT))))"""
         rows = self.conn.execute(f"""SELECT DISTINCT j.value AS turn_id
@@ -734,15 +735,17 @@ class SQLiteStore(Chronicle, WorkspaceStore):
     def _fact(row, keys):
         fact = dict(row)
         steps = json.loads(fact["source_step_ids"])
+        turns = json.loads(fact["source_turn_ids"])
+        user_fact = fact["memory_type"] == "fact" and fact["role"] == "user" and fact["epistemic_scope"] == "world"
         return {**fact, "text": ensure_step_tags(fact["plain"], steps), "zkeys": keys,
                 "entity_z_keys": [key for key in keys if key_type(key) == "entity"],
                 "category_z_keys": [key for key in keys if key_type(key) == "tag"],
-                "is_taboo": fact["memory_type"] == "fact" and fact["role"] == "user"
-                and fact["epistemic_scope"] == "world" and is_taboo(fact["plain"]),
+                "is_taboo": user_fact and is_taboo(fact["plain"]),
+                "explicit_preference": explicit_preference(fact["plain"], fact["speaker"]) if user_fact and turns else None,
                 "isolated": bool(fact["isolated"]), "historical": fact["status"] == "superseded",
                 "active": int(fact["status"] == "active"), "event_time": fact["event_time_start"],
                 "updated_at": fact["ingest_time"], "is_conflict_or_override": bool(fact["is_conflict"]),
-                "source_step_ids": steps, "source_turn_ids": json.loads(fact["source_turn_ids"]),
+                "source_step_ids": steps, "source_turn_ids": turns,
                 "derived_from_ids": json.loads(fact["derived_from_ids"]), "tool_call_ids": json.loads(fact["tool_call_ids"])}
 
     def _load_facts(self, predicate, args, order="b.created_at,b.id,f.seq,f.revision"):

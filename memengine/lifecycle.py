@@ -4,6 +4,7 @@ import re
 import unicodedata
 from hashlib import sha256
 
+from memengine.linguistics import strip_speaker_prefix
 from memengine.textutil import strip_step_tags
 
 DAY = 86400
@@ -24,6 +25,16 @@ _ALLERGY_ASSERTIONS = (
                r"allergic\s+to\s+(?P<allergen>[\w-]+(?: [\w-]+){0,4}))[.!！。]?"),
     re.compile(r"(?P<subject>我|[\u4e00-\u9fff]{2,4}?)(?:不再|已经不|现在)?对"
                r"(?P<allergen>[\w-]{1,24}?)(?:不)?过敏[.!！。]?"),
+)
+CURRENT_STATE_SLOT_PREFIXES = ("allergy:", "preference:")
+LEGACY_PREFERENCE_SUMMARY = "多轮明确表达偏好"
+_EXPLICIT_PREFERENCE = (
+    re.compile(r"(?P<subject>[a-z][\w'-]*(?: [a-z][\w'-]*){0,2}?)\s+(?:(?:now|really|currently)\s+)?"
+               r"(?:(?P<avoid>dislikes?|(?:don't|don’t|doesn't|doesn’t|do not|does not)\s+(?:like|enjoy)|prefers? not to)|"
+               r"(?:likes?|prefers?|loves?|enjoys?))\s+(?P<value>[^.?!;\r\n]{1,180})[.!]?", re.I),
+    re.compile(r"(?P<subject>我|[\u4e00-\u9fff]{2,4}?)(?:现在|一直)?"
+               r"(?:(?P<avoid>不太喜欢|不喜欢|不爱|讨厌)|(?:更|很|最|比较)?(?:偏好|喜欢|爱看|爱听))"
+               r"(?P<value>[^。！？；?\r\n]{1,100})[。！]?"),
 )
 _DECISIVE = re.compile(r"(?<!\w)[+-]?\d[\d.,:/-]*\d|\d|[一二两三四五六七八九十]+(?=[年月日点分周次元])|"
                        r"周[一二三四五六日天]|上午|下午|昨天|今天|明天|去年|上周|下周|不再|没有|不是|取消|撤销|禁止|不|"
@@ -58,6 +69,20 @@ def allergy_slot(text, speaker):
         match = pattern.fullmatch(body)
         if match and normalized_content(match["subject"]) in {"i", "我", normalized_content(speaker)}:
             return "allergy:" + normalized_content(match["allergen"])
+    return None
+
+
+def explicit_preference(text, speaker):
+    body = strip_speaker_prefix(strip_step_tags(text).strip(), speaker)
+    if "?" in body or "？" in body:
+        return None
+    subjects = {"i", "我"}
+    if speaker:
+        subjects.add(normalized_content(speaker))
+    for pattern in _EXPLICIT_PREFERENCE:
+        match = pattern.fullmatch(body)
+        if match and normalized_content(match["subject"]) in subjects:
+            return {"value": match["value"].strip(), "polarity": "negative" if match["avoid"] else "positive"}
     return None
 
 
