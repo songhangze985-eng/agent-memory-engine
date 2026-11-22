@@ -9,6 +9,15 @@ from memengine.textutil import strip_step_tags
 DAY = 86400
 PROTECTED = "(status='active' AND (memory_type='procedural' OR (memory_type='observation' AND confidence>=0.8) OR is_constraint=1 OR isolated=1))"
 _CONSTRAINT = re.compile(r"过敏|禁忌|禁止|不得|不能|切勿|\b(?:allerg\w*|must not|never|prohibited)\b", re.I)
+_TABOO = re.compile(
+    r"^(?:(?i:I|we|he|she|they)|[A-Z][\w'-]*(?: [A-Z][\w'-]*){0,2})"
+    r"(?i:(?:\s+(?:am|is|are)|['’](?:m|s|re))\s+(?:currently\s+)?allergic\s+to\b|"
+    r"\s+(?:must avoid|cannot eat|can't eat|must not eat)\b)|"
+    r"^(?:我|他|她|[\u4e00-\u9fff]{2,4})(?:现在|一直)?"
+    r"(?:对[^，。；!?！？\n]{1,24}过敏|的?(?:饮食|健康)?禁忌(?:是|为)|必须避免|不能(?:吃|食用|饮用))")
+_TABOO_HEADING = re.compile(r"^[^。；!?！？\n:：]{0,24}(?:禁忌|allergies|dietary restrictions)\s*[:：]\s*", re.I)
+_TABOO_CONTEXT = re.compile(
+    r"[?？]|^(?:如果|假如|假设|据说|听说|曾经|以前)|不再对|(?:没|不)\s*过敏|不是对|并非对")
 _DECISIVE = re.compile(r"(?<!\w)[+-]?\d[\d.,:/-]*\d|\d|[一二两三四五六七八九十]+(?=[年月日点分周次元])|"
                        r"周[一二三四五六日天]|上午|下午|昨天|今天|明天|去年|上周|下周|不再|没有|不是|取消|撤销|禁止|不|"
                        r"\b(?:not|never|no|without|cancel\w*|yesterday|today|tomorrow|monday|tuesday|"
@@ -26,6 +35,11 @@ def content_hash(text):
 
 def is_constraint(text):
     return bool(_CONSTRAINT.search(text))
+
+
+def is_taboo(text):
+    body = _TABOO_HEADING.sub("", strip_step_tags(text).strip())
+    return bool(_TABOO.search(body) and not _TABOO_CONTEXT.search(body))
 
 
 def changes_state(text):

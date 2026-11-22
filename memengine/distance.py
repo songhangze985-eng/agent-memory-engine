@@ -35,7 +35,8 @@ def is_override(fact: dict) -> bool:
 
 
 def compute_bipolar_radius(fact: dict, c_max: int) -> float:
-    if fact.get("expires_at") is not None:
+    # A relevant taboo keeps its recall priority when further mentions are recorded.
+    if fact.get("expires_at") is not None or fact.get("attention_weight", 1.0) > 1.0:
         return 1.0
     if is_noise(fact):
         return 0.5

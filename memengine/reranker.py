@@ -26,6 +26,10 @@ _CONSTRAINT_FACT = re.compile(r"过敏|禁忌|禁止|不得|不能|切勿|无障
                               r"\b(?:allerg\w*|exceptions?|restrictions?|contraindications?|avoid|prohibited|must not)\b", re.I)
 
 
+def taboo_query(query):
+    return bool(_CONSTRAINT_QUERY.search(query))
+
+
 def anchored_relevance(query, candidates):
     terms = competition_terms(query)
     matching = [terms & competition_terms(fact["plain"]) for fact in candidates]
@@ -119,7 +123,7 @@ class CalibratedLocalReranker:
         for fact in ranked:
             prior = 1 / (1 + 0.25 * order.get(fact["id"], 35))
             score = (0.75 * fact["ce_score"] + 0.25 * prior) * fact["status_weight"] * fact["temporal_weight"]
-            score *= fact["bipolar_factor"] * fact["decay_factor"]
+            score *= fact["bipolar_factor"] * fact["decay_factor"] * fact.get("attention_weight", 1.0)
             scored.append({**fact, "score": score, "final_score": score, "bipolar_score": score})
         return sorted(scored, key=lambda fact: (-fact["final_score"], fact["id"]))
 
@@ -131,7 +135,7 @@ class CalibratedLocalReranker:
         pinned = next((fact for fact in ranked if fact["id"] == rrf[0]["id"]), None)
         if not pinned or pinned.get("temporal_role") == "older":
             return ranked
-        if any(fact.get("is_constraint") or fact.get("is_conflict_or_override")
+        if any(fact.get("is_constraint") or fact.get("attention_weight", 1.0) > 1.0 or fact.get("is_conflict_or_override")
                or fact.get("exact_ident_hit") or fact.get("version_mismatch")
                or fact.get("bipolar_weight", 1.0) != 1.0 for fact in (leading, pinned)):
             return ranked
@@ -152,7 +156,7 @@ class CalibratedLocalReranker:
         weights = {term: (2 if not term.isascii() and len(term) > 1 else
                           0.25 if not term.isascii() and len(term) == 1 else 1) for term in terms}
         total = sum(weights.values()) or 1
-        constraint_query = bool(_CONSTRAINT_QUERY.search(query))
+        constraint_query = taboo_query(query)
         ranked = []
         for fact in candidates:
             text = fact["plain"]

@@ -181,6 +181,8 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
         selected, deferred = [], []
         for fact, body in zip(facts, bodies):
             label = _fact_label(fact)
+            if fact.get("is_taboo"):
+                label = f"[禁忌] {label}".rstrip()
             if label and estimate_tokens(label + " ") <= overhead:
                 snippet = f"{label} {body}"
                 overhead -= estimate_tokens(label + " ")

@@ -29,7 +29,7 @@ from memengine.prompts import render_prompt
 from memengine.queryparse import parse_query_rules
 from memengine.reranker import (
     CalibratedLocalReranker, OpenAICompatibleReranker, Reranker, anchored_relevance, checked_scores,
-    evidence_pair_scores,
+    evidence_pair_scores, taboo_query,
 )
 from memengine.router import CASUAL, TASK, match_entities, route_query
 from memengine.storage.base import DEFAULT_SCOPE, RecallFilter, SCOPES
@@ -706,6 +706,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
         use_context_score = contextual and not backend.is_calibrated
         anchor_bonus = anchored_relevance(query, merged) if use_context_score else ()
         pair_scores = evidence_pair_scores(query, merged) if plan and plan.wide and not backend.is_calibrated else ()
+        tau_abs = self.tau_abs if self.tau_abs is not None else (0.18 if backend.is_calibrated else 0.12)
+        attend_taboo = not historical_query and taboo_query(query)
         buckets = {}
         temporary_terms = competition_terms(query) if any(f.get("expires_at") is not None for f in merged) else set()
         for index, (fact, ce_score) in enumerate(zip(merged, ce_scores)):
@@ -713,7 +715,9 @@ class CognitiveMemoryEngine(TaskWorkspace):
             role = roles.get(fact["id"])
             status_weight = self.superseded_weight if fact["status"] == "superseded" and not historical_query else 1.0
             temporal_weight = 1.12 if role == "latest" else 0.65 if role == "older" and status_weight == 1.0 else 1.0
-            tagged = score_bipolar({**fact, "ce_score": ce_score}, c_max=c_max, radius=radius,
+            attention = 1.15 if (attend_taboo and fact.get("is_taboo") and fact["status"] == "active" and role != "older"
+                                 and ce_score >= tau_abs and (not direct or fact["entity_anchor"])) else 1.0
+            tagged = score_bipolar({**fact, "ce_score": ce_score, "attention_weight": attention}, c_max=c_max, radius=radius,
                                     bipolar_lambda=self.bipolar_lambda, epsilon=self.epsilon,
                                     status_weight=status_weight,
                                     decay=1.0 if historical_query or (include_cold and fact["tier"] == "cold") else decay_factor(
@@ -746,6 +750,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
                 if fact["entity_anchor"] or temporary_terms.intersection(competition_terms(fact["plain"])):
                     tagged["temporary_priority"] = True
                     score *= 1.12
+            score *= attention
             tagged.update(score=score, final_score=score, bipolar_score=score, temporal_role=role, temporal_weight=temporal_weight)
             if role == "older" and not tagged.get("state_tag"):
                 tagged["state_tag"] = "[可能已过时/较早记录]"
@@ -761,7 +766,6 @@ class CognitiveMemoryEngine(TaskWorkspace):
                                      fact["memory_type"] != "procedural", rrf_order[fact["id"]]))
         if _trace is not None:
             reranked_ids = [fact["id"] for fact in ranked]
-        tau_abs = self.tau_abs if self.tau_abs is not None else (0.18 if backend.is_calibrated else 0.12)
         mismatches = sum(fact["version_mismatch"] for fact in ranked)
         ranked, identifier_mode = eligible_identifiers(ranked, query, historical_query, self.allow_empty_recall)
         strict_version = identifier_mode == "version"
@@ -792,7 +796,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
             gate_stats["empty_reason"] = "no_exact_identifier"
         if evidence_floor and kept and not wide_evidence:
             floor_ids = {fact["id"] for fact in floor}
-            kept = [fact for fact in kept if fact["id"] in floor_ids]
+            kept = [fact for fact in kept if fact["id"] in floor_ids or fact.get("attention_weight", 1.0) > 1.0]
         if historical_query and not (plan and plan.windows):
             def temporal_order(fact):
                 matched = fact["temporal_match"] and fact["ce_score"] >= tau_abs
@@ -1088,7 +1092,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
                                                "isolated") if key in row} for row in fallback_rows]
         offline = isinstance(self.llm, MockLLMClient)
         visible = {key: {"text": eligible.get(key, row)["text"], "kind": row["kind"],
-                         "status": row.get("verification_status") or row.get("role")}
+                         "status": row.get("verification_status") or row.get("role"),
+                         **({"is_taboo": True} if row.get("is_taboo") else {})}
                    for key, row in bundle["evidence_map"].items()
                    if key in eligible or (row["kind"] == "working_item" and row["verification_status"] == "unverified")}
         goal = next((row["text"] for row in bundle["items"] if row["kind"] == "task_goal"), "")
