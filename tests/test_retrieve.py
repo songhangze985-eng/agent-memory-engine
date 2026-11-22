@@ -8,7 +8,7 @@ from memengine.categories import (
 from memengine.engine import CognitiveMemoryEngine
 from memengine.llm import MockLLMClient
 from memengine.queryparse import parse_query_rules
-from memengine.vector import weighted_rrf
+from memengine.vector import score_quantiles, weighted_rrf
 
 
 def test_category_enum_is_the_fixed_twelve():
@@ -58,6 +58,18 @@ def test_weighted_rrf_prefers_vector_ranks_by_default():
     assert "v1" in ids
     assert ids.index("v1") < ids.index("h1")
     assert set(ids) == {"v1", "both", "v3", "h1"}
+
+
+def test_score_quantiles_scale_bm25_in_the_correct_direction():
+    hits = [{"id": "strong", "bm25_score": -9}, {"id": "middle", "bm25_score": -5},
+            {"id": "weak", "bm25_score": -1}]
+    scores = score_quantiles(hits, "bm25_score", lower_is_better=True)
+    assert scores["strong"] == 1 and scores["weak"] == 0
+    assert abs(scores["middle"] - .5) < 1e-12
+    assert not score_quantiles([hits[0]], "bm25_score")
+    ranked = weighted_rrf([], hits, normalized_channels=({}, scores))
+    assert [row["id"] for row in ranked] == ["strong", "middle", "weak"]
+    assert ranked[-1]["rrf_score"] == 0
 
 
 def test_unrelated_query_does_not_fall_back_to_recent_facts():

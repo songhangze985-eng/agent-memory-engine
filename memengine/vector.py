@@ -159,21 +159,39 @@ def rank_vector_hits(facts, scores, top_n):
     return [{**fact, "vector_score": float(score)} for score, fact in pairs[:max(0, top_n)]]
 
 
+def score_quantiles(hits, field, *, lower_is_better=False):
+    """Scale channel scores between their observed 10th and 90th percentiles."""
+    direction = -1 if lower_is_better else 1
+    scores = {str(hit["id"]): direction * hit[field] for hit in hits if field in hit}
+    if len(scores) < 2:
+        return {}
+    low, high = np.quantile(list(scores.values()), [.1, .9])
+    if low == high:
+        return {}
+    return {ident: float(min(1.0, max(0.0, (score - low) / (high - low)))) for ident, score in scores.items()}
+
+
 def weighted_rrf(vec_hits: list[dict], hash_hits: list[dict], w_vec: float = 0.65, w_hash: float = 0.35, k: int = 60,
-                 *, extra_channels=()) -> list[dict]:
+                 *, extra_channels=(), normalized_channels=()) -> list[dict]:
     """Weighted Reciprocal Rank Fusion. Rank is 1-based. Identity is fact id."""
     scores: dict[str, float] = {}
     keep: dict[str, dict] = {}
     channels = ((w_vec, vec_hits or []), (w_hash, hash_hits or []), *extra_channels)
     total_weight = sum(weight for weight, hits in channels if hits) or 1
-    for weight, hits in channels:
+    for index, (weight, hits) in enumerate(channels):
         seen = set()
+        normalized = normalized_channels[index] if index < len(normalized_channels) else {}
         for rank, fact in enumerate(hits, start=1):
             fact_id = str(fact.get("id") or "")
             if not fact_id or fact_id in seen:
                 continue
             seen.add(fact_id)
-            scores[fact_id] = scores.get(fact_id, 0.0) + weight * fact.get("rrf_factor", 1.0) / (k + rank)
+            weight_at_fact = weight * fact.get("rrf_factor", 1.0)
+            if fact_id in normalized:
+                contribution = weight_at_fact * normalized[fact_id] / (k + 1)
+            else:
+                contribution = weight_at_fact / (k + rank)
+            scores[fact_id] = scores.get(fact_id, 0.0) + contribution
             if fact_id not in keep:
                 keep[fact_id] = dict(fact)
             else:
