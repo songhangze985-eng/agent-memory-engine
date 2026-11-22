@@ -60,6 +60,47 @@ def test_compatible_and_wildcard_ranges_recall_only_satisfying_versions():
             assert {row["version_grade"] for row in ranked} == {"RANGE_SATISFIED"}
 
 
+def test_reconstructive_ablation_separates_inverted_lookup_and_graph_expansion(monkeypatch):
+    from dataclasses import replace
+
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        retain(engine, "Alice works on the Atlas launch.", speaker="Alice")
+        retain(engine, "The Atlas launch rehearsal moved to Friday.", speaker="Alice")
+        tracked = []
+        recall = engine._recall
+        inverted = store.search_entity_inverted
+        adjacent = store.adjacent_links
+
+        def track_inverted(entities, **options):
+            tracked.append(("inverted", set(entities)))
+            return inverted(entities, **options)
+
+        def track_graph(*args, **options):
+            tracked.append(("graph", set()))
+            return adjacent(*args, **options)
+
+        monkeypatch.setattr(store, "search_entity_inverted", track_inverted)
+        monkeypatch.setattr(store, "adjacent_links", track_graph)
+        for flags, expected in (
+            ({}, {"inverted", "graph"}),
+            ({"passive_expansion": False}, {"inverted"}),
+            ({"query_entity_inverted": False}, {"graph"}),
+            ({"query_entity_inverted": False, "passive_expansion": False}, set()),
+        ):
+            def ablated(*args, plan, **options):
+                return recall(*args, plan=replace(plan, **flags), **options)
+
+            monkeypatch.setattr(engine, "_recall", ablated)
+            tracked.clear()
+            result = engine.recall("What happened during the Atlas launch?",
+                                   mode="reconstructive", token_budget=256)
+            assert result["matched_entities"]
+            subjects = set(result["matched_entities"])
+            executed = {kind for kind, entities in tracked if kind == "graph" or entities == subjects}
+            assert executed == expected
+
+
 def test_four_graph_edges_and_two_hop_owner_isolation():
     engine = CognitiveMemoryEngine()
     with closing(engine.store) as store:
