@@ -2,8 +2,9 @@
 import re
 
 from memengine.chrono import TemporalSpan, date_iso, days_between, parse_session_clock
-from memengine.identifiers import compares_versions
-from memengine.temporal import competition_terms
+from memengine.identifiers import compares_versions, extract_identifiers
+from memengine.retrieval.coverage import explicit_facets
+from memengine.temporal import competition_terms, parse_temporal_intent
 from memengine.versioning import extract_versions, version_order
 from memengine.verification import admissible_evidence
 
@@ -21,13 +22,18 @@ def checked_reflection(engine, query, *, scope, task_id, reference_time, token_b
     owner = dict(zip(("user_id", "agent_id", "session_id"), scope))
     query_options = {**owner, "reference_time": reference_time, "token_budget": token_budget,
                      "packing_mode": "token_budget", "task_id": task_id}
-    first = engine.build_context(query, mode="single_query", **query_options)
+    compare = compares_versions(query)
+    directed = bool(explicit_facets(query) and not (compare or _DISTANCE.search(query) or extract_identifiers(query)))
+    if directed:
+        now = parse_session_clock(reference_time)
+        temporal = parse_temporal_intent(query, engine._now() if now is None else now)
+        directed = not temporal.is_historical and temporal.start_ts is None
+    first = engine.build_context(query, mode="reconstructive" if directed else "single_query", **query_options)
     evidence = {row["id"]: row for row in first["items"] if row["kind"] == "fact"}
     count = 1
-    compare = compares_versions(query)
     terms = competition_terms(query)
     coverage = set().union(*(competition_terms(row["plain"]) for row in list(evidence.values())[:3]))
-    if (_GAP.search(query) or compare) and (len(evidence) < 2 or terms-coverage or _DISTANCE.search(query)):
+    if not directed and (_GAP.search(query) or compare) and (len(evidence) < 2 or terms-coverage or _DISTANCE.search(query)):
         parts = [part.strip() for part in _SPLIT.split(query, maxsplit=1) if len(part.strip()) >= 4]
         # A full-query graph pass preserves the question while resolving a missing link.
         queries = [query] if len(parts) < 2 else parts
