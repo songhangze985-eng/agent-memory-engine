@@ -102,6 +102,71 @@ def test_explicit_preference_slot_archives_only_the_replaced_preference():
         assert rows[work]["status"] == "active"
 
 
+def test_one_explicit_preference_is_packed_before_sourced_scenario_evidence():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        commute = retain(engine, "My train commute takes forty minutes each way.", session_id="commute")
+        positive = retain(engine, "Alice Chen: I prefer long history podcasts.", session_id="likes")
+        negative = retain(engine, "I don't like loud podcasts.", session_id="dislikes")
+        request = retain(engine, "I would like a podcast recommendation.", session_id="commute")
+        foreign = retain(engine, "I prefer noisy morning podcasts.", user_id="another")
+        store.set_core_snapshot("Preserve local documents.", [])
+        before = store.conn.total_changes
+
+        result = engine.answer("Can you recommend a podcast for Alice Chen's commute?", token_budget=256,
+                               reference_time="2024-06-16", include_short_term=False)
+        selected = [row for row in result["items"] if row["kind"] == "fact"]
+        assert {row["id"] for row in selected[:2]} == {positive, negative}
+        assert {row["explicit_preference"]["polarity"] for row in selected[:2]} == {"positive", "negative"}
+        for row in selected[:2]:
+            assert row["preference_priority"] and len(row["source_turn_ids"]) == 1
+            assert f"fact:{row['id']}" in result["evidence_map"]
+        assert {commute, request} <= {row["id"] for row in selected}
+        assert all(not row["explicit_preference"] for row in selected if row["id"] in {commute, request})
+        assert foreign not in {row["id"] for row in selected}
+        cited = {ident for claim in result["claims"] for ident in claim["evidence_ids"]}
+        assert {f"fact:{ident}" for ident in (positive, negative, commute)} <= cited
+        assert result["token_breakdown"]["total"] <= 256 and result["dynamic_memory"].startswith("[偏好]")
+        factual = engine.build_context("How long is Alice Chen's train commute?", token_budget=256,
+                                       reference_time="2024-06-16", include_short_term=False)
+        assert factual["items"][0]["id"] == commute
+        assert factual["prefix_version"] == result["prefix_version"]
+        assert "history podcasts" not in result["system_prefix"]
+        assert store.conn.total_changes == before
+
+
+def test_short_preference_is_retained_without_a_length_threshold():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        first = retain(engine, "老周：我爱听纪实播客。", speaker="老周")
+        result = engine.build_context("老周喜欢听哪些播客？", reference_time="2024-06-16", token_budget=128)
+        lead = result["items"][0]
+        assert lead["id"] == first and lead["preference_priority"]
+        assert lead["explicit_preference"] == {"value": "纪实播客", "polarity": "positive"}
+        quote, = store.get_turn_window(lead["source_turn_ids"], window=0)
+        assert quote["text"] == "老周：我爱听纪实播客。"
+
+
+def test_revised_preference_is_available_by_history_and_removed_from_current_context():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        old = retain(engine, "I prefer green tea for breakfast.", mention_time="2024-05-01", session_id="first")
+        new = retain(engine, "I now prefer black coffee for breakfast.", mention_time="2024-05-02", session_id="second")
+        original, revision = store.get_fact_chain(old)
+        assert revision["id"] == new and revision["supersedes_id"] == old
+        assert set(original["source_turn_ids"]).isdisjoint(revision["source_turn_ids"])
+        engine.consolidate(force=True, timestamp=parse_session_clock("2024-05-03"))
+
+        current = engine.answer("What does Alice Chen prefer for breakfast?", token_budget=256,
+                                reference_time="2024-05-03", include_short_term=False)
+        assert f"fact:{new}" in current["evidence_map"]
+        assert "green tea" not in current["dynamic_memory"] and "green tea" not in current["response"]
+        assert "black coffee" in current["response"]
+        history = engine.answer("What did Alice Chen prefer for breakfast before the change?", token_budget=256,
+                                reference_time="2024-05-03", include_short_term=False)
+        assert any(f"fact:{old}" in claim["evidence_ids"] for claim in history["claims"])
+
+
 def test_claim_equivalences_preserve_subject_polarity_and_slot_values():
     options = {"equivalences": True}
     assert supports_claim("Alice purchased a piano.", "Alice bought a piano.", **options)

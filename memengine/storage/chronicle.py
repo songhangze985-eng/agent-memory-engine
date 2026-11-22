@@ -9,7 +9,7 @@ from math import exp
 import numpy as np
 
 from memengine.chrono import DAY, date_iso, occurrence, resolve_temporal_spans
-from memengine.lifecycle import allergy_slot
+from memengine.lifecycle import CURRENT_STATE_SLOT_PREFIXES, allergy_slot
 from memengine.linguistics import entity_name, index_text, stem_terms
 from memengine.storage.base import IDS, scope_where
 from memengine.textutil import merge_step_ids, normalize_entity, strip_step_tags
@@ -181,7 +181,7 @@ class Chronicle:
         self.invalidate_observations((data["user_id"], data["agent_id"]), [row["id"]], data["ingest_time"],
                                      compiled_line=row["plain"] if allergy else "")
         data.update(supersedes_id=row["id"], revision=row["revision"]+1, root_fact_id=row["root_fact_id"])
-        if not allergy:
+        if not data["attribute_slot"].startswith(CURRENT_STATE_SLOT_PREFIXES):
             for field in ("source_turn_ids", "source_step_ids"):
                 data[field] = dump(merge_step_ids(json.loads(row[field]), json.loads(data[field])))
 

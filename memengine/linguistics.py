@@ -44,10 +44,15 @@ def entity_name(name):
     return " ".join(name.casefold().strip(" .").split())
 
 
-def index_text(text, speaker, spans):
-    body = strip_step_tags(text)
+def strip_speaker_prefix(text, speaker):
     if speaker:
-        body = re.sub(r"^" + re.escape(speaker) + r":\s*", "", body, count=1, flags=re.I)
+        return re.sub(r"^" + re.escape(speaker) + r"[:：]\s*", "", text, count=1, flags=re.I)
+    return text
+
+
+def index_text(text, speaker, spans):
+    body = strip_speaker_prefix(strip_step_tags(text), speaker)
+    if speaker:
 
         def attribute(match):
             term = match[0].lower().replace("’", "'")

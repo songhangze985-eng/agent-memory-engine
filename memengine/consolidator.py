@@ -2,17 +2,13 @@
 
 from collections import defaultdict
 import json
-import re
 
 from memengine.assembler import _excerpt, render_prefix
 from memengine.chrono import date_iso
 from memengine.distance import is_noise
-from memengine.lifecycle import content_hash, normalized_content
+from memengine.lifecycle import CURRENT_STATE_SLOT_PREFIXES, LEGACY_PREFERENCE_SUMMARY, content_hash, normalized_content
 from memengine.notebook import format_fact_line
 from memengine.textutil import estimate_tokens, normalize_entity, strip_step_tags
-
-_PREFERENCE = re.compile(r"(?:偏好|更喜欢|喜欢|常用)\s*([^，。；.!?]{1,40})|\b(?:prefer|really like|always use)\s+([^,.!?;]{1,55})", re.I)
-_NEGATION = re.compile(r"不|没|未曾|\b(?:not|never|no|don't|doesn't|didn't)\b", re.I)
 
 
 def write_memory(store, text, *, scope, now, memory_type, source_turn_ids, derived_from_ids=(), tool_call_ids=(),
@@ -50,11 +46,12 @@ def refresh_profile(store, scope, now):
     rules = sorted((fact for fact in facts if fact["memory_type"] == "procedural"),
                    key=lambda fact: (-fact["success_count"], fact["plain"]))
     constraints = sorted({fact["plain"] for fact in facts if fact["memory_type"] == "fact" and fact["is_constraint"] and fact["expires_at"] is None
-                          and fact["epistemic_scope"] == "world" and not (fact["attribute_slot"] or "").startswith("allergy:")})
+                          and fact["epistemic_scope"] == "world" and not fact["explicit_preference"]
+                          and not (fact["attribute_slot"] or "").startswith(CURRENT_STATE_SLOT_PREFIXES)})
     # Stable order and text, with counts used only for choosing the rule set.
     profile, selected_rules = [], []
     stable = [fact["content"] for fact in observations if fact["confidence"] >= 0.8 and not fact.get("canonical_entity_id") and not fact.get("is_stale")
-              and (len(fact["source_turn_ids"]) >= 3 or fact["content"].startswith("多轮明确表达偏好"))]
+              and len(fact["source_turn_ids"]) >= 3 and not fact["content"].startswith(LEGACY_PREFERENCE_SUMMARY)]
     seen = set()
     for target, choices in ((profile, constraints), (selected_rules, [fact["plain"] for fact in rules]),
                             (profile, stable)):
@@ -95,10 +92,6 @@ def consolidate(store, *, user_id, agent_id, now, min_new_facts, force):
         for fact in facts:
             for tag in fact["entity_z_keys"] or fact["category_z_keys"]:
                 groups[f"多轮记录涉及「{normalize_entity(tag)}」。"].append(fact)
-            if not _NEGATION.search(fact["plain"]) and (preference := _PREFERENCE.search(fact["plain"])):
-                value = normalized_content(preference[1] or preference[2])
-                if value:
-                    groups[f"多轮明确表达偏好「{value}」。"].append(fact)
         observations, procedures = [], []
         for summary, group in sorted(groups.items()):
             refs = list(dict.fromkeys(fact["id"] for fact in group))
@@ -114,7 +107,7 @@ def consolidate(store, *, user_id, agent_id, now, min_new_facts, force):
         for fact in history:
             if (fact.get("canonical_entity_id") and fact["epistemic_scope"] in ("world", "experience")
                     and fact["expires_at"] is None and fact["root_fact_id"] in active_roots
-                    and (fact["status"] == "active" or not (fact["attribute_slot"] or "").startswith("allergy:"))):
+                    and (fact["status"] == "active" or not (fact["attribute_slot"] or "").startswith(CURRENT_STATE_SLOT_PREFIXES))):
                 entity_groups[fact["canonical_entity_id"]].append(fact)
         existing = {row["canonical_entity_id"]: row for row in store.list_observations(user_id=user_id, agent_id=agent_id, include_stale=True)
                     if row.get("canonical_entity_id")}

@@ -21,7 +21,9 @@ from memengine.embeddings import OpenAICompatibleEmbedder
 from memengine.extract import extract_facts, is_greeting
 from memengine.gate import precision_gate
 from memengine.identifiers import compares_versions, eligible_identifiers, extract_identifiers
-from memengine.lifecycle import allergy_slot, changes_state, content_hash, decay_factor, matching_attributes
+from memengine.lifecycle import (allergy_slot, changes_state, content_hash, decay_factor, explicit_preference,
+                                 matching_attributes, normalized_content)
+from memengine.linguistics import strip_speaker_prefix
 from memengine.llm import FatalLLMError, MockLLMClient, loads_json_object
 from memengine.notebook import ACTIONS, apply_write_op, format_fact_line, line_body, render_block
 from memengine.policy import REFUSAL, decide_layout, decide_origin, plan_answer
@@ -349,6 +351,12 @@ class CognitiveMemoryEngine(TaskWorkspace):
             extracted = facts or extract_facts(text)
             note = extracted[0] if extracted else {"topic": "健康禁忌", "zkeys": [], "isolated": False, "is_greeting": False}
             facts = [{**note, "text": text.strip(), "attribute": "", "value": slot.removeprefix("allergy:"), "delete": False}]
+        elif preference := _preference_for_turn(job):
+            offline = True
+            facts = facts or extract_facts(text) or [{
+                "text": text.strip(), "topic": "情绪观点", "attribute": "", "value": preference["value"],
+                "zkeys": ["类目:情绪观点"], "isolated": False, "is_greeting": False,
+            }]
         candidates = [] if greeting else self._candidate_blocks(text, scope, facts)
         if greeting:
             ops = []
@@ -484,7 +492,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
         if not isinstance(self.llm, MockLLMClient):
             unresolved = {}
             for turn_id, job in jobs.items():
-                if _allergy_slot_for_turn(job):
+                if _allergy_slot_for_turn(job) or _preference_for_turn(job):
                     operations.extend(self._apply_job(job)["operations"])
                     continue
                 with self.store.reuse_write_vectors():
@@ -829,6 +837,26 @@ class CognitiveMemoryEngine(TaskWorkspace):
             if plan.graph and not plan.versions and not plan.windows:
                 useful = diversify_episodes(query, useful)
             kept = [_compact_evidence(query, fact) for fact in useful]
+        if parsed["preference_query"] and not (historical_query or exact_query or strict_version):
+            preferred, distinct = [], set()
+            preference_budget = token_budget // 3 if len(kept) > 1 else token_budget
+            for fact in kept:
+                preference = fact.get("explicit_preference")
+                if (not preference or fact["status"] != "active" or fact["ce_score"] < tau_abs
+                        or (direct and not fact["entity_anchor"])):
+                    continue
+                key = fact["canonical_entity_id"], preference["polarity"], normalized_content(preference["value"])
+                cost = estimate_tokens(fact["text"])
+                if key in distinct or cost > preference_budget:
+                    continue
+                distinct.add(key)
+                preferred.append({**fact, "preference_priority": True})
+                preference_budget -= cost
+                if len(preferred) == 2:
+                    break
+            if preferred:
+                preferred_ids = {fact["id"] for fact in preferred}
+                kept = [*preferred, *(fact for fact in kept if fact["id"] not in preferred_ids)]
         selected = _fit_context(kept, top_k, token_budget)
         if _ce_budget is not None:
             gate_stats.update(ce_pair_limit=_ce_budget.limit, ce_pairs_scored=_ce_budget.limit - _ce_budget.remaining)
@@ -1033,7 +1061,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
             current = {row["id"]: row for row in self.store.facts_by_ids(
                 [row["id"] for row in ranking], scope=(user_id, agent_id, session_id))}
             metadata = ("entity_anchor", "zone", "final_score", "vector_score", "ce_score", "temporal_match",
-                        "exact_ident_hit", "temporal_role", "context_anchor_turn_id")
+                        "exact_ident_hit", "temporal_role", "context_anchor_turn_id", "preference_priority")
             result = {**retrieved, "ranked": [{**current[row["id"]], **{k: row[k] for k in metadata if k in row}}
                                               for row in ranking if row["id"] in current]}
             if timestamp is None and reference_time is None and result["validity_as_of"] is not None:
@@ -1098,8 +1126,9 @@ class CognitiveMemoryEngine(TaskWorkspace):
         # The dated presentation is visible in the bundle. The deterministic planner
         # quotes only the complete ledger statement when it is present in the excerpt.
         for index, row in enumerate(fallback_rows):
-            if (row.get("attribute_slot") or "").startswith("allergy:"):
-                quote = strip_step_tags(row["plain"]).strip()
+            if row["kind"] == "fact" and (bundle["parsed_query"].get("preference_query")
+                                          or (row.get("attribute_slot") or "").startswith("allergy:")):
+                quote = strip_speaker_prefix(strip_step_tags(row["plain"]).strip(), row.get("speaker"))
                 if row["text"].endswith(quote):
                     fallback_rows[index] = {**row, "text": quote}
         entities = bundle["matched_entities"]
@@ -1189,6 +1218,12 @@ def _allergy_slot_for_turn(turn):
     return None
 
 
+def _preference_for_turn(turn):
+    if turn["role"] == "user":
+        return explicit_preference(turn["text"], (turn.get("chronicle") or {}).get("speaker"))
+    return None
+
+
 def _epistemic_scope(source, plain):
     if source["role"] == "tool":
         return "experience"
@@ -1208,8 +1243,7 @@ def _compact_evidence(query, fact):
     occurrence = date_iso(fact.get("occurrence_start"))
     date = occurrence or (date_iso(fact.get("mention_time")) if speaker else None)
     prefix = f"[{' | '.join(part for part in (date, speaker) if part)}] " if date or speaker else ""
-    if speaker:
-        body = re.sub(r"^" + re.escape(speaker) + r":\s*", "", body, count=1, flags=re.I)
+    body = strip_speaker_prefix(body, speaker)
     body = _excerpt(body, competition_terms(query), 76 - estimate_tokens(prefix))
     return {**fact, "text": prefix + body}
 
