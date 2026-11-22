@@ -218,6 +218,62 @@ def test_retelling_a_taboo_does_not_move_it_to_the_frequency_belt():
             assert lead["attention_weight"] > 1 and lead["bipolar_weight"] == 1
 
 
+def test_allergy_revocation_across_sessions_uses_current_and_historical_evidence():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        original = "I am allergic to peanuts."
+        old = retain(engine, original, speaker="Alice", mention_time="2024-06-01", session_id="one")
+        shellfish = retain(engine, "I am allergic to shellfish.", speaker="Alice", mention_time="2024-06-01", session_id="one")
+        foreign = retain(engine, original, speaker="Alice", mention_time="2024-06-01", user_id="foreign")
+        engine.consolidate(force=True, timestamp=parse_session_clock("2024-06-01"))
+        store.set_core_snapshot(original, ["Preserve the meeting agenda"])
+        newer = retain(engine, "I am no longer allergic to peanuts.", speaker="Alice", mention_time="2024-06-02", session_id="two")
+        chain = store.get_fact_chain(old)
+        assert [(row["id"], row["status"]) for row in chain] == [(old, "superseded"), (newer, "active")]
+        assert chain[1]["supersedes_id"] == old and chain[0]["valid_until"] == parse_session_clock("2024-06-02")
+        old_turns = set(chain[0]["source_turn_ids"])
+        assert old_turns.isdisjoint(chain[1]["source_turn_ids"])
+        assert store.get_line(foreign, scope=("foreign", "default", None))["status"] == "active"
+        assert store.get_core_snapshot()["procedural_rules"] == ["Preserve the meeting agenda"]
+        assert original not in store.get_core_snapshot()["core_profile"]
+
+        engine.consolidate(force=True, timestamp=parse_session_clock("2024-06-03"))
+        for budget in (None, 256):
+            current = engine.answer("What is Alice allergic to?", reference_time="2024-06-03", token_budget=budget)
+            assert not current["abstained"] and original not in current["response"]
+            cited = {key for claim in current["claims"] for key in claim["evidence_ids"]}
+            assert {f"fact:{newer}", f"fact:{shellfish}"} <= cited and f"fact:{old}" not in cited
+            assert original not in current["dynamic_memory"]
+            assert old_turns.isdisjoint(current["evidence_turn_ids"])
+        history = engine.answer("Before June 2, 2024, what was Alice allergic to?",
+                                reference_time="2024-06-03", token_budget=256)
+        assert not history["abstained"] and original in history["response"]
+        assert {f"fact:{old}"} <= {key for claim in history["claims"] for key in claim["evidence_ids"]}
+        assert set(history["evidence_map"][f"fact:{old}"]["source_turn_ids"]) == old_turns
+
+
+def test_allergy_slots_repair_preexisting_cross_session_statements(tmp_path, monkeypatch):
+    from memengine.storage.sqlite import SQLiteStore
+
+    path = tmp_path / "legacy-allergy.db"
+    engine = CognitiveMemoryEngine(db_path=str(path))
+    with closing(engine.store) as store, monkeypatch.context() as legacy:
+        legacy.setattr("memengine.engine.allergy_slot", lambda *_: None)
+        legacy.setattr("memengine.storage.chronicle.allergy_slot", lambda *_: None)
+        old = retain(engine, "I am allergic to peanuts.", speaker="Alice", mention_time="2024-06-01", session_id="one")
+        new = retain(engine, "I am no longer allergic to peanuts.", speaker="Alice", mention_time="2024-06-02", session_id="two")
+        assert store.get_line(old, scope=("default", "default", None))["active"]
+        store.set_core_snapshot("I am allergic to peanuts.", [])
+        with store.transaction():
+            store.conn.execute("DELETE FROM meta WHERE key='allergy_slots_version'")
+
+    for _ in range(2):
+        with closing(SQLiteStore(path)) as store:
+            old_row, new_row = store.get_fact_chain(old)
+            assert old_row["status"] == "superseded" and new_row["id"] == new and new_row["supersedes_id"] == old
+            assert not store.get_core_snapshot()["core_profile"]
+
+
 def test_reflect_fills_two_event_gap_and_cites_only_retrieved_memory():
     engine = CognitiveMemoryEngine()
     with closing(engine.store) as store:

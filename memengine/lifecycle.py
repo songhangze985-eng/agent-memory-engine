@@ -18,6 +18,13 @@ _TABOO = re.compile(
 _TABOO_HEADING = re.compile(r"^[^。；!?！？\n:：]{0,24}(?:禁忌|allergies|dietary restrictions)\s*[:：]\s*", re.I)
 _TABOO_CONTEXT = re.compile(
     r"[?？]|^(?:如果|假如|假设|据说|听说|曾经|以前)|不再对|(?:没|不)\s*过敏|不是对|并非对")
+_ALLERGY_ASSERTIONS = (
+    re.compile(r"(?P<subject>I|[A-Z][\w'-]*(?: [A-Z][\w'-]*){0,2})"
+               r"(?i:(?:\s+(?:am|is)|['’](?:m|s))\s+(?:(?:currently|no longer|not)\s+)?"
+               r"allergic\s+to\s+(?P<allergen>[\w-]+(?: [\w-]+){0,4}))[.!！。]?"),
+    re.compile(r"(?P<subject>我|[\u4e00-\u9fff]{2,4}?)(?:不再|已经不|现在)?对"
+               r"(?P<allergen>[\w-]{1,24}?)(?:不)?过敏[.!！。]?"),
+)
 _DECISIVE = re.compile(r"(?<!\w)[+-]?\d[\d.,:/-]*\d|\d|[一二两三四五六七八九十]+(?=[年月日点分周次元])|"
                        r"周[一二三四五六日天]|上午|下午|昨天|今天|明天|去年|上周|下周|不再|没有|不是|取消|撤销|禁止|不|"
                        r"\b(?:not|never|no|without|cancel\w*|yesterday|today|tomorrow|monday|tuesday|"
@@ -40,6 +47,18 @@ def is_constraint(text):
 def is_taboo(text):
     body = _TABOO_HEADING.sub("", strip_step_tags(text).strip())
     return bool(_TABOO.search(body) and not _TABOO_CONTEXT.search(body))
+
+
+def allergy_slot(text, speaker):
+    """Resolve a whole explicit allergy statement to its speaker's state slot."""
+    if not speaker:
+        return None
+    body = strip_step_tags(text).strip()
+    for pattern in _ALLERGY_ASSERTIONS:
+        match = pattern.fullmatch(body)
+        if match and normalized_content(match["subject"]) in {"i", "我", normalized_content(speaker)}:
+            return "allergy:" + normalized_content(match["allergen"])
+    return None
 
 
 def changes_state(text):

@@ -145,7 +145,9 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
         items.append(item)
         return True
 
-    facts = [fact for fact in result["ranked"] if not fact.get("is_stale")]
+    historical = result["parsed_query"]["query_type"] == "TIME_TRAVEL"
+    facts = [fact for fact in result["ranked"] if not fact.get("is_stale")
+             and (historical or fact["status"] == "active" or not (fact.get("attribute_slot") or "").startswith("allergy:"))]
     if facts:
         wide = result.get("packing_mode") == "token_budget"
         scope = result["scope"]

@@ -255,6 +255,7 @@ class SQLiteStore(Chronicle, WorkspaceStore):
                 BEGIN UPDATE fact_vectors SET cache_generation=cache_generation+1 WHERE fact_id=NEW.fact_id; END""")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_validity ON facts(user_id,agent_id,event_time_start,expires_at)")
             self.migrate_workspace()
+            self.migrate_allergy_slots()
 
     def health_check(self):
         return {"ok": self.conn.execute("SELECT 1").fetchone()[0] == 1, "backend": "sqlite",
@@ -400,9 +401,9 @@ class SQLiteStore(Chronicle, WorkspaceStore):
         if not turn_ids or as_of is None:
             return set()
         where, args = _scope_where(scope, "f.")
-        inactive = "(f.expires_at IS NOT NULL AND (f.expires_at<=? OR f.valid_from>?))"
-        if include_superseded:
-            inactive = f"({inactive} OR (f.status!='active' AND (f.origin_turn IS NULL OR f.origin_turn=CAST(j.value AS BIGINT))))"
+        stale_source = "f.status!='active'" if include_superseded else "f.status='superseded' AND f.attribute_slot LIKE 'allergy:%'"
+        inactive = f"""((f.expires_at IS NOT NULL AND (f.expires_at<=? OR f.valid_from>?))
+            OR ({stale_source} AND (f.origin_turn IS NULL OR f.origin_turn=CAST(j.value AS BIGINT))))"""
         rows = self.conn.execute(f"""SELECT DISTINCT j.value AS turn_id
             FROM facts f, json_each(f.source_turn_ids) j
             WHERE {where} AND {inactive}
@@ -674,16 +675,15 @@ class SQLiteStore(Chronicle, WorkspaceStore):
             self._forget_vectors(scope, removed_ids if hard else [row["id"]])
             return True
 
-    def invalidate_observations(self, scope, source_ids, stamp):
+    def invalidate_observations(self, scope, source_ids, stamp, *, compiled_line=""):
         rows = self.conn.execute(f"""UPDATE facts AS o SET is_stale=1
             WHERE o.user_id=? AND o.agent_id=? AND o.memory_type='observation'
               AND o.status='active' AND o.is_stale=0 AND EXISTS (
                   SELECT 1 FROM json_each(o.derived_from_ids) j WHERE j.value IN ({_IDS})
               ) RETURNING plain""", (*scope[:2], _dump(source_ids))).fetchall()
-        if not rows:
+        if not rows and not compiled_line:
             return
-        # Remove only compiled lines backed by the newly invalidated observations.
-        invalid = {" ".join(strip_step_tags(row["plain"]).split()) for row in rows}
+        invalid = {" ".join(strip_step_tags(text).split()) for text in (compiled_line, *(row["plain"] for row in rows))}
         user, agent = scope[:2]
         snapshot = self.get_core_snapshot(user_id=user, agent_id=agent)
         lines = snapshot["core_profile"].splitlines()
