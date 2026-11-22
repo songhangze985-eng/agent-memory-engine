@@ -165,14 +165,14 @@ def admissible_evidence(bundle, *, query=""):
     return eligible
 
 
-def assess_claims(payload, eligible, *, alias_lookup=None, claim_time=None):
+def assess_claims(payload, eligible, *, alias_lookup=None, claim_time=None, visible_only=False):
     explicit = payload.get("claims")
     claims = explicit if explicit is not None else [{"text": text, "evidence_ids": []}
                                                     for text in claims_from_text(payload["final_answer"])]
     approved, unverified = [], []
 
     def supports(text, row):
-        body = row.get("plain") or row["text"]
+        body = row["text"] if visible_only else row.get("plain") or row["text"]
         options = dict(equivalences=True, claim_time=claim_time, evidence_time=row.get("mention_time"))
         if supports_claim(text, body, **options):
             return True

@@ -92,16 +92,18 @@ def checked_reflection(engine, query, *, scope, task_id, reference_time, token_b
         citations = dict.fromkeys(key for claim in claims for key in claim["evidence_ids"])
         cited = [eligible[key] for key in citations]
         provisional = answer.get("provisional_item_ids", [])
+        boundaries = {key: answer[key] for key in ("partial", "answered_facets", "unanswered_facets") if key in answer}
     else:
         claims = [{"text": direct, "evidence_ids": [row["evidence_id"] for row in cited]}]
         provisional = []
+        boundaries = {}
     facts = [row for row in cited if row["kind"] in {"fact", "observation"}]
     return {"answer": direct, "cited_memory_ids": [row["id"] for row in facts],
             "cited_turn_ids": sorted({turn for row in cited for turn in row.get("source_turn_ids", [])}
                                      | {row["turn_id"] for row in cited if "turn_id" in row}),
             "temporal_chain": [_present(row) for row in sorted(facts, key=lambda row: (
                 row["occurrence_start"] if row.get("occurrence_start") is not None else row.get("mention_time", 0), row["id"]))],
-            "rounds_used": count, "claims": claims, "abstained": not claims, "provisional_item_ids": provisional}
+            "rounds_used": count, "claims": claims, "abstained": not claims, "provisional_item_ids": provisional, **boundaries}
 
 
 def recent_observation_evidence(store, facts, scope, as_of, observations=None):

@@ -37,7 +37,7 @@ from memengine.router import CASUAL, TASK, match_entities, route_query
 from memengine.storage.base import DEFAULT_SCOPE, RecallFilter, SCOPES
 from memengine.storage.factory import open_store
 from memengine.retrieval.activation import RecallPlan, calendar_relevance, query_overlap
-from memengine.retrieval.coverage import cover_evidence
+from memengine.retrieval.coverage import answered_facets, cover_evidence
 from memengine.retrieval.operators import recall
 from memengine.retrieval.rerank_budget import RerankBudget
 from memengine.versioning import extract_versions
@@ -1109,10 +1109,14 @@ class CognitiveMemoryEngine(TaskWorkspace):
     def _answer_from_context(self, query, bundle):
         if bundle["route"] == CASUAL:
             return {**bundle, "response": "", "reasoning": None, "llm_fallback": False, "claims": [], "abstained": False}
-        refusal = ("没有找到足够的证据。" if re.search(r"[\u3400-\u9fff]", query) else "Insufficient evidence to answer.")
+        chinese = bool(re.search(r"[\u3400-\u9fff]", query))
+        refusal = "没有找到足够的证据。" if chinese else "Insufficient evidence to answer."
+        facets = [row["facet"] for row in bundle["lexical_facet_coverage"]["facets"]]
         if bundle["empty_recall"]:
-            response = "没有找到相关记忆。" if re.search(r"[\u3400-\u9fff]", query) else "No relevant memory found."
-            return {**bundle, "response": response, "reasoning": None, "llm_fallback": False, "claims": [], "abstained": True}
+            response = _facet_boundary(facets, chinese) if facets else (
+                "没有找到相关记忆。" if chinese else "No relevant memory found.")
+            return {**bundle, "response": response, "reasoning": None, "llm_fallback": False, "claims": [],
+                    "abstained": True, "partial": False, "answered_facets": {}, "unanswered_facets": facets}
 
         query_type = bundle["parsed_query"]["query_type"]
         eligible = admissible_evidence(bundle, query=query)
@@ -1177,7 +1181,12 @@ class CognitiveMemoryEngine(TaskWorkspace):
                 aliases[ident] = self.store.unique_entity_aliases(ident, (scope["user_id"], scope["agent_id"]))
             return aliases.get(ident, ())
 
-        approved, unresolved = assess_claims(data, eligible, alias_lookup=aliases_for, claim_time=bundle["validity_as_of"])
+        approved, unresolved = assess_claims(data, eligible, alias_lookup=aliases_for, claim_time=bundle["validity_as_of"],
+                                             visible_only=bool(facets))
+        answered = {}
+        if facets:
+            answered, approved = answered_facets(facets, approved, eligible, entities)
+        missing = [facet for facet in facets if facet not in answered]
         task_id = bundle["task_id"]
         provisional = []
         if bundle["task_status"] == "active":
@@ -1189,11 +1198,15 @@ class CognitiveMemoryEngine(TaskWorkspace):
                             if eligible[key]["session_id"] == bundle["workspace_session_id"]]
                     provisional.append(self.record_provisional_claim(task_id, claim["text"], refs, **owner))
         text = " ".join(row["text"] for row in approved)
-        response = (data["final_answer"] if approved and not unresolved and "claims" not in data else text) or refusal
+        if facets:
+            response = "\n\n".join(part for part in (text, _facet_boundary(missing, chinese)) if part)
+        else:
+            response = (data["final_answer"] if approved and not unresolved and "claims" not in data else text) or refusal
         safe = {"evidence_synthesis": text, "anti_intuitive_override": bool(approved and data["anti_intuitive_override"]),
                 "rejected_noise_ids": [item for item in data["rejected_noise_ids"] if f"fact:{item}" in eligible]}
         return {**bundle, "response": response, "reasoning": safe, "llm_fallback": used_fallback,
-                "claims": approved, "provisional_item_ids": provisional, "abstained": not approved}
+                "claims": approved, "provisional_item_ids": provisional, "abstained": not approved,
+                "partial": bool(approved and missing), "answered_facets": answered, "unanswered_facets": missing}
 
     def timeline_stats(self, *, user_id="default", agent_id="default", session_id=None) -> dict:
         scope = (user_id, agent_id, session_id)
@@ -1220,6 +1233,16 @@ class CognitiveMemoryEngine(TaskWorkspace):
         self.fallback_count += 1
         return fallback(), True
 
+
+
+def _facet_boundary(facets, chinese):
+    if not facets:
+        return ""
+    if chinese:
+        names = "、".join(f"「{facet}」" for facet in facets)
+        return f"现有证据尚无法核实{names}。"
+    names = ", ".join(f'“{facet}”' for facet in facets)
+    return f"The available evidence could not verify {names}."
 
 
 def _allergy_slot_for_turn(turn):

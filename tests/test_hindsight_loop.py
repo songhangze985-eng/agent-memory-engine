@@ -204,6 +204,31 @@ def test_facet_coverage_packs_independent_evidence_before_duplicate_sessions():
         assert duplicate not in {row["id"] for row in packed} and store.conn.total_changes == before
 
 
+def test_partial_answer_distinguishes_unverified_facets_from_cited_facts():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        commute = retain(engine, "My commute duration is forty minutes.", speaker="Alice", session_id="one")
+        unknown = retain(engine, "My noise tolerance is unknown.", speaker="Alice", session_id="two")
+        retain(engine, "My podcast genre is historical fiction.", speaker="Alice", user_id="another")
+        query = "What did Alice say about commute duration, podcast genre, and noise tolerance?"
+        before = store.conn.total_changes
+
+        answer = engine.answer(query, token_budget=144, include_short_term=False)
+        assert answer["lexical_facet_coverage"]["covered_at_10"] == 2
+        assert answer["partial"] and not answer["abstained"]
+        assert answer["answered_facets"] == {"commute duration": [f"fact:{commute}"]}
+        assert answer["unanswered_facets"] == ["podcast genre", "noise tolerance"]
+        assert "forty minutes" in answer["response"] and "could not verify" in answer["response"]
+        assert f"fact:{unknown}" not in {key for claim in answer["claims"] for key in claim["evidence_ids"]}
+        reflected = engine.reflect(query, token_budget=144)
+        assert reflected["partial"] and reflected["answered_facets"] == answer["answered_facets"]
+        assert reflected["unanswered_facets"] == answer["unanswered_facets"]
+        empty = engine.answer(query, user_id="empty")
+        assert empty["abstained"] and not empty["partial"] and not empty["claims"]
+        assert set(empty["unanswered_facets"]) == {"commute duration", "podcast genre", "noise tolerance"}
+        assert store.conn.total_changes == before
+
+
 def test_claim_equivalences_preserve_subject_polarity_and_slot_values():
     options = {"equivalences": True}
     assert supports_claim("Alice purchased a piano.", "Alice bought a piano.", **options)
