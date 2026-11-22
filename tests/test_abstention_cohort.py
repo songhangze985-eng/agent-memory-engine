@@ -55,3 +55,27 @@ def test_near_neighbor_support_stays_in_the_other_tenant():
         assert support not in owner["dynamic_memory"]
         assert support in neighbor["dynamic_memory"]
         assert all(row["user_id"] == case["user_id"] for row in owner["evidence_map"].values())
+
+
+def test_calibration_counts_source_groups_once_and_keeps_threshold_ties():
+    from eval.abstention_calibration import measure, score_floors
+
+    rows = [
+        {"group": str(index), "runtime_group": "multi-facet", "outcome": "complete",
+         "features": {"support": 0.75}, "empty": False, "variant": "answerable"}
+        for index in range(49)
+    ]
+    rows.append({**rows[0], "outcome": "partial", "variant": "partial_evidence", "features": {"support": 0.5}})
+    assert score_floors(rows[1:49], "support")["multi-facet"]["threshold"] is None
+    thresholds = score_floors(rows, "support")
+    assert thresholds["multi-facet"] == {"groups": 49, "threshold": 0.5}
+
+    negatives = [
+        {**rows[0], "outcome": "unsupported", "variant": "evidence_removed", "features": {"support": 0.25}},
+        {**rows[0], "outcome": "unsupported", "variant": "evidence_removed", "features": {"support": 0.0}, "empty": True},
+    ]
+    measured, _ = measure([rows[-1], *negatives], "support", thresholds)
+    assert measured["partial"]["total_rejection_rate"] == 0
+    assert measured["unsupported"]["baseline_empty"] == 1
+    assert measured["unsupported"]["additional_rejected"] == 1
+    assert measured["unsupported"]["total_rejection_rate"] == 1
