@@ -5,10 +5,11 @@ import unicodedata
 from fractions import Fraction
 
 from memengine.chrono import resolve_temporal_spans
+from memengine.identifiers import compares_versions
 from memengine.linguistics import entity_name
 from memengine.textutil import strip_step_tags
 from memengine.temporal import competition_terms
-from memengine.versioning import extract_versions, version_order
+from memengine.versioning import extract_versions, score_version_match, version_order
 
 
 _CLAUSE = re.compile(r"(?<=[。！？!?;；])\s*|(?<=\.)\s+|\n+")
@@ -122,10 +123,25 @@ def fact_is_current(row, as_of, historical):
                                   and (row.get("valid_from") is None or row["valid_from"] <= as_of))))
 
 
-def admissible_evidence(bundle):
+def _version_clauses(text, wanted):
+    families = {version.product_family for version in wanted}
+    unscoped = "default_pkg" in families
+    families.add("default_pkg")
+    scoped = []
+    for clause in _CLAUSE.split(text):
+        versions = [version for version in extract_versions(clause) if unscoped or version.product_family in families]
+        if versions and all(any(score_version_match(target, version).match_type in
+                                {"EXACT", "CONTAINED_SPECIFIC", "RANGE_SATISFIED"} for target in wanted)
+                            for version in versions):
+            scoped.append(clause.strip())
+    return "\n".join(scoped)
+
+
+def admissible_evidence(bundle, *, query=""):
     scope = bundle["scope"]
     as_of = bundle["validity_as_of"]
     historical = bundle["parsed_query"]["query_type"] == "TIME_TRAVEL"
+    wanted = extract_versions(query) if query and not historical and not compares_versions(query) else ()
     eligible = {}
     for ident, row in bundle["evidence_map"].items():
         if any(row.get(key) != scope[key] for key in ("user_id", "agent_id")):
@@ -140,6 +156,11 @@ def admissible_evidence(bundle):
                 continue
         elif row.get("role") not in {"user", "tool"}:
             continue
+        if wanted:
+            text = _version_clauses(row["text"], wanted)
+            if not text:
+                continue
+            row = {**row, "plain": text, "text": text}
         eligible[ident] = row
     return eligible
 

@@ -55,6 +55,45 @@ def test_buffer_answer_and_restart_without_fact_write(tmp_path):
         assert not engine.store.snapshot(scope=KEY)
 
 
+def test_answer_rejects_other_versions_even_when_recent_turns_are_available():
+    engine = CognitiveMemoryEngine(clock=lambda: 1735689600)
+    query = "Which cache does Python v3.12.0 support?"
+    with closing(engine.store):
+        engine.retain("Python v3.11.4 supports the Elm cache.", **OWNER)
+        engine.retain("Python v3.12.0 supports the Oak cache.", **{**OWNER, "user_id": "other"})
+        response = engine.answer(query, token_budget=2048, **OWNER)
+        assert response["gate_stats"]["empty_reason"] == "no_exact_version"
+        assert response["abstained"] and not response["claims"]
+
+
+def test_buffered_version_can_answer_with_only_its_supporting_clause():
+    engine = CognitiveMemoryEngine()
+    query = "Which cache does Python v3.12.0 support?"
+    with closing(engine.store):
+        turn = engine.buffer_turn("Python v3.11.4 supports the Elm cache; "
+                                  "Python v3.12.0 supports the Oak cache.", **OWNER)
+        response = engine.answer(query, **OWNER)
+        assert not response["abstained"]
+        assert "Oak cache" in response["response"] and "Elm cache" not in response["response"]
+        assert response["claims"][0]["evidence_ids"] == [f"turn:{turn}"]
+
+
+def test_workspace_evidence_must_match_the_requested_version():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store):
+        content = "Python v3.11.4 supports the Elm cache."
+        turn = engine.buffer_turn(content, **OWNER)
+        task = engine.start_task("Verify the runtime cache", **OWNER)
+        item = engine.record_provisional_claim(task, content, [turn], **OWNER)
+        engine.verify_task_item(task, item, "user_confirmed", turn, **OWNER)
+        options = {"task_id": task, "include_short_term": False, **OWNER}
+        missing = engine.answer("Which cache does Python v3.12.0 support?", **options)
+        assert missing["abstained"] and not missing["claims"]
+        present = engine.answer("Which cache does Python v3.11.4 support?", **options)
+        assert not present["abstained"]
+        assert present["claims"][0]["evidence_ids"] == [f"item:{item}"]
+
+
 def test_reflection_stages_unsupported_claim_and_gate_promotes_verified_source():
     claim = "Atlas uses Python v3.11.4."
     engine = CognitiveMemoryEngine(llm=ProposedClaim(claim, ["turn:1"]))

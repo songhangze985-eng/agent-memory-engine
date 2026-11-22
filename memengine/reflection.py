@@ -39,7 +39,7 @@ def checked_reflection(engine, query, *, scope, task_id, reference_time, token_b
                     evidence.setdefault(row["id"], row)
     bundle = (engine.build_context(query, **query_options, retrieved={**first, "ranked": list(evidence.values())})
               if count > 1 else first)
-    eligible = admissible_evidence(bundle)
+    eligible = admissible_evidence(bundle, query=query)
     ranked = [row for row in eligible.values() if row["kind"] in {"fact", "observation"}]
     direct = None
     cited = ranked
