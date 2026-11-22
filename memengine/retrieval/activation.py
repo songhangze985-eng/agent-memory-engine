@@ -18,7 +18,8 @@ class RecallPlan:
     versions: tuple = ()
     graph: bool = False
     wide: bool = False
-    channel_quotas: bool = False
+    channel_quotas: frozenset[str] = frozenset()
+    route_channel_quotas: bool = False
     semantic_weighting: bool = False
     query_entity_inverted: bool = True
     passive_expansion: bool = True

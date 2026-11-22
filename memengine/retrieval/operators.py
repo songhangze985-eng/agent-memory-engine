@@ -1,4 +1,5 @@
 """Candidate generation and weighted RRF shared by recall modes."""
+from memengine.chrono import temporal_query
 from memengine.identifiers import compares_versions, extract_identifiers
 from memengine.storage.sqlite import key_type
 from memengine.linguistics import stem_features
@@ -20,15 +21,24 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
     expansions = " ".join(stem_features(query)) if plan and plan.wide else ""
     query_index = f"{query} {expansions}" if expansions else query
     semantic_query = parsed["semantic_vector_query"]
-    quotas = bool(plan and plan.channel_quotas)
+    wanted = extract_identifiers(query)
+    filtered_time = filters is not None and (filters.time_start is not None or filters.time_end is not None)
+    temporal_constraint = (temporal.is_historical or temporal.start_ts is not None
+                           or temporal.end_ts is not None or filtered_time)
+    quotas = plan.channel_quotas if plan else frozenset()
     reweight = bool(plan and plan.semantic_weighting)
     hashed = bool((expansions or quotas or reweight) and store.embedder.model_name.startswith("hash-"))
+    if quotas and plan.route_channel_quotas and (
+        not (plan.wide and plan.graph and hashed)
+        or wanted or plan.versions or plan.windows or temporal_constraint or temporal_query(query)
+    ):
+        quotas = frozenset()
     if expansions and hashed:
         semantic_query = f"{semantic_query} {expansions}"
     named = bool(plan and any(key.startswith("entity:") and normalize_entity(key) in query.casefold()
                               for key in direct))
-    dense_limit = min(per_channel_k, 42 if hashed else 50) if quotas else per_channel_k
-    lexical_limit = min(per_channel_k, 36 if hashed or named else 24) if quotas else per_channel_k
+    dense_limit = min(per_channel_k, 42 if hashed else 50) if "dense" in quotas else per_channel_k
+    lexical_limit = min(per_channel_k, 36 if hashed or named else 24) if "lexical" in quotas else per_channel_k
     dense = vector_search(semantic_query, **{**options, "top_n": dense_limit})
     lexical = store.search_lexical(query_index, **{**options, "top_n": lexical_limit})
     entities = direct or parsed["entities"]
@@ -37,19 +47,16 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
     timed = []
     previous = (temporal.is_historical and temporal.order_hint == "latest"
                 and temporal.start_ts is None and temporal.end_ts is None)
-    filtered_time = filters is not None and (filters.time_start is not None or filters.time_end is not None)
     indexed_window = plan and plan.windows and not temporal.rev_index and not temporal.order_hint and not filtered_time
-    if not indexed_window and (temporal.is_historical or temporal.start_ts is not None or temporal.end_ts is not None
-                               or filtered_time):
+    if not indexed_window and temporal_constraint:
         timed = store.search_temporal_range(start_ts=temporal.start_ts, end_ts=temporal.end_ts,
                                            order_hint=temporal.order_hint, rev_index=temporal.rev_index,
                                            entities={normalize_entity(key) for key in direct}, previous_only=previous,
                                            **{**options, "include_cold": include_cold or temporal.is_historical})
-    wanted = extract_identifiers(query)
     exact = store.search_exact_identifiers(wanted, **options)
     use_anchor_channel = not exact and not any(item.ident_type == "version" for item in wanted)
     anchor_options = {key: value for key, value in options.items() if key != "ids_only"}
-    if quotas:
+    if "anchors" in quotas:
         anchor_options["top_n"] = min(12, per_channel_k)
     anchor_lex, anchor_vec = (store.search_turn_anchors(query, parsed["semantic_vector_query"], **anchor_options)
                               if use_anchor_channel else ([], []))
