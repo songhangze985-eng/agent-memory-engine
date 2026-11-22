@@ -169,6 +169,55 @@ def test_deleted_source_invalidates_context_and_rebuilds_observation_provenance(
         assert group["plain"] in store.get_core_snapshot()["core_profile"]
 
 
+def test_taboo_attention_requires_current_relevant_user_evidence():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        allergy = retain(engine, "I am allergic to peanuts.", speaker="Alice", session_id="s1")
+        ordinary = retain(engine, "I cannot open the peanut container.", speaker="Alice", session_id="s1")
+        negated = retain(engine, "I am not allergic to strawberries.", speaker="Alice", session_id="s1")
+        question = retain(engine, "Alice is allergic to dust?", speaker="Alice", session_id="s1")
+        other_person = retain(engine, "Bob is allergic to peanuts.", speaker="Bob", session_id="s2")
+        foreign = retain(engine, "I am allergic to walnuts.", speaker="Alice", user_id="foreign")
+        assistant = engine.retain("I am allergic to milk.", role="assistant", speaker="assistant",
+                                  session_id="s1")["operations"][0]["line_id"]
+
+        before = store.conn.total_changes
+        for budget in (None, 256):
+            context = engine.build_context("What is Alice allergic to?", token_budget=budget, include_short_term=False)
+            facts = {row["id"]: row for row in context["ranked"]}
+            assert context["ranked"][0]["id"] == allergy
+            assert facts[allergy]["is_taboo"] and len(facts[allergy]["source_turn_ids"]) == 1
+            assert facts[allergy]["attention_weight"] > 1
+            assert "[禁忌]" in context["dynamic_memory"]
+            assert facts[other_person]["is_taboo"] and facts[other_person]["attention_weight"] == 1
+            assert foreign not in facts
+            for ident in (ordinary, negated, question, assistant):
+                assert not facts[ident]["is_taboo"]
+        ordinary_query = engine.recall("What did Alice say about the peanut container?")
+        assert ordinary_query["ranked"][0]["id"] == ordinary
+        assert all(row["attention_weight"] == 1 for row in ordinary_query["ranked"])
+        history = engine.recall("What was Alice allergic to before?")
+        assert any(row["id"] == allergy for row in history["ranked"])
+        assert all(row["attention_weight"] == 1 for row in history["ranked"])
+        assert store.conn.total_changes == before
+
+
+def test_retelling_a_taboo_does_not_move_it_to_the_frequency_belt():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store):
+        for stamp in range(1, 8):
+            engine.retain("The allergen review covers the usual snack inventory.", timestamp=stamp)
+        text = "I am allergic to peanuts."
+        first = engine.retain(text, timestamp=8)["operations"][0]["line_id"]
+        for stamp in (9, 10):
+            engine.retain(text, timestamp=stamp)
+            result = engine.recall("What am I allergic to?", timestamp=stamp)
+            lead = result["ranked"][0]
+            assert lead["id"] == first and not lead["isolated"]
+            assert lead["mention_count"] == stamp - 7
+            assert lead["attention_weight"] > 1 and lead["bipolar_weight"] == 1
+
+
 def test_reflect_fills_two_event_gap_and_cites_only_retrieved_memory():
     engine = CognitiveMemoryEngine()
     with closing(engine.store) as store:

@@ -15,7 +15,7 @@ import numpy as np
 from memengine.anchors import turn_context
 
 from memengine.identifiers import extract_identifiers
-from memengine.lifecycle import DAY, PROTECTED, content_hash, is_constraint
+from memengine.lifecycle import DAY, PROTECTED, content_hash, is_constraint, is_taboo
 from memengine.textutil import (ensure_step_tags, estimate_tokens, merge_step_ids, normalize_entity,
                                 step_ids_in, strip_step_tags, tokenize_for_fts)
 from memengine.storage.base import DEFAULT_SCOPE, IDS as _IDS, SCOPES, scope_where as _scope_where
@@ -737,6 +737,8 @@ class SQLiteStore(Chronicle, WorkspaceStore):
         return {**fact, "text": ensure_step_tags(fact["plain"], steps), "zkeys": keys,
                 "entity_z_keys": [key for key in keys if key_type(key) == "entity"],
                 "category_z_keys": [key for key in keys if key_type(key) == "tag"],
+                "is_taboo": fact["memory_type"] == "fact" and fact["role"] == "user"
+                and fact["epistemic_scope"] == "world" and is_taboo(fact["plain"]),
                 "isolated": bool(fact["isolated"]), "historical": fact["status"] == "superseded",
                 "active": int(fact["status"] == "active"), "event_time": fact["event_time_start"],
                 "updated_at": fact["ingest_time"], "is_conflict_or_override": bool(fact["is_conflict"]),
