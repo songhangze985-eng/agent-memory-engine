@@ -15,6 +15,9 @@ _AGGREGATE = re.compile(
     r"\b(?:what|which|where|who|how many)\b.{1,90}\b(?:both|have|has|types|kinds|different|various|done|visited)\b|"
     r"\b(?:activities|events|cities|countries|books|places|hobbies|reasons)\b|哪些|分别|一共", re.I)
 _PRONOUNS = {"i", "me", "my", "he", "she", "his", "her", "they", "their", "we", "our"}
+_UNCERTAIN = re.compile(
+    r"\b(?:unknown|not sure|not recorded|not been established|(?:don['’]t|do not) (?:know|remember))\b|"
+    r"不清楚|不知道|不确定|未记录|尚未确认", re.I)
 
 
 def _facet_terms(text):
@@ -99,3 +102,31 @@ def packed_facet_coverage(facets, items, *, require_entity):
         wanted = _facet_terms(facet)
         matches.append({"facet": facet, "evidence_ids": [key for key, terms in evidence if wanted <= terms]})
     return {"facets": matches, "covered_at_10": sum(bool(row["evidence_ids"]) for row in matches)}
+
+
+def answered_facets(facets, claims, evidence, matched_entities):
+    """Attribute each answered facet to a verified claim and visible citation."""
+    subjects = {normalized_content(key.partition(":")[2] or key) for key in matched_entities}
+    answered = {facet: [] for facet in facets}
+    targets = {facet: _facet_terms(facet) for facet in facets}
+    claim_citations = {}
+    for index, claim in enumerate(claims):
+        if _UNCERTAIN.search(claim["text"]):
+            continue
+        terms = _facet_terms(claim["text"])
+        for key in claim["evidence_ids"]:
+            row = evidence[key]
+            speaker = row.get("speaker") or ""
+            if subjects and not (row.get("entity_anchor") or normalized_content(speaker) in subjects):
+                continue
+            claim_terms = terms | _facet_terms(speaker)
+            evidence_terms = _evidence_terms(row)
+            for facet, wanted in targets.items():
+                if wanted <= claim_terms and wanted <= evidence_terms and terms - wanted:
+                    if key not in answered[facet]:
+                        answered[facet].append(key)
+                    keys = claim_citations.setdefault(index, [])
+                    if key not in keys:
+                        keys.append(key)
+    return ({facet: keys for facet, keys in answered.items() if keys},
+            [{**claims[index], "evidence_ids": keys} for index, keys in claim_citations.items()])
