@@ -14,6 +14,7 @@ import platform
 from time import perf_counter
 from unittest.mock import patch
 
+from eval.ce_budget import PAIR_TOKENS, limit_cross_encoder
 from eval.evidence_ablation import OFFICIAL_SHA256, fact_turns, read_dataset, retain_source_turn
 from eval.longmemeval.run import category, groups
 from eval.metrics import evidence_metrics, mean, percentile
@@ -94,7 +95,7 @@ def diagnose(pass_trace, context, sources, gold):
     return details
 
 
-def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=False, fusion_variant="baseline"):
+def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=False, fusion_variant="baseline", ce_pairs=None):
     turns, questions = group
     engine = make_engine("mock", backend=backend)
     rows = []
@@ -115,7 +116,7 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
         recall = engine._recall
         variants = FUSION_ABLATIONS if fusion_ablation else (fusion_variant,)
         for question, variant in product(questions, variants):
-            passes, batches = [], []
+            passes, batches, scored_ids = [], [], []
             with ExitStack() as stack:
                 if parameters := FUSION_VARIANTS[variant]:
                     def ablated_recall(*args, plan=None, **kwargs):
@@ -124,6 +125,8 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
                     stack.enter_context(patch.object(engine, "_recall", ablated_recall))
                 if session is not None:
                     stack.enter_context(observe_onnx(session, batches))
+                if ce_pairs is not None:
+                    stack.enter_context(limit_cross_encoder(engine, ce_pairs, scored_ids))
                 if packing_replay:
                     packer = stack.enter_context(patch("memengine.engine._fit_context", wraps=_fit_context))
                     assembler = stack.enter_context(patch("memengine.engine.assemble_context", wraps=assemble_context))
@@ -131,8 +134,15 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
                 bundle = engine.build_context(question.text, reference_time=question.timestamp, mode=mode,
                                               token_budget=TOKEN_BUDGET, include_short_term=False, _trace=passes)
                 elapsed = (perf_counter() - start) * 1000
-            if session is not None and sum(batch["pairs"] for batch in batches) != sum(len(p["fused"]) for p in passes):
+                batch_size = engine.reranker.batch_size if session is not None else None
+            expected_pairs = sum(map(len, scored_ids)) if ce_pairs is not None else sum(len(p["fused"]) for p in passes)
+            if session is not None and sum(batch["pairs"] for batch in batches) != expected_pairs:
                 raise RuntimeError("ONNX batch trace did not account for all scored pairs")
+            if ce_pairs is not None and (
+                expected_pairs > ce_pairs or any(
+                    batch["input_tokens"] + batch["padding_tokens"] > PAIR_TOKENS * batch["pairs"] for batch in batches)
+            ):
+                raise RuntimeError("ONNX input exceeded the CE budget")
             gold = question.evidence if not question.unanswerable else frozenset()
             gold_sessions = question.evidence_sessions if not question.unanswerable else frozenset()
             items = bundle["items"]
@@ -156,7 +166,7 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
                          "candidate_at_50": mean(row["ranks"]["fused"] is not None and row["ranks"]["fused"] <= 50
                                                  for row in details),
                          "gold": details, "passes": passes, "ce_batches": batches,
-                         "ce_batch_size": engine.reranker.batch_size if options is not None else None,
+                         "ce_batch_size": batch_size,
                          "ce_threads": ({"intra_op": options.intra_op_num_threads,
                                          "inter_op": options.inter_op_num_threads} if options is not None else None),
                          "ce_providers": session.get_providers() if session is not None else [],
@@ -167,6 +177,8 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
                 row["packing_replay"] = replay_scores
             if fusion_ablation or fusion_variant != "baseline":
                 row["fusion_variant"] = variant
+            if ce_pairs is not None:
+                row["ce_scored_ids"] = scored_ids
             rows.append(row)
     return rows
 
@@ -211,6 +223,7 @@ def main():
     parser.add_argument("--category", action="append")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--backend", choices=("hashed", "local-neural"), default="hashed")
+    parser.add_argument("--ce-pairs", type=int, help="Cap local ONNX pairs per question and apply a 250-token pair limit")
     parser.add_argument("--packing-replay", action="store_true",
                         help="Replay the same budget and admitted candidates in score and gold-first order")
     fusion = parser.add_mutually_exclusive_group()
@@ -229,8 +242,10 @@ def main():
     data = [row for row in read_dataset(args.data) if not args.category or category(row) in args.category]
     if not data or args.workers < 1 or args.sample is not None and args.sample < 1:
         parser.error("provide at least one question and a positive number of workers")
+    if args.ce_pairs is not None and (args.ce_pairs < 1 or args.backend != "local-neural"):
+        parser.error("--ce-pairs requires a positive limit and the local-neural backend")
     worker = partial(run_group, backend=args.backend, mode=args.query_mode, packing_replay=args.packing_replay,
-                     fusion_ablation=args.fusion_ablation, fusion_variant=args.fusion_variant)
+                     fusion_ablation=args.fusion_ablation, fusion_variant=args.fusion_variant, ce_pairs=args.ce_pairs)
     questions = groups(data, args.sample, 42)
     rows = []
     traced = 0
@@ -245,6 +260,8 @@ def main():
     summary = summarize_categories([row for row in rows if row.get("fusion_variant", "baseline") == args.fusion_variant])
     report = {"benchmark": BENCHMARK, "sha256": digest, "backend": args.backend, "mode": args.query_mode,
               "workers": args.workers, "seed": 42, "platform": platform.platform(), "summary": summary, "items": rows}
+    if args.ce_pairs is not None:
+        report["ce_budget"] = {"pairs": args.ce_pairs, "tokens_per_pair": PAIR_TOKENS}
     body = table(("Category", "N", "Candidate@50", "R@10", "Session coverage@10", "P50 ms", "P95 ms", "Rerank P95 ms"),
                  ((name, row["n"], *(number(row[key], ".2%") for key in
                                      ("candidate_at_50", "recall_at_10", "session_coverage_at_10")),
