@@ -25,6 +25,11 @@ def write_memory(store, text, *, scope, now, memory_type, source_turn_ids, deriv
         existing = [row for row in existing if row["epistemic_scope"] == epistemic_scope
                     and row["valid_from"] == valid_from and row["expires_at"] == expires_at]
         if not chronicle and len(existing) == 1 and existing[0]["is_constraint"] >= int(is_constraint):
+            if memory_type == "observation" and (
+                    existing[0]["is_stale"] or set(existing[0]["derived_from_ids"]) - set(derived_from_ids)):
+                return store.supersede_fact(existing[0]["id"], plain=body, formatted=format_fact_line(now, body),
+                                            scope=scope, ingest_time=now, source_turn_ids=source_turn_ids,
+                                            chronicle={"mention_time": now, "derived_from_ids": list(derived_from_ids)})
             store.merge_derived_sources(existing[0], derived_from_ids, source_turn_ids, tool_call_ids, successful=successful)
             if epistemic_scope == "opinion":
                 store.update_opinion_confidence(existing[0]["id"], scope, confidence)
@@ -110,7 +115,7 @@ def consolidate(store, *, user_id, agent_id, now, min_new_facts, force):
             if (fact.get("canonical_entity_id") and fact["epistemic_scope"] in ("world", "experience")
                     and fact["expires_at"] is None and fact["root_fact_id"] in active_roots):
                 entity_groups[fact["canonical_entity_id"]].append(fact)
-        existing = {row["canonical_entity_id"]: row for row in store.list_observations(user_id=user_id, agent_id=agent_id)
+        existing = {row["canonical_entity_id"]: row for row in store.list_observations(user_id=user_id, agent_id=agent_id, include_stale=True)
                     if row.get("canonical_entity_id")}
         for entity, group in sorted(entity_groups.items()):
             group = sorted(group, key=lambda row: (row.get("occurrence_start") or row["mention_time"], row["id"]))[-5:]

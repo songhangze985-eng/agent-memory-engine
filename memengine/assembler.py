@@ -145,14 +145,15 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
         items.append(item)
         return True
 
-    facts = result["ranked"]
+    facts = [fact for fact in result["ranked"] if not fact.get("is_stale")]
     if facts:
         wide = result.get("packing_mode") == "token_budget"
         scope = result["scope"]
         domains = result.get("epistemic_scopes")
-        observations = store.list_observations(**scope) if domains is None or "observation" in domains else []
+        observations = store.list_observations(**scope, include_stale=True) if domains is None or "observation" in domains else []
         fresh = recent_observation_evidence(store, facts, (scope["user_id"], scope["agent_id"], scope["session_id"]),
                                             result.get("validity_as_of"), observations)
+        observations = [item for item in observations if not item.get("is_stale")]
         if domains is not None:
             fresh = [fact for fact in fresh if fact["epistemic_scope"] in domains]
         fact_ids = {fact["id"] for fact in facts}
@@ -199,8 +200,6 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
         observations.sort(key=lambda item: (-len(fact_ids.intersection(item["derived_from_fact_ids"])),
                                             -item["confidence"], item["id"]))
         for item in observations:
-            if item.get("is_stale"):
-                continue
             references, turns = item["derived_from_fact_ids"], item["source_turn_ids"]
             if references and not fact_ids.intersection(references):
                 continue

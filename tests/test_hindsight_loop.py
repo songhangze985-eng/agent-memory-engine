@@ -136,6 +136,39 @@ def test_observation_is_marked_stale_and_fresh_facts_are_checked():
         assert not new["is_stale"] and fresh in new["derived_from_ids"]
 
 
+def test_deleted_source_invalidates_context_and_rebuilds_observation_provenance():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        address = retain(engine, "I live in River City.", mention_time="2024-01-01")
+        for text, session in (("I work at Atlas Building.", "s2"), ("I study at Elm College.", "s3"),
+                              ("I purchased a blue canoe.", "s4")):
+            retain(engine, text, mention_time="2024-02-01", session_id=session)
+        engine.consolidate(force=True, timestamp=parse_session_clock("2024-03-01"))
+        before = store.list_observations()
+        group = next(row for row in before if not row["canonical_entity_id"])
+        assert group["plain"] in store.get_core_snapshot()["core_profile"]
+        address_turn = store.get_line(address, scope=("default", "default", None))["source_turn_ids"][0]
+
+        assert engine.delete(address, timestamp=parse_session_clock("2024-03-02"))
+        stale = store.list_observations(include_stale=True)
+        assert not store.list_observations()
+        assert {row["id"] for row in stale if row["is_stale"]} == {row["id"] for row in before}
+        before_read = store.conn.total_changes
+        for query in ("Where does Alice Chen work?", "What did Alice study?"):
+            context = engine.build_context(query, reference_time="2024-03-03", token_budget=256)
+            assert group["plain"] not in context["system_prefix"]
+            assert all(row["kind"] != "observation" for row in context["items"])
+        assert store.conn.total_changes == before_read
+
+        engine.consolidate(force=True, timestamp=parse_session_clock("2024-03-03"))
+        rebuilt = store.list_observations()
+        assert {row["supersedes_id"] for row in rebuilt} == {row["id"] for row in before}
+        for row in rebuilt:
+            assert address not in row["derived_from_ids"] and address_turn not in row["source_turn_ids"]
+            assert len(row["derived_from_ids"]) == 3 and not row["is_stale"]
+        assert group["plain"] in store.get_core_snapshot()["core_profile"]
+
+
 def test_reflect_fills_two_event_gap_and_cites_only_retrieved_memory():
     engine = CognitiveMemoryEngine()
     with closing(engine.store) as store:
