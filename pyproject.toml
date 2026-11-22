@@ -1,6 +1,6 @@
 [project]
 name = "memengine"
-version = "0.1.0"
+version = "0.2.0"
 description = "认知记忆引擎：规则路由、渐近原点毒圈、平行 Z 轴坍缩与 3D 笔记本。"
 readme = "README.md"
 requires-python = ">=3.10"

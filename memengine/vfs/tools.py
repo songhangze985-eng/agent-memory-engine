@@ -1,15 +1,15 @@
-"""Claude-style Virtual Filesystem tools for Chat Completions & MCP (host-bound tenant scope)."""
+"""Claude-style Virtual Filesystem tools with salience gating, read_note, progressive disclosure, and directory compaction."""
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from memengine.vfs.models import LAYERS, SALIENCE_TAGS, VERIFICATION_STATUSES
+from memengine.vfs.models import LAYERS, SALIENCE_TAGS, SALIENCE_WRITE_GUIDE, VERIFICATION_STATUSES
 
 _SPECS = (
     {
         "name": "mem_tree",
-        "description": "Inspect the Markdown memory directory tree under a path prefix.",
+        "description": "Inspect the lightweight L2/L1 Markdown directory outline (ls -R with <=50-char index_summary).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -32,8 +32,8 @@ _SPECS = (
         },
     },
     {
-        "name": "mem_read",
-        "description": "Read a Markdown memory node, its metadata, optimistic-lock version, and L0 provenance IDs.",
+        "name": "read_note",
+        "description": "Progressive disclosure reader: pull the complete untruncated detail_body, optimistic-lock version, and L0 provenance IDs of a memory note.",
         "parameters": {
             "type": "object",
             "properties": {"path": {"type": "string"}},
@@ -42,8 +42,49 @@ _SPECS = (
         },
     },
     {
+        "name": "mem_read",
+        "description": "Alias of read_note: read a Markdown memory node, its metadata, version, and L0 provenance IDs.",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "mem_write_rule",
+        "description": (
+            "Write a structured hypothesis or verified rule with salience self-check.\n"
+            + SALIENCE_WRITE_GUIDE
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "title": {"type": "string"},
+                "trigger_condition": {"type": "string"},
+                "action": {"type": "string"},
+                "verification_result": {"type": "string", "default": ""},
+                "notes": {"type": "string", "default": ""},
+                "index_summary": {"type": "string", "default": ""},
+                "layer": {"type": "string", "enum": sorted(LAYERS), "default": "L2"},
+                "confidence_score": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.85},
+                "verification_status": {"type": "string", "enum": sorted(VERIFICATION_STATUSES), "default": "verified"},
+                "salience_tag": {"type": "string", "enum": sorted(SALIENCE_TAGS), "default": "core_rule"},
+                "always_active": {"type": "boolean", "default": False},
+                "visible_in_context": {"type": "boolean", "default": False},
+                "reusable_pattern": {"type": "boolean", "default": True},
+                "future_pitfall_risk": {"type": "boolean", "default": True},
+                "source_transcript_ids": {"type": "array", "items": {"type": "string"}},
+                "expected_version": {"type": "integer", "minimum": 0},
+            },
+            "required": ["path", "title", "trigger_condition", "action"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "mem_write",
-        "description": "Create or overwrite a Markdown memory node with optional optimistic lock version check.",
+        "description": "Create or overwrite a Markdown memory node (e.g., L1 /global.md or L2 guide) with optional optimistic lock version check.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -55,6 +96,7 @@ _SPECS = (
                 "confidence_score": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.7},
                 "verification_status": {"type": "string", "enum": sorted(VERIFICATION_STATUSES), "default": "unverified"},
                 "salience_tag": {"type": "string", "enum": sorted(SALIENCE_TAGS), "default": "normal"},
+                "always_active": {"type": "boolean", "default": False},
                 "source_transcript_ids": {"type": "array", "items": {"type": "string"}},
                 "expected_version": {"type": "integer", "minimum": 0},
             },
@@ -75,6 +117,8 @@ _SPECS = (
                 "verification_status": {"type": "string", "enum": sorted(VERIFICATION_STATUSES)},
                 "confidence_score": {"type": "number", "minimum": 0, "maximum": 1},
                 "salience_tag": {"type": "string", "enum": sorted(SALIENCE_TAGS)},
+                "always_active": {"type": "boolean"},
+                "summary": {"type": "string"},
                 "source_transcript_ids": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["path", "old_str", "new_str"],
@@ -83,7 +127,7 @@ _SPECS = (
     },
     {
         "name": "mem_search",
-        "description": "Search curated L2 Markdown notes (vector + BM25). Never scans raw L0 transcripts.",
+        "description": "Stage 3 Hybrid L2 search (Dense + BM25 + exact identifiers/versions, reranked by Semantic_Sim * W_verified * W_recency). Returns concise <=50-char index_summary cards by default (progressive disclosure); call read_note(path) for full detail_body.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -91,6 +135,7 @@ _SPECS = (
                 "path_prefix": {"type": "string"},
                 "verified_only": {"type": "boolean", "default": False},
                 "salience_tags": {"type": "array", "items": {"type": "string", "enum": sorted(SALIENCE_TAGS)}},
+                "include_body": {"type": "boolean", "default": False},
                 "top_k": {"type": "integer", "minimum": 1, "maximum": 30, "default": 8},
             },
             "required": ["query"],
@@ -113,6 +158,16 @@ _SPECS = (
         },
     },
     {
+        "name": "mem_compact_dir",
+        "description": "Refactor and merge scattered L2 notes in an overcrowded directory into a unified standard GUIDE.md (rollback-safe).",
+        "parameters": {
+            "type": "object",
+            "properties": {"dir_path": {"type": "string"}},
+            "required": ["dir_path"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "mem_read_transcripts",
         "description": "Lazy provenance drilldown into L0 raw transcript chunks by transcript IDs.",
         "parameters": {
@@ -124,7 +179,7 @@ _SPECS = (
     },
     {
         "name": "mem_rollback",
-        "description": "Rollback a single Markdown node to a prior snapshot or revert an entire dream_batch_id.",
+        "description": "Rollback a single Markdown node to a prior snapshot or revert an entire dream/compaction batch.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -168,8 +223,29 @@ class VFSTools(list):
             return self.engine.tree(path=raw.get("path", "/"), layer=raw.get("layer"), **scope)
         if name == "mem_ls":
             return self.engine.ls(path=raw.get("path", "/"), layer=raw.get("layer"), **scope)
-        if name == "mem_read":
-            return self.engine.read(raw["path"], **scope)
+        if name in {"read_note", "mem_read"}:
+            return self.engine.read_note(raw["path"], **scope)
+        if name == "mem_write_rule":
+            return self.engine.write_rule(
+                raw["path"],
+                title=raw["title"],
+                trigger_condition=raw["trigger_condition"],
+                action=raw["action"],
+                verification_result=raw.get("verification_result", ""),
+                notes=raw.get("notes", ""),
+                index_summary=raw.get("index_summary", ""),
+                layer=raw.get("layer", "L2"),
+                confidence_score=raw.get("confidence_score", 0.85),
+                verification_status=raw.get("verification_status", "verified"),
+                salience_tag=raw.get("salience_tag", "core_rule"),
+                always_active=bool(raw.get("always_active", False)),
+                visible_in_context=bool(raw.get("visible_in_context", False)),
+                reusable_pattern=bool(raw.get("reusable_pattern", True)),
+                future_pitfall_risk=bool(raw.get("future_pitfall_risk", True)),
+                source_transcript_ids=raw.get("source_transcript_ids", ()),
+                expected_version=raw.get("expected_version"),
+                **scope,
+            )
         if name == "mem_write":
             return self.engine.write(
                 raw["path"],
@@ -180,6 +256,7 @@ class VFSTools(list):
                 confidence_score=raw.get("confidence_score", 0.7),
                 verification_status=raw.get("verification_status", "unverified"),
                 salience_tag=raw.get("salience_tag", "normal"),
+                always_active=bool(raw.get("always_active", False)),
                 source_transcript_ids=raw.get("source_transcript_ids", ()),
                 expected_version=raw.get("expected_version"),
                 **scope,
@@ -193,12 +270,14 @@ class VFSTools(list):
                 verification_status=raw.get("verification_status"),
                 confidence_score=raw.get("confidence_score"),
                 salience_tag=raw.get("salience_tag"),
+                always_active=raw.get("always_active"),
+                summary=raw.get("summary"),
                 source_transcript_ids=raw.get("source_transcript_ids", ()),
                 **scope,
             )
         if name == "mem_search":
             tags = tuple(raw["salience_tags"]) if raw.get("salience_tags") else None
-            return self.engine.search(
+            hits = self.engine.search(
                 raw["query"],
                 path_prefix=raw.get("path_prefix"),
                 verified_only=bool(raw.get("verified_only", False)),
@@ -206,6 +285,12 @@ class VFSTools(list):
                 top_k=int(raw.get("top_k", 8)),
                 **scope,
             )
+            if raw.get("include_body", False):
+                return hits
+            return [
+                {k: v for k, v in hit.items() if k not in {"content", "detail_body"}}
+                for hit in hits
+            ]
         if name == "mem_grep":
             return self.engine.grep(
                 raw["pattern"],
@@ -214,6 +299,8 @@ class VFSTools(list):
                 max_matches=int(raw.get("max_matches", 20)),
                 **scope,
             )
+        if name == "mem_compact_dir":
+            return self.engine.compact_directory(raw["dir_path"], **scope)
         if name == "mem_read_transcripts":
             return self.engine.read_transcripts(list(raw["transcript_ids"]), **scope)
         if name == "mem_rollback":
