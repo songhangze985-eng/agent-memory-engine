@@ -6,7 +6,7 @@ from memengine.retrieval.activation import bridge_feedback, discovered_windows, 
 from memengine.temporal import competition_terms
 from memengine.versioning import extract_versions, score_version_match
 from memengine.textutil import normalize_entity, strip_step_tags, tokenize_for_fts
-from memengine.vector import weighted_rrf
+from memengine.vector import score_quantiles, weighted_rrf
 
 
 def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vector_search, fuse=weighted_rrf,
@@ -143,11 +143,24 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
         return [{**details[hit["id"]], **hit} for hit in channel]
 
     if plan:
-        ranked = fuse(hydrate(dense), hydrate(inverted), w_vec=semantic_weight, w_hash=.08, extra_channels=(
+        primary = hydrate(dense), hydrate(inverted)
+        fusion_options = dict(w_vec=semantic_weight, w_hash=.08, extra_channels=(
             (lexical_weight, hydrate(lexical)), (.14, hydrate(timed)), (.14, hydrate(anchor_lex)), (.10, hydrate(anchor_vec)),
             (.7, hydrate(exact)), (.60, hydrate(precision_hits)), (.45 if plan.windows else .14, hydrate(calendar_hits)),
             (.19, hydrate(graph_hits)), (.09, hydrate(followup)), (.17, hydrate(feedback))))
-        return ranked[:60]
+        if not plan.score_quantiles or wanted or plan.versions or plan.windows:
+            return fuse(*primary, **fusion_options)[:60]
+        normalized = fuse(*primary, **fusion_options, normalized_channels=(
+            score_quantiles(dense, "vector_score"),
+            {},
+            score_quantiles(lexical, "bm25_score", lower_is_better=True),
+        ))
+        if not plan.preserve_candidate_at_50:
+            return normalized[:60]
+        baseline = fuse(*primary, **fusion_options)[:60]
+        head = {fact["id"] for fact in baseline[:50]}
+        by_id = {fact["id"]: fact for fact in normalized}
+        return [fact for fact in normalized if fact["id"] in head] + [by_id[fact["id"]] for fact in baseline[50:]]
 
     baseline = fuse(hydrate(dense), hydrate(inverted), w_vec=0.40, w_hash=0.15,
                             extra_channels=((0.35, hydrate(lexical)), (0.25, hydrate(timed))))[:40]

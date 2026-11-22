@@ -34,6 +34,11 @@ FUSION_ABLATIONS = {
     "graph_off_only": {"entity_graph": False},
     "combined": {"channel_quotas": True, "semantic_weighting": True, "entity_graph": False},
 }
+FUSION_VARIANTS = {
+    **FUSION_ABLATIONS,
+    "score_quantiles": {"score_quantiles": True},
+    "bounded_score_quantiles": {"score_quantiles": True, "preserve_candidate_at_50": True},
+}
 
 
 def observe_onnx(session, batches):
@@ -89,7 +94,7 @@ def diagnose(pass_trace, context, sources, gold):
     return details
 
 
-def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=False):
+def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=False, fusion_variant="baseline"):
     turns, questions = group
     engine = make_engine("mock", backend=backend)
     rows = []
@@ -108,11 +113,11 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
                 raise RuntimeError("local-neural tracing requires the ONNX reranker")
             session = engine.reranker._encoder.model.model
         recall = engine._recall
-        variants = FUSION_ABLATIONS if fusion_ablation else ("baseline",)
+        variants = FUSION_ABLATIONS if fusion_ablation else (fusion_variant,)
         for question, variant in product(questions, variants):
             passes, batches = [], []
             with ExitStack() as stack:
-                if parameters := FUSION_ABLATIONS[variant]:
+                if parameters := FUSION_VARIANTS[variant]:
                     def ablated_recall(*args, plan=None, **kwargs):
                         return recall(*args, plan=replace(plan, **parameters) if plan else None, **kwargs)
 
@@ -160,7 +165,7 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
                          "retrieval_ms": bundle["retrieval_ms"], "latency_ms": elapsed}
             if packing_replay:
                 row["packing_replay"] = replay_scores
-            if fusion_ablation:
+            if fusion_ablation or fusion_variant != "baseline":
                 row["fusion_variant"] = variant
             rows.append(row)
     return rows
@@ -208,8 +213,10 @@ def main():
     parser.add_argument("--backend", choices=("hashed", "local-neural"), default="hashed")
     parser.add_argument("--packing-replay", action="store_true",
                         help="Replay the same budget and admitted candidates in score and gold-first order")
-    parser.add_argument("--fusion-ablation", action="store_true",
+    fusion = parser.add_mutually_exclusive_group()
+    fusion.add_argument("--fusion-ablation", action="store_true",
                         help="Compare channel quotas, weights and graph removal on the same ingested histories")
+    fusion.add_argument("--fusion-variant", choices=FUSION_VARIANTS, default="baseline")
     parser.add_argument("--query-mode", choices=("single_query", "reconstructive"), default="reconstructive")
     args = parser.parse_args()
     sha = hashlib.sha256()
@@ -223,7 +230,7 @@ def main():
     if not data or args.workers < 1 or args.sample is not None and args.sample < 1:
         parser.error("provide at least one question and a positive number of workers")
     worker = partial(run_group, backend=args.backend, mode=args.query_mode, packing_replay=args.packing_replay,
-                     fusion_ablation=args.fusion_ablation)
+                     fusion_ablation=args.fusion_ablation, fusion_variant=args.fusion_variant)
     questions = groups(data, args.sample, 42)
     rows = []
     traced = 0
@@ -235,7 +242,7 @@ def main():
             traced += len(batch) // (len(FUSION_ABLATIONS) if args.fusion_ablation else 1)
             if traced % 10 == 0:
                 print(f"{traced} questions traced", flush=True)
-    summary = summarize_categories([row for row in rows if row.get("fusion_variant", "baseline") == "baseline"])
+    summary = summarize_categories([row for row in rows if row.get("fusion_variant", "baseline") == args.fusion_variant])
     report = {"benchmark": BENCHMARK, "sha256": digest, "backend": args.backend, "mode": args.query_mode,
               "workers": args.workers, "seed": 42, "platform": platform.platform(), "summary": summary, "items": rows}
     body = table(("Category", "N", "Candidate@50", "R@10", "Session coverage@10", "P50 ms", "P95 ms", "Rerank P95 ms"),
