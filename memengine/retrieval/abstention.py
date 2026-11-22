@@ -3,6 +3,7 @@
 import re
 
 from memengine.reranker import evidence_pair_scores
+from memengine.retrieval.coverage import supported_facet
 
 _DATE_QUESTION = re.compile(r"\b(?:when|what date|which date)\b|什么时候|哪天|何时|几月几日", re.I)
 
@@ -19,11 +20,11 @@ def abstention_group(query, parsed, temporal):
     return "factual"
 
 
-def abstention_features(query, candidates, facets):
+def abstention_features(query, candidates, facets, *, require_entity=False):
     head = candidates[:5]
     evidence = [row for row in head if row["status"] == "active" or row.get("state_tag") == "[历史快照]"]
     if not evidence:
-        return dict.fromkeys(("ce", "support", "slot_coverage", "margin", "combined"), 0.0)
+        return dict.fromkeys(("ce", "support", "slot_coverage", "margin", "combined", "facet_support"), 0.0)
     scores = sorted((row["ce_score"] for row in evidence), reverse=True)
     measured = evidence_pair_scores(query, evidence)
     support = max(row["ce_score"] * (coverage + clause) / 2
@@ -32,5 +33,6 @@ def abstention_features(query, candidates, facets):
     slot_coverage = sum(max(part for part, _ in evidence_pair_scores(target, evidence))
                         for target in targets) / len(targets)
     margin = scores[0] - scores[1] if len(scores) > 1 else scores[0]
+    facet_support = 1.0 if facets and supported_facet(facets, evidence, require_entity=require_entity) else support
     return {"ce": scores[0], "support": support, "slot_coverage": slot_coverage, "margin": margin,
-            "combined": support * slot_coverage * (0.9 + 0.1 * margin)}
+            "combined": support * slot_coverage * (0.9 + 0.1 * margin), "facet_support": facet_support}
