@@ -9,6 +9,7 @@ import numpy as np
 from memengine.assembler import _excerpt
 from memengine.neural import NeuralBackendUnavailableError
 from memengine.reranker import checked_scores
+from memengine.retrieval.rerank_budget import BATCH_SIZE, PAIR_TOKENS
 from memengine.temporal import competition_terms
 from memengine.textutil import strip_step_tags
 from memengine.vector import normalize_vectors
@@ -82,10 +83,19 @@ class OnnxNeuralEmbedder:
 class OnnxCrossEncoderReranker:
     is_calibrated = True
 
-    def __init__(self, model=None, *, batch_size=16):
+    def __init__(self, model=None, *, batch_size=16, wide_pair_limit=None):
+        if wide_pair_limit is not None and (type(wide_pair_limit) is not int or wide_pair_limit < 1):
+            raise ValueError("wide_pair_limit must be a positive integer")
         self.model = model or os.getenv("LOCAL_RERANK_MODEL") or RERANK_MODEL
         self._encoder = _create_model(self.model, "rerank")
         self.batch_size = batch_size
+        self.wide_pair_limit = wide_pair_limit
+        if wide_pair_limit is not None:
+            self.batch_size = min(batch_size, wide_pair_limit, BATCH_SIZE)
+            tokenizer = self._encoder.model.tokenizer
+            truncation = tokenizer.truncation or {}
+            tokenizer.enable_truncation(max_length=min(PAIR_TOKENS, truncation.get("max_length", PAIR_TOKENS)),
+                                        direction=truncation.get("direction", "right"))
 
     def score(self, query, candidates):
         terms = competition_terms(query)

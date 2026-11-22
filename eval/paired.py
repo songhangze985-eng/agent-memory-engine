@@ -24,8 +24,8 @@ def add_backend_argument(parser):
 
 
 @lru_cache(maxsize=1)
-def _neural_models():
-    vector, reranker = load_local_backends()
+def _neural_models(onnx_wide_pairs=None):
+    vector, reranker = load_local_backends(onnx_wide_pairs=onnx_wide_pairs)
     print(f"Local neural backend: {type(vector).__name__} ({vector.model_name}), "
           f"{type(reranker).__name__} ({reranker.model})", file=sys.stderr)
     return vector, reranker
@@ -51,7 +51,7 @@ def cli_backend(parser, backend):
         parser.exit(2, f"{exc}\n")
 
 
-def make_engine(mode, *, allow_casual=False, client=None, backend="hashed", timeline_buffer=True):
+def make_engine(mode, *, allow_casual=False, client=None, backend="hashed", timeline_buffer=True, onnx_wide_pairs=None):
     if mode == "live":
         if client is None:
             client, resolved, _ = build_llm_from_env()
@@ -59,7 +59,8 @@ def make_engine(mode, *, allow_casual=False, client=None, backend="hashed", time
                 raise ValueError("live mode requires LLM_API_KEY or OPENAI_API_KEY")
     elif client is None:
         client = MockLLMClient()
-    vector, reranker = _neural_models() if backend == "local-neural" else (HashedTfidfEmbedder(), CalibratedLocalReranker())
+    vector, reranker = (_neural_models(onnx_wide_pairs) if backend == "local-neural"
+                        else (HashedTfidfEmbedder(), CalibratedLocalReranker()))
     return CognitiveMemoryEngine(db_url=":memory:", llm=client, vector=vector, reranker=reranker,
                                  enable_casual_bypass=allow_casual, enable_timeline_buffer=timeline_buffer)
 

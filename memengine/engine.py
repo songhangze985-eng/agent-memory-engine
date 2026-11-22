@@ -36,6 +36,7 @@ from memengine.storage.base import DEFAULT_SCOPE, RecallFilter, SCOPES
 from memengine.storage.factory import open_store
 from memengine.retrieval.activation import RecallPlan, calendar_relevance, diversify_episodes, query_overlap
 from memengine.retrieval.operators import recall
+from memengine.retrieval.rerank_budget import RerankBudget
 from memengine.versioning import extract_versions
 from memengine.retrieval.reconstruct import bridge_keys, merge_passes, select_bridged
 from memengine.foresight import interval
@@ -561,6 +562,9 @@ class CognitiveMemoryEngine(TaskWorkspace):
                     mutate_stats=mutate_stats and not read_only)
         if _trace is not None:
             args["_trace"] = _trace
+        pair_limit = getattr(self.reranker, "wide_pair_limit", None) if wide else None
+        if pair_limit is not None:
+            args["_ce_budget"] = RerankBudget(pair_limit)
         if mode == "single_query" or graph:
             return self._retrieve_single(query, read_only=read_only, **args)
         started = time.perf_counter()
@@ -581,7 +585,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
 
     def _retrieve_single(self, query, *, user_id, agent_id, session_id, top_k, token_budget, timestamp, read_only,
                          flush_pending, belt_prune_ratio, min_keep, include_raw_turns, include_cold, filters, scopes, plan,
-                         mutate_stats=False, _passes=None, _bridges=(), _primary=(), _trace=None):
+                         mutate_stats=False, _passes=None, _bridges=(), _primary=(), _trace=None, _ce_budget=None):
         prune_ratio = self.belt_prune_ratio if belt_prune_ratio is None else float(belt_prune_ratio)
         keep_floor = self.min_keep if min_keep is None else min_keep
         _validate_belt_config(prune_ratio, keep_floor)
@@ -684,7 +688,12 @@ class CognitiveMemoryEngine(TaskWorkspace):
         c_max = max((consolidation_count(fact) for fact in merged if not is_noise(fact)), default=1)
         rrf_order = {fact["id"]: rank for rank, fact in enumerate(merged)}
         rerank_started = time.perf_counter() if _trace is not None else None
-        ce_scores, backend = self._rerank(query, merged)
+        if _ce_budget is None:
+            ce_scores, backend = self._rerank(query, merged)
+            scored_ids = None
+        else:
+            backend = self.reranker
+            ce_scores, scored_ids = _ce_budget.score(query, merged, backend.score)
         if _trace is not None:
             rerank_ms = (time.perf_counter() - rerank_started) * 1000
             raw_scores = ce_scores
@@ -807,6 +816,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
                 useful = diversify_episodes(query, useful)
             kept = [_compact_evidence(query, fact) for fact in useful]
         selected = _fit_context(kept, top_k, token_budget)
+        if _ce_budget is not None:
+            gate_stats.update(ce_pair_limit=_ce_budget.limit, ce_pairs_scored=_ce_budget.limit - _ce_budget.remaining)
         if _trace is not None:
             _trace.append({"fused": list(rrf_order), "reranked": reranked_ids,
                            "gate_input": [fact["id"] for fact in ranked], "gate_kept": gate_kept_ids,
@@ -815,7 +826,9 @@ class CognitiveMemoryEngine(TaskWorkspace):
                            "truncated": [fact["id"] for fact in selected if fact.get("context_truncated")],
                            "ce_scores": dict(zip(rrf_order, raw_scores)), "sessions": {fact["id"]: fact["session_id"] for fact in merged},
                            "candidate_ms": candidate_ms, "rerank_ms": rerank_ms,
-                           "reranker": type(backend).__name__, "rerank_calls": int(bool(merged))})
+                           "reranker": type(backend).__name__,
+                           "rerank_calls": int(bool(merged) if scored_ids is None else bool(scored_ids)),
+                           **({"ce_scored_ids": scored_ids} if scored_ids is not None else {})})
         if mutate_stats and not read_only:
             self._record_recall(control_scope, origin, radius, selected, now)
         return result(TASK, parsed, ranked=selected, belt_total=sum(fact["zone"] == BELT for fact in ranked),

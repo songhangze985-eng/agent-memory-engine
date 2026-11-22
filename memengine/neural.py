@@ -76,13 +76,16 @@ class LocalCrossEncoderReranker:
         return checked_scores((1 / (1 + np.exp(-np.clip(logits.reshape(-1), -80, 80)))).tolist(), len(pairs))
 
 
-def load_local_backends():
+def load_local_backends(*, onnx_wide_pairs=None):
     """Prefer an entirely ONNX pair, then try the compatible Torch pair."""
     from memengine.neural_onnx import OnnxCrossEncoderReranker, OnnxNeuralEmbedder
 
     try:
-        return OnnxNeuralEmbedder(), OnnxCrossEncoderReranker()
+        options = {"wide_pair_limit": onnx_wide_pairs} if onnx_wide_pairs is not None else {}
+        return OnnxNeuralEmbedder(), OnnxCrossEncoderReranker(**options)
     except NeuralBackendUnavailableError as onnx_error:
+        if onnx_wide_pairs is not None:
+            raise
         try:
             return LocalNeuralEmbedder(), LocalCrossEncoderReranker()
         except NeuralBackendUnavailableError as torch_error:

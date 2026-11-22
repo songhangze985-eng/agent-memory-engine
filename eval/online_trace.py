@@ -14,7 +14,6 @@ import platform
 from time import perf_counter
 from unittest.mock import patch
 
-from eval.ce_budget import PAIR_TOKENS, limit_cross_encoder
 from eval.evidence_ablation import OFFICIAL_SHA256, fact_turns, read_dataset, retain_source_turn
 from eval.longmemeval.run import category, groups
 from eval.metrics import evidence_metrics, mean, percentile
@@ -24,6 +23,7 @@ from eval.static_report import number, table, write_result
 from memengine.assembler import assemble_context
 from memengine.engine import _fit_context
 from memengine.neural_onnx import OnnxCrossEncoderReranker
+from memengine.retrieval.rerank_budget import PAIR_TOKENS
 
 
 BENCHMARK = "LongMemEval-S"
@@ -97,7 +97,7 @@ def diagnose(pass_trace, context, sources, gold):
 
 def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=False, fusion_variant="baseline", ce_pairs=None):
     turns, questions = group
-    engine = make_engine("mock", backend=backend)
+    engine = make_engine("mock", backend=backend, onnx_wide_pairs=ce_pairs)
     rows = []
     with closing(engine.store):
         sources = {}
@@ -116,7 +116,7 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
         recall = engine._recall
         variants = FUSION_ABLATIONS if fusion_ablation else (fusion_variant,)
         for question, variant in product(questions, variants):
-            passes, batches, scored_ids = [], [], []
+            passes, batches = [], []
             with ExitStack() as stack:
                 if parameters := FUSION_VARIANTS[variant]:
                     def ablated_recall(*args, plan=None, **kwargs):
@@ -125,8 +125,6 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
                     stack.enter_context(patch.object(engine, "_recall", ablated_recall))
                 if session is not None:
                     stack.enter_context(observe_onnx(session, batches))
-                if ce_pairs is not None:
-                    stack.enter_context(limit_cross_encoder(engine, ce_pairs, scored_ids))
                 if packing_replay:
                     packer = stack.enter_context(patch("memengine.engine._fit_context", wraps=_fit_context))
                     assembler = stack.enter_context(patch("memengine.engine.assemble_context", wraps=assemble_context))
@@ -135,7 +133,8 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
                                               token_budget=TOKEN_BUDGET, include_short_term=False, _trace=passes)
                 elapsed = (perf_counter() - start) * 1000
                 batch_size = engine.reranker.batch_size if session is not None else None
-            expected_pairs = sum(map(len, scored_ids)) if ce_pairs is not None else sum(len(p["fused"]) for p in passes)
+            scored_ids = [p["ce_scored_ids"] for p in passes] if ce_pairs is not None else None
+            expected_pairs = sum(map(len, scored_ids)) if scored_ids is not None else sum(len(p["fused"]) for p in passes)
             if session is not None and sum(batch["pairs"] for batch in batches) != expected_pairs:
                 raise RuntimeError("ONNX batch trace did not account for all scored pairs")
             if ce_pairs is not None and (

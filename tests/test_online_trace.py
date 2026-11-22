@@ -1,11 +1,8 @@
-from types import SimpleNamespace
-from unittest.mock import Mock
-
-from eval.ce_budget import limit_cross_encoder, shortlist
 from eval.evidence_ablation import Question, Turn
 from eval.online_trace import FUSION_ABLATIONS, diagnose, run_group
 from eval.paired import make_engine
 from eval.packing_replay import oracle_order
+from memengine.retrieval.rerank_budget import RerankBudget, shortlist
 
 
 def test_retrieval_trace_observes_actual_call_without_changing_it():
@@ -100,17 +97,40 @@ def test_ce_shortlist_protects_pinned_and_same_slot_evidence():
     assert shortlist(candidates, 0) == []
 
 
-def test_ce_budget_does_not_fill_unscored_positions_with_local_scores():
-    tokenizer = Mock(truncation={"max_length": 512})
-    backend = SimpleNamespace(tokenizer=tokenizer)
-    score = Mock(side_effect=lambda query, candidates: [.8] * len(candidates))
-    reranker = SimpleNamespace(_encoder=SimpleNamespace(model=backend), batch_size=16, score=score)
-    engine = SimpleNamespace(reranker=reranker)
-    candidates = [{"id": "first"}, {"id": "exact", "exact_ident_hit": 1}]
-    ids = []
-    with limit_cross_encoder(engine, 1, ids):
-        assert reranker.score("version", candidates) == [0.0, .8]
-        assert reranker.score("version", candidates) == [0.0, 0.0]
-    assert ids == [["exact"], []]
-    assert reranker.score is score and reranker.batch_size == 16
-    assert backend.tokenizer is tokenizer
+def test_ce_budget_preserves_measured_scores_across_passes():
+    calls = []
+
+    def score(query, candidates):
+        calls.extend(row["id"] for row in candidates)
+        return [.8] * len(candidates)
+
+    candidates = [{"id": "first", "plain": "other version"},
+                  {"id": "exact", "plain": "requested version", "exact_ident_hit": 1}]
+    budget = RerankBudget(1)
+    assert budget.score("version", candidates, score) == ([0.0, .8], ["exact"])
+    assert budget.score("version", list(reversed(candidates)), score) == ([.8, 0.0], [])
+    assert calls == ["exact"]
+
+
+def test_runtime_trace_shares_ce_quota_across_reconstruction_passes(monkeypatch):
+    class Scorer:
+        wide_pair_limit = 1
+        is_calibrated = True
+
+        def score(self, query, candidates):
+            return [.8] * len(candidates)
+
+    memory = make_engine("mock")
+    memory.reranker = Scorer()
+    memory.retain("I prefer quiet history podcasts on my commute.", timestamp=10)
+    memory.retain("I also like travel documentaries.", timestamp=12)
+    monkeypatch.setattr("memengine.engine.bridge_keys", lambda *args: ["entity:commute"])
+    observed = []
+    result = memory.retrieve("What podcasts do I prefer on my commute?", mode="reconstructive",
+                             timestamp=15, token_budget=2048, read_only=True, _trace=observed)
+    first, second = observed
+    ident, = first["ce_scored_ids"]
+    assert second["ce_scored_ids"] == []
+    assert second["ce_scores"][ident] == .8
+    assert result["gate_stats"]["ce_pair_limit"] == result["gate_stats"]["ce_pairs_scored"] == 1
+    memory.store.close()
