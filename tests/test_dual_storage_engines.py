@@ -17,6 +17,7 @@ from tests.test_storage_parity import exercise, exercise_workspace
 
 @pytest.mark.parametrize("scheme", ["lancedb:///", "lance:///", "sqlite+lance:///"])
 def test_lance_hybrid_parity_and_uri_schemes(tmp_path, scheme):
+    pytest.importorskip("lancedb")
     target = tmp_path / "ledger.db" if scheme == "sqlite+lance:///" else tmp_path / "hybrid_dir"
     uri = f"{scheme}{target}"
     with closing(open_store(uri)) as store:
@@ -28,11 +29,13 @@ def test_lance_hybrid_parity_and_uri_schemes(tmp_path, scheme):
 
 
 def test_lance_hybrid_workspace_survives_reopen(tmp_path):
+    pytest.importorskip("lancedb")
     uri = f"lancedb:///{tmp_path / 'ws'}"
     exercise_workspace(lambda: CognitiveMemoryEngine(db_url=uri))
 
 
 def test_lance_hybrid_rollback_external_writes_and_injection_safety(tmp_path):
+    pytest.importorskip("lancedb")
     base = tmp_path / "tx_test"
     uri = f"lancedb:///{base}"
 
@@ -67,6 +70,7 @@ def test_lance_hybrid_rollback_external_writes_and_injection_safety(tmp_path):
 
 
 def test_lance_hybrid_builds_rabitq_ivf_rq_ann_and_fts_index(tmp_path):
+    pytest.importorskip("lancedb")
     uri = f"lancedb:///{tmp_path / 'ann_test'}"
     with closing(open_store(uri)) as store:
         with store.transaction():
