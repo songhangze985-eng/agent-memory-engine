@@ -645,7 +645,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
                     "belt_compressed_count": belt_total - len(belt),
                     "belt_pruned_count": stats["belt_pruned_count"], "gate_stats": stats,
                     "matched_entities": direct, "entity_fallback": fallback,
-                    "reconstructed": bool(_bridges or any(row.get("activation") for row in ranked)),
+                    "reconstructed": bool(_bridges or any(row.get("activation") or row.get("facet_followup") for row in ranked)),
                     "bridge_entities": list(dict.fromkeys([*_bridges, *(key for row in ranked for key in row.get("bridge_keys", ())) ])),
                     "packing_mode": "token_budget" if plan and plan.wide else "top_k",
                     "epistemic_scopes": recall_filter.scopes, "validity_as_of": recall_filter.as_of,
@@ -1068,7 +1068,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
             current = {row["id"]: row for row in self.store.facts_by_ids(
                 [row["id"] for row in ranking], scope=(user_id, agent_id, session_id))}
             metadata = ("entity_anchor", "zone", "final_score", "vector_score", "ce_score", "temporal_match",
-                        "exact_ident_hit", "temporal_role", "context_anchor_turn_id", "preference_priority", "coverage_priority")
+                        "exact_ident_hit", "temporal_role", "context_anchor_turn_id", "preference_priority", "coverage_priority",
+                        "facet_followup")
             result = {**retrieved, "ranked": [{**current[row["id"]], **{k: row[k] for k in metadata if k in row}}
                                               for row in ranking if row["id"] in current]}
             if timestamp is None and reference_time is None and result["validity_as_of"] is not None:

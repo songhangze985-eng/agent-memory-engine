@@ -3,6 +3,7 @@ from memengine.identifiers import compares_versions, extract_identifiers
 from memengine.storage.sqlite import key_type
 from memengine.linguistics import stem_features
 from memengine.retrieval.activation import bridge_feedback, discovered_windows, external_entities, spreading_activation
+from memengine.retrieval.coverage import facet_search_query, supported_facet
 from memengine.temporal import competition_terms
 from memengine.versioning import extract_versions, score_version_match
 from memengine.textutil import normalize_entity, strip_step_tags, tokenize_for_fts
@@ -55,6 +56,7 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
     contextual = bool(anchor_lex)
     channels = (dense, lexical, inverted, timed, exact, anchor_lex, anchor_vec) if contextual or plan else (dense, lexical, inverted, timed, exact)
     graph_hits, followup, feedback, calendar_hits, precision_hits, bridges = [], [], [], [], [], []
+    directed, gap = [], None
     if plan:
         lexical_weight, semantic_weight = (.60, .32) if named else (.46, .44)
         if reweight and not named and not hashed:
@@ -64,7 +66,30 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
                                                         include_cold=include_cold, top_n=per_channel_k)
         if plan.versions:
             precision_hits = store.version_candidates(plan.versions, scope=scope, filters=filters, include_cold=include_cold)
-        if plan.graph and use_entity_graph:
+        facets = parsed.get("facets", ())
+        directed_plan = plan.graph and facets and not (wanted or plan.versions or plan.windows or temporal.is_historical)
+        if directed_plan:
+            seeds = fuse(dense, inverted, w_vec=semantic_weight, w_hash=.08, extra_channels=(
+                (lexical_weight, lexical), (.14, timed), (.14, anchor_lex), (.10, anchor_vec)))[:10]
+            entity_names = {normalize_entity(key) for key in direct}
+
+            def scoped_facts(hits):
+                rows = store.recall_facts_by_ids([hit["id"] for hit in hits], scope=scope)
+                return {row["id"]: {**row, "entity_anchor": bool(entity_names.intersection(
+                            normalize_entity(key) for key in row["entity_z_keys"]))} for row in rows}
+
+            anchor_facts = list(scoped_facts(seeds).values())
+            gap = next((facet for facet in facets
+                        if not supported_facet([facet], anchor_facts, require_entity=bool(direct))), None)
+            if gap:
+                followup_query = facet_search_query(query, gap)
+                expanded = " ".join(stem_features(followup_query))
+                hits = store.search_lexical(f"{followup_query} {expanded}".strip(),
+                                            **{**options, "top_n": min(12, per_channel_k)})
+                scoped = scoped_facts(hits)
+                directed = [hit for hit in hits if hit["id"] in scoped and supported_facet(
+                    [gap], [scoped[hit["id"]]], require_entity=bool(direct))][:2]
+        elif plan.graph and use_entity_graph:
             seeds = fuse(lexical, dense, w_vec=lexical_weight, w_hash=semantic_weight,
                          extra_channels=((.16, anchor_lex), (.07, inverted), (.22, calendar_hits)))[:16]
             hydrated = {row["id"]: row for row in store.recall_facts_by_ids([row["id"] for row in seeds], scope=scope)}
@@ -83,7 +108,8 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
             expanded = bridge_feedback(query, seed_facts)
             if expanded:
                 feedback = store.search_lexical(f"{query_index} {expanded}", **{**options, "top_n": min(25, per_channel_k)})
-        channels = (*channels, graph_hits, followup, feedback, calendar_hits, precision_hits)
+        channels = (*channels, graph_hits, followup, feedback, calendar_hits, precision_hits, directed)
+    directed_ids = {row["id"] for row in directed}
     depth = {row["id"]: row for row in graph_hits}
     bridge_ids = {row["id"] for row in (*followup, *feedback)}
     ids = {hit["id"] for channel in channels for hit in channel}
@@ -112,6 +138,8 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
                     lexical_overlap=bool(query_terms.intersection(tokenize_for_fts(fact["plain"]).split())),
                     identifiers=identifiers, exact_ident_hit=exact_hits, exact_hit_ratio=exact_hits / max(1, len(query_keys)),
                     version_match=version_match, version_mismatch=bool(query_versions and versions and not version_match and not compare))
+        if fact["id"] in directed_ids:
+            fact["facet_followup"] = gap
         if fact["id"] in bridge_ids:
             fact["bridge_keys"] = bridges
         if fact["id"] in depth:
@@ -147,17 +175,24 @@ def recall(store, per_channel_k, query, parsed, temporal, scope, direct, *, vect
         fusion_options = dict(w_vec=semantic_weight, w_hash=.08, extra_channels=(
             (lexical_weight, hydrate(lexical)), (.14, hydrate(timed)), (.14, hydrate(anchor_lex)), (.10, hydrate(anchor_vec)),
             (.7, hydrate(exact)), (.60, hydrate(precision_hits)), (.45 if plan.windows else .14, hydrate(calendar_hits)),
-            (.19, hydrate(graph_hits)), (.09, hydrate(followup)), (.17, hydrate(feedback))))
+            (.19, hydrate(graph_hits)), (.09, hydrate(followup)), (.17, hydrate(feedback)), (.17, hydrate(directed))))
+
+        def ranked_head(rows):
+            if not directed_ids:
+                return rows[:60]
+            promoted = [row for row in rows[5:] if row["id"] in directed_ids]
+            return [*rows[:5], *promoted, *(row for row in rows[5:] if row["id"] not in directed_ids)][:60]
+
         if not plan.score_quantiles or wanted or plan.versions or plan.windows:
-            return fuse(*primary, **fusion_options)[:60]
+            return ranked_head(fuse(*primary, **fusion_options))
         normalized = fuse(*primary, **fusion_options, normalized_channels=(
             score_quantiles(dense, "vector_score"),
             {},
             score_quantiles(lexical, "bm25_score", lower_is_better=True),
         ))
         if not plan.preserve_candidate_at_50:
-            return normalized[:60]
-        baseline = fuse(*primary, **fusion_options)[:60]
+            return ranked_head(normalized)
+        baseline = ranked_head(fuse(*primary, **fusion_options))
         head = {fact["id"] for fact in baseline[:50]}
         by_id = {fact["id"]: fact for fact in normalized}
         return [fact for fact in normalized if fact["id"] in head] + [by_id[fact["id"]] for fact in baseline[50:]]

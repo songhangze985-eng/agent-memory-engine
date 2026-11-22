@@ -401,6 +401,57 @@ def test_allergy_slots_repair_preexisting_cross_session_statements(tmp_path, mon
             assert not store.get_core_snapshot()["core_profile"]
 
 
+def test_reconstruction_searches_only_the_uncovered_facet(monkeypatch):
+    engine = CognitiveMemoryEngine(per_channel_k=1)
+    with closing(engine.store) as store:
+        commute = retain(engine, "My morning ferry commute duration is forty minutes.", speaker="Alice", session_id="commute")
+        podcast = retain(engine, "My podcast genre is long-form history.", speaker="Alice", session_id="podcasts")
+        retain(engine, "My podcast genre is mystery drama.", speaker="Alice", user_id="neighbor", session_id="podcasts")
+        query = "What did Alice say about morning ferry commute duration and podcast genre?"
+        options = {"token_budget": 144, "include_short_term": False}
+        before = store.conn.total_changes
+        initial = engine.build_context(query, **options)
+        assert initial["lexical_facet_coverage"]["covered_at_10"] == 1
+
+        searches, score_calls = [], []
+        lexical = store.search_lexical
+        score = engine.reranker.score
+
+        def track(query, **options):
+            searches.append((query, options["user_id"], options["top_n"]))
+            return lexical(query, **options)
+
+        def track_score(query, candidates):
+            score_calls.append(query)
+            return score(query, candidates)
+
+        monkeypatch.setattr(store, "search_lexical", track)
+        monkeypatch.setattr(engine.reranker, "score", track_score)
+        result = engine.build_context(query, mode="reconstructive", **options)
+        assert len(searches) == 2
+        assert score_calls == [query]
+        assert searches[1][0].startswith("What did Alice say about podcast genre")
+        assert "commute duration" not in searches[1][0]
+        assert searches[1][1:] == ("default", 1)
+        assert result["lexical_facet_coverage"]["covered_at_10"] == 2
+        assert result["prefix_version"] == initial["prefix_version"]
+        assert result["token_breakdown"]["total"] <= options["token_budget"]
+        assert {row["id"] for row in result["ranked"] if row.get("facet_followup")} == {podcast}
+
+        searches.clear()
+        reflected = engine.reflect(query, token_budget=144)
+        assert len(searches) == 2
+        assert set(reflected["cited_memory_ids"]) == {commute, podcast}
+        assert not reflected["partial"]
+
+        searches.clear()
+        engine.per_channel_k = 35
+        complete = engine.build_context(query, mode="reconstructive", **options)
+        assert len(searches) == 1
+        assert complete["lexical_facet_coverage"]["covered_at_10"] == 2
+        assert store.conn.total_changes == before
+
+
 def test_reflect_fills_two_event_gap_and_cites_only_retrieved_memory():
     engine = CognitiveMemoryEngine()
     with closing(engine.store) as store:

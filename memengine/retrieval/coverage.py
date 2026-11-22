@@ -48,8 +48,13 @@ def explicit_facets(query):
     return parts if all(terms) and len({frozenset(group) for group in terms}) == len(parts) else []
 
 
+def facet_search_query(query, facet):
+    intro = _LIST_INTRO.search(query)
+    return f"{query[:intro.end()]}{facet}" if intro else facet
+
+
 def _facet_source(fact, require_entity):
-    return (fact["status"] == "active" and bool(fact["source_turn_ids"]) and fact["role"] in {"user", "tool"}
+    return (fact["status"] == "active" and not fact.get("is_stale") and bool(fact["source_turn_ids"]) and fact["role"] in {"user", "tool"}
             and (not require_entity or fact.get("entity_anchor")) and not fact["plain"].rstrip().endswith(("?", "？")))
 
 
