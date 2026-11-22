@@ -167,6 +167,43 @@ def test_revised_preference_is_available_by_history_and_removed_from_current_con
         assert any(f"fact:{old}" in claim["evidence_ids"] for claim in history["claims"])
 
 
+def test_facet_coverage_packs_independent_evidence_before_duplicate_sessions():
+    engine = CognitiveMemoryEngine()
+    with closing(engine.store) as store:
+        commute = retain(engine, "My commute duration is forty minutes.", speaker="Alice", session_id="one")
+        duplicate = retain(engine, "My commute duration is forty minutes.", speaker="Alice", session_id="two")
+        genre = retain(engine, "My podcast genre is long-form history.", speaker="Alice", session_id="one")
+        noise = retain(engine, "My noise tolerance is low.", speaker="Alice", session_id="three")
+        other = retain(engine, "My noise tolerance is excellent.", speaker="Bob", session_id="four")
+        query = "What did Alice say about commute duration, podcast genre, and noise tolerance?"
+        store.set_core_snapshot("Preserve local documents.", [])
+        before = store.conn.total_changes
+
+        result = engine.build_context(query, token_budget=144, top_k=3, include_short_term=False)
+        packed = [row for row in result["items"] if row["kind"] == "fact"]
+        assert {row["id"] for row in packed} == {commute, genre, noise}
+        assert {row["id"] for row in packed if row["session_id"] == "one"} == {commute, genre}
+        assert result["lexical_facet_coverage"] == {
+            "facets": [
+                {"facet": "commute duration", "evidence_ids": [f"fact:{commute}"]},
+                {"facet": "podcast genre", "evidence_ids": [f"fact:{genre}"]},
+                {"facet": "noise tolerance", "evidence_ids": [f"fact:{noise}"]},
+            ],
+            "covered_at_10": 3,
+        }
+        short = engine.build_context(query, token_budget=144, top_k=2, include_short_term=False)
+        assert short["lexical_facet_coverage"]["covered_at_10"] == 2
+        assert sum(not facet["evidence_ids"] for facet in short["lexical_facet_coverage"]["facets"]) == 1
+
+        answer = engine.answer(query, token_budget=144, include_short_term=False)
+        cited = {ident for claim in answer["claims"] for ident in claim["evidence_ids"]}
+        assert {f"fact:{ident}" for ident in (commute, genre, noise)} <= cited
+        assert f"fact:{other}" not in cited
+        assert answer["token_breakdown"]["total"] <= 144
+        assert answer["prefix_version"] == result["prefix_version"] == short["prefix_version"]
+        assert duplicate not in {row["id"] for row in packed} and store.conn.total_changes == before
+
+
 def test_claim_equivalences_preserve_subject_polarity_and_slot_values():
     options = {"equivalences": True}
     assert supports_claim("Alice purchased a piano.", "Alice bought a piano.", **options)

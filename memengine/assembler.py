@@ -6,6 +6,7 @@ import re
 from typing import TypedDict
 
 from memengine.reflection import recent_observation_evidence
+from memengine.retrieval.coverage import packed_facet_coverage
 from memengine.lifecycle import CURRENT_STATE_SLOT_PREFIXES, LEGACY_PREFERENCE_SUMMARY, normalized_content
 from memengine.temporal import competition_terms
 from memengine.textutil import estimate_tokens, strip_step_tags, token_units
@@ -23,6 +24,7 @@ class ContextBundle(TypedDict):
     evidence_turn_ids: list[int]
     token_breakdown: dict[str, int]
     gate_stats: dict
+    lexical_facet_coverage: dict
 
 
 def render_prefix(snapshot):
@@ -171,8 +173,8 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
                        and fact.get("graph_depth") == 2 and fact.get("entity_anchor")][:3]
             bridge_ids = {fact["id"] for fact in bridges}
             facts = [*facts[:10], *bridges, *(fact for fact in facts[10:] if fact["id"] not in bridge_ids)]
-        if any(fact.get("preference_priority") for fact in facts):
-            facts.sort(key=lambda fact: not fact.get("preference_priority"))
+        if any("coverage_priority" in fact or fact.get("preference_priority") for fact in facts):
+            facts.sort(key=lambda fact: (fact.get("coverage_priority", float("inf")), not fact.get("preference_priority")))
         tau = result["gate_stats"].get("tau_abs")
         if tau is None:
             tau = .12
@@ -272,11 +274,14 @@ def assemble_context(store, result, *, prefix, token_budget, drilldown_top_n, dr
     if not dynamic and not result["empty_recall"]:
         stats = {**stats, "empty_reason": "budget"}
     total = sum(tokens.values())
+    evidence = _evidence_map(items)
+    facets = () if historical else result["parsed_query"].get("facets", ())
     return {"system_prefix": prefix, "prefix_version": sha256(prefix.encode("utf-8")).hexdigest()[:12],
             "dynamic_memory": dynamic, "empty_recall": not dynamic, "items": items,
-            "evidence_map": _evidence_map(items),
+            "evidence_map": evidence,
             "evidence_turn_ids": evidence_turn_ids,
             "token_breakdown": {**tokens, "dynamic_memory": dynamic_tokens, "total": total,
                                 "prefix_tokens": tokens["system_prefix"], "facts_tokens": tokens["facts"],
                                 "drilldown_tokens": tokens["drilldown"], "total_injected_tokens": total},
-            "gate_stats": stats}
+            "gate_stats": stats,
+            "lexical_facet_coverage": packed_facet_coverage(facets, items, require_entity=bool(result["matched_entities"]))}

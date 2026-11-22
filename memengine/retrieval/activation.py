@@ -133,20 +133,3 @@ def bridge_feedback(query, facts):
     entities = [key.partition(":")[2] for key in external_entities(query, facts)]
     related = [word for triggers, terms in _QUERY_ASSOCIATIONS if triggers & mentioned for word in terms]
     return " ".join(dict.fromkeys([*entities[:3], *related[:7], *repeated[:9]]))
-
-
-def diversify_episodes(query, facts):
-    """Retain the ranked head and spread the remaining aggregate evidence across episodes."""
-    aggregate = re.search(r"\b(?:what|which|where|who|how many)\b.{1,90}\b(?:both|have|has|types|kinds|different|various|done|visited)\b|"
-                          r"\b(?:activities|events|cities|countries|books|places|hobbies|reasons)\b|哪些|分别|一共", query, re.I)
-    if len(facts) < 8 or not aggregate:
-        return facts
-    head, remaining = list(facts[:5]), list(facts[5:])
-    counts = Counter(row["session_id"] for row in head)
-    while remaining:
-        chosen = max(range(len(remaining)), key=lambda i: (
-            remaining[i]["final_score"] / (1 + .15 * counts[remaining[i]["session_id"]]), -i))
-        fact = remaining.pop(chosen)
-        head.append(fact)
-        counts[fact["session_id"]] += 1
-    return head
