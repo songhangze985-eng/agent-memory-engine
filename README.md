@@ -10,153 +10,65 @@
 
 ## 系统架构图
 
-为保证全局清晰、逻辑闭环且排布舒展无重叠，系统架构拆分为两张互补视图：
-- **图 1（全局分层存储与读写演化闭环）**：展示具体输入如何经治理层分流进入**短期记忆（L0/STM）**、**工作记忆（L1/WM）**与**长期记忆（L2+L3/LTM）**，三层如何晋升、同步索引与安全回滚，以及最终输出如何闭环回写。
-- **图 2（查询调用、三阶段混合检索与渐进披露闭环）**：展示一条查询请求如何触发 Stage 1/2/3 多路召回、精确符号门禁、公式重排、证据链核验、渐进式披露输出，以及 Agent 按需工具钻取的完整回路。
-
-### 图 1：全局分层架构、三层记忆存储与演化闭环
+本项目包含**两套各自独立建表与独立路由的引擎**（不自动互通，可按需择一使用）：默认推荐的 **v2 虚拟文件系统引擎（`VFSMemoryEngine`）** 与完整保留兼容的 **v1 认知账本引擎（`CognitiveMemoryEngine`）**。图中所有模块、存储层、调用路径与输入输出均严格对应仓库现有代码，无示例占位或未实现的假想流程：
 
 ```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 52, 'rankSpacing': 58, 'curve': 'basis', 'padding': 18}}}%%
+%%{init: {'flowchart': {'nodeSpacing': 48, 'rankSpacing': 52, 'curve': 'basis', 'padding': 16}}}%%
 flowchart TB
-  subgraph Inputs["1. 外部输入（明确载荷）"]
-    InDlg["对话流输入<br/>text · role · speaker · timestamp · session_id"]
-    InRule["任务证据 / 规则输入<br/>path · trigger · action · verification · expected_version"]
-    InQry["查询与上下文请求<br/>query · user_id / agent_id · token_budget · reference_time"]
+  Caller["外部 Agent / 调用方（Python SDK · FastAPI · CLI · OpenAI / MCP Tools）<br/>输入：对话轮次 · 规则/笔记 · 任务状态 · 查询（query / scope / budget / time）<br/>输出：上下文包 · 正文/原话 · 核验作答 · 版本与 409/404 状态"]
+
+  subgraph V2["v2 虚拟文件系统引擎 · VFSMemoryEngine（/v2/vfs/* · CLI vfs · 12 Tools）"]
+    V2Write["写入与事务入口<br/>append_transcript() · write() · write_rule()<br/>write_rule：调用方布尔三问门控 + 三段式模板 + 无验证强制 unverified<br/>存储层：ACID 事务 · 行级乐观锁 expected_version（冲突返 409）· 写前快照"]
+
+    V2L0[("短期 / 原始日志 · L0<br/>Local JSONL.GZ 分块冷存（含 S3 适配）<br/>按 user/agent/session/date 分片 · 零向量化")]
+    V2Nodes[("工作区 L1 + 长期 L2 + 目录 L3<br/>memory_nodes / snapshots（SQLite WAL / PG16）<br/>L1：/global.md 与 /working/ 草稿（不建向量）<br/>L2：/strategies/ /taboos/ /preferences/ · L3：/INDEX.md")]
+    V2Idx[("仅活跃 L2 同步三路索引<br/>① 向量：NumPy / LanceDB IVF_RQ / PG pgvector<br/>② 词法：SQLite FTS5 / PG tsvector<br/>③ 精确符号与 8 类版本表：memory_node_identifiers")]
+
+    V2Maint["显式维护方法（需外部主动调用）<br/>dream_consolidate()：L0+L1 → L2（默认正则，可传自定义合成器）<br/>compact_directory()：超 10 条或 3,000T 告警后合并为 GUIDE.md<br/>rollback_batch()：按快照整批原子回滚"]
+
+    V2Read["三阶段检索与渐进披露 · build_context() / search()<br/>Stage 1：无条件预加载 L1 /global.md + L2 always_active<br/>Stage 2：tree_outline() 输出 ls -R 轻量大纲（仅路径 + ≤50字摘要）<br/>Stage 3：仅查 L2 三路召回 → RRF + 精确缺失空返 + Semantic×W_ver×W_rec<br/>输出：≤360T 前缀 + ≤50字摘要卡 + compaction_alerts（正文由 read_note 按需拉取）"]
+
+    V2Write -->|"原始对话直落冷存"| V2L0
+    V2Write -->|"L1/L2 原子写入与快照"| V2Nodes
+    V2Nodes -->|"仅活跃 L2 实时同步"| V2Idx
+    V2L0 -.->|"显式做梦扫描"| V2Maint
+    V2Nodes <-->|"显式晋升 / 合并 / 整批回滚"| V2Maint
+    V2Nodes -->|"预加载 + 目录大纲 + 正文"| V2Read
+    V2Idx -->|"三路 Top-K 候选"| V2Read
+    V2L0 -.->|"read_transcripts() 按 ID 懒加载"| V2Read
   end
 
-  Gateway["2. 统一接入与租户隔离层<br/>Python SDK · FastAPI /v2/vfs/* & /v1/* · CLI · OpenAI / MCP 12 Tools<br/>宿主强制绑定 user_id / agent_id / session_id 作用域"]
-
-  subgraph WriteGov["3. 写入治理与并发事务层"]
-    Gate["显著性三问门控 + 三段式状态机<br/>① 拦截界面可见与一次性流水账<br/>② 强制结构：[触发条件] + [动作] + [验证结果]<br/>③ 缺有效验证结果 → 自动锁为 unverified（conf ≤ 0.65）"]
-    Tx["ACID 事务与乐观锁防线<br/>行级 expected_version 校验（冲突即返 HTTP 409）<br/>写前自动生成版本快照 · 成功返回新 version"]
-    Gate -->|"通过显著性门控"| Tx
+  subgraph V1["v1 认知账本引擎 · CognitiveMemoryEngine（/v1/* · 独立表向后兼容）"]
+    V1Store[("独立账本存储 · SQLite / LanceHybridStore / PG16<br/>短期：turns 会话缓冲 · 工作区：tasks 检查点与核验提交<br/>长期：facts / blocks / 关系边 / exact_identifiers")]
+    V1Query["召回与证据核验 · recall() / answer() / reflect()<br/>四路召回 + 双极渐近环 + Chronicle 两跳图 + 预算装填<br/>单从句核验：已证结论+引文 / 部分作答+缺失子问 / 严格拒答"]
+    V1Store -->|"多路召回与事实状态"| V1Query
   end
 
-  subgraph Storage["4. 分层混合存储层（SQLite WAL / LanceDB IVF_RQ / PostgreSQL 16+）"]
-    L0[("短期 / 原始记忆 · L0 / STM<br/>Local JSONL.GZ / S3 分块冷存（v1 turns 缓冲）<br/>按 user/agent/session/date 分片 · 严禁向量化")]
-    L1[("工作记忆 · L1 / WM<br/>/global.md 全局身份 + /working/*.md 草稿<br/>v1 任务检查点与临时证据 · 不进长期向量库")]
-    L2[("长期记忆 · L2 + L3 / LTM（memory_nodes 表）<br/>/strategies/ · /taboos/ · /preferences/ + L3 /INDEX.md<br/>含 verification_status · always_active · content_tokens · source_ids")]
-    L2Idx[("仅 L2 同步三路检索索引（L0 / L1 物理隔离）<br/>① 向量 ANN：LanceDB IVF_RQ / VectorChord vchordrq / Qdrant<br/>② 词法检索：SQLite FTS5 / ParadeDB pg_search / vchord_bm25<br/>③ 精确符号与 8 类版本表：memory_node_identifiers")]
-    Evo["离线演化与安全回滚引擎<br/>• 异步做梦：L0 + L1 提炼晋升 L2<br/>• 动态合并：单目录超 10 条或 3,000T → GUIDE.md<br/>• 原子回滚：rollback_batch 一键撤销坏梦与错误合并"]
-
-    L0 -.->|"source_transcript_ids 溯源 / 做梦提炼"| Evo
-    L1 -->|"核验通过 / 任务显式 commit 晋升"| L2
-    L2 -->|"仅活跃 L2 节点实时同步"| L2Idx
-    L2 <-->|"目录膨胀重构 / 整批快照回滚"| Evo
-  end
-
-  Engine["5. 检索调度、渐进装配与证据核验中枢（调用细节见图 2）<br/>v2：Stage 1 预加载 + Stage 2 目录导航 + Stage 3 混合重排 + 渐进披露<br/>v1：双极渐近环 + Chronicle 双时态两跳图 + 单从句证据链核验"]
-
-  subgraph Outputs["6. 具体输出（明确字段与状态）"]
-    OutCtx["输出 A · 高密度上下文包（送入 LLM）<br/>system_prefix（≤360T L3 前缀缓存）<br/>+ Preload + ls -R 大纲 + ≤50字摘要卡"]
-    OutAns["输出 B · 核验作答 / 工具回读<br/>已证结论+引文 / 部分作答+缺失子问 / 严格拒答<br/>或 read_note 完整正文 / L0 原始对话"]
-    OutMeta["输出 C · 治理与状态元数据<br/>score_breakdown · source_transcript_ids<br/>compaction_alerts 目录告警 · 404/409 状态"]
-  end
-
-  InDlg --> Gateway
-  InRule --> Gateway
-  InQry --> Gateway
-
-  Gateway -->|"① 原始对话直落冷存"| L0
-  Gateway -->|"② 全局身份 / 任务草稿"| L1
-  Gateway -->|"③ 规则与经验写入"| Gate
-  Gateway -->|"④ 查询调用（scope / budget / time）"| Engine
-
-  Tx -->|"原子落盘 + 记录快照"| L2
-
-  L0 -.->|"按溯源 ID 懒加载原话"| Engine
-  L1 -->|"全局身份 + 活跃任务态"| Engine
-  L2 -->|"预加载规则 + 目录树 + 全文"| Engine
-  L2Idx -->|"三路 Top-K 候选与精确匹配"| Engine
-
-  Engine --> OutCtx
-  Engine --> OutAns
-  Engine --> OutMeta
-
-  OutAns -.->|"执行验证产生新结果 → 回写升级 verified（完整闭环）"| Gateway
+  Caller -->|"v2 写入与工具调用"| V2Write
+  Caller -->|"v2 查询（scope / budget / time）"| V2Read
+  V2Read -->|"上下文包 / 摘要卡 / read_note 正文 / 原话"| Caller
+  Caller -->|"v1 retain / buffer / task / recall"| V1Store
+  V1Query -->|"v1 证据上下文 / 核验作答 / 拒答"| Caller
 
   classDef io fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#111827
   classDef ctrl fill:#f5f3ff,stroke:#7c3aed,stroke-width:1.5px,color:#111827
   classDef store fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#111827
   classDef idx fill:#fff7ed,stroke:#f97316,stroke-width:1.5px,color:#111827
-  classDef out fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#111827
-  class InDlg,InRule,InQry io
-  class Gateway,Gate,Tx,Engine ctrl
-  class L0,L1,L2,Evo store
-  class L2Idx idx
-  class OutCtx,OutAns,OutMeta out
+  classDef v1 fill:#f8fafc,stroke:#64748b,stroke-width:1.5px,color:#111827
+  class Caller io
+  class V2Write,V2Maint,V2Read ctrl
+  class V2L0,V2Nodes store
+  class V2Idx idx
+  class V1Store,V1Query v1
 ```
 
-### 图 2：查询调用链路、三阶段混合检索与渐进式披露闭环
+### 能力实现边界清单（已实测 vs 仅代码适配 vs 非内置）
 
-```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 46, 'rankSpacing': 54, 'curve': 'basis', 'padding': 16}}}%%
-flowchart TB
-  QIn["查询输入载荷<br/>query · user_id / agent_id · path_prefix<br/>verified_only · reference_time · token_budget · disclosure"]
-
-  Dispatch["检索调度入口<br/>VFSMemoryEngine.build_context() / search()<br/>兼容 v1 CognitiveMemoryEngine.recall() / answer()"]
-
-  QIn --> Dispatch
-
-  subgraph Stage1["Stage 1 · 强制预加载（无条件命中）"]
-    S1["get_preloaded_nodes()<br/>无条件拉取 L1 /global.md<br/>+ L2 always_active=True 高频避坑规则<br/>不受语义相似度波动影响"]
-  end
-
-  subgraph Stage2["Stage 2 · 结构化目录导航"]
-    S2["tree_outline()（轻量 ls -R 大纲）<br/>仅暴露 path + ≤50字 index_summary + 状态徽章<br/>不注入冗长正文 · 供强模型主动浏览选读"]
-  end
-
-  subgraph Stage3["Stage 3 · Hybrid RAG 多路并行检索（仅查活跃 L2）"]
-    C1["向量 ANN 通道<br/>LanceDB IVF_RQ / VectorChord / Qdrant"]
-    C2["词法 BM25 通道<br/>FTS5 / ParadeDB pg_search / vchord_bm25"]
-    C3["精确符号与版本通道<br/>memory_node_identifiers（O(1) 查表）<br/>8 类版本分级 · 稳定版优先于 rc"]
-    Fuse["RRF 融合 + 精确缺失门禁<br/>查无对应版本号 / 错误码 / 代码符号 → 严格空返 []"]
-    Rerank["公式重排 + 时效与日历加权<br/>Final = Semantic_Sim × W_verified × W_recency<br/>verified=1.35 vs unverified=0.55 · 禁忌常驻 W_recency=1.0"]
-
-    C1 --> Fuse
-    C2 --> Fuse
-    C3 --> Fuse
-    Fuse --> Rerank
-  end
-
-  Dispatch -->|"① 必载规则"| S1
-  Dispatch -->|"② 目录导航"| S2
-  Dispatch -->|"③ 并行多路召回（每路 LIMIT fetch_k）"| C1
-  Dispatch --> C2
-  Dispatch --> C3
-
-  Assemble["渐进式披露与预算装配器（杜绝中途硬截断）<br/>• progressive（默认）：仅注入 ≤50字 index_summary 卡片<br/>• full：整篇装入，超预算整篇退化为摘要卡，绝不截断因果前提<br/>• v1 核验路径：admissible_evidence + assess_claims 单从句核验"]
-
-  S1 --> Assemble
-  S2 --> Assemble
-  Rerank --> Assemble
-
-  OutBundle["上下文输出包（注入 LLM Prompt）<br/>• system_prefix：L3 /INDEX.md（≤360T 字节稳定缓存）<br/>• dynamic_memory：Stage 1 + Stage 2 + Stage 3 渐进卡片<br/>• score_breakdown · source_transcript_ids · compaction_alerts"]
-
-  OutVerified["核验作答输出（v1 answer / reflect）<br/>• 证据充分：已证结论 + evidence_ids 引文<br/>• 部分有据：partial=True 仅答已证部分 + 列出缺失子问<br/>• 证据不足：abstained=True 严格拒答不编造"]
-
-  Assemble --> OutBundle
-  Assemble --> OutVerified
-
-  AgentLoop["Agent 决策与按需工具调用闭环<br/>① 命中高相关摘要卡 → read_note(path) 拉取完整 detail_body<br/>② 需复核原始语境 → mem_read_transcripts(ids) 懒加载 L0 原话<br/>③ 任务验证规则有效 → mem_write_rule() 回写升级 verified"]
-
-  OutBundle --> AgentLoop
-  AgentLoop -.->|"按需补查 / 完整正文与原文钻取 / 新验证结果回流"| Dispatch
-
-  classDef inNode fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#111827
-  classDef s1 fill:#fef2f2,stroke:#ef4444,stroke-width:1.5px,color:#111827
-  classDef s2 fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px,color:#111827
-  classDef s3 fill:#fff7ed,stroke:#f97316,stroke-width:1.5px,color:#111827
-  classDef core fill:#f5f3ff,stroke:#7c3aed,stroke-width:1.5px,color:#111827
-  classDef out fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#111827
-  class QIn inNode
-  class Dispatch,Assemble,AgentLoop core
-  class S1 s1
-  class S2 s2
-  class C1,C2,C3,Fuse,Rerank s3
-  class OutBundle,OutVerified out
-```
+| 状态 | 范围说明 |
+| :--- | :--- |
+| **已实现并实机实测** | v2 VFS 全链路（SQLite WAL、嵌入式 `LanceL2Index` `IVF_RQ`、Docker PG16 `pgvector`+`tsvector`、Local L0 `.jsonl.gz`、三阶段检索、`write_rule` 状态机、渐进披露、`compact_directory`、`rollback_batch`、`/v2/vfs/*` HTTP、CLI `vfs`、12 工具）；v1 账本全链路（SQLite / `LanceHybridStore` / PG16、双极环、Chronicle、证据核验作答、`/v1/*` HTTP/CLI）。 |
+| **已写代码适配（仅单测）** | `QdrantL2Index`（REST 客户端）、`S3TranscriptStore`（boto3 客户端）、PostgreSQL `vchordrq` / `diskann` / `pg_search` / `vchord_bm25` 自动探测 SQL 分支（已通过 Mock/录制单测，尚未在真实 Qdrant / S3 / VectorChord / ParadeDB 服务端做实机压测）。 |
+| **不在引擎内部实现（需外部提供）** | ① 后台定时自动做梦/自动目录合并守护进程（均需外部显式触发）；② 内置默认 LLM 做梦与目录重构器（默认仅确定性兜底，需调用方传入自定义 `synthesizer`/`refactorer`）；③ 引擎自动感知界面上下文（`write_rule` 依据调用方传入的布尔参数判定）；④ v1 与 v2 之间的数据自动互通与自动 Agent 工具循环。 |
 
 ---
 
