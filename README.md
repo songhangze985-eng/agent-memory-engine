@@ -10,50 +10,152 @@
 
 ## 系统架构图
 
+为保证全局清晰、逻辑闭环且排布舒展无重叠，系统架构拆分为两张互补视图：
+- **图 1（全局分层存储与读写演化闭环）**：展示具体输入如何经治理层分流进入**短期记忆（L0/STM）**、**工作记忆（L1/WM）**与**长期记忆（L2+L3/LTM）**，三层如何晋升、同步索引与安全回滚，以及最终输出如何闭环回写。
+- **图 2（查询调用、三阶段混合检索与渐进披露闭环）**：展示一条查询请求如何触发 Stage 1/2/3 多路召回、精确符号门禁、公式重排、证据链核验、渐进式披露输出，以及 Agent 按需工具钻取的完整回路。
+
+### 图 1：全局分层架构、三层记忆存储与演化闭环
+
 ```mermaid
-flowchart TD
-  Client["Agent 接入层 · Python SDK / FastAPI / CLI / OpenAI & MCP 12 Tools"]
-
-  subgraph WriteLayer["写入治理与状态机"]
-    Salience["显著性三问门控 · SALIENCE_WRITE_GUIDE"]
-    RuleSM["三段式规则状态机 · 触发条件 / 动作 / 验证结果"]
-    OptLock["ACID 事务 · 乐观锁 expected_version · 版本快照"]
-    Salience --> RuleSM --> OptLock
+%%{init: {'flowchart': {'nodeSpacing': 52, 'rankSpacing': 58, 'curve': 'basis', 'padding': 18}}}%%
+flowchart TB
+  subgraph Inputs["1. 外部输入（明确载荷）"]
+    InDlg["对话流输入<br/>text · role · speaker · timestamp · session_id"]
+    InRule["任务证据 / 规则输入<br/>path · trigger · action · verification · expected_version"]
+    InQry["查询与上下文请求<br/>query · user_id / agent_id · token_budget · reference_time"]
   end
 
-  subgraph StorageLayer["分层混合存储（SQLite / LanceDB / PostgreSQL 16+）"]
-    L0[("L0 原始对话冷存 · Local JSONL.GZ / S3\n零向量化 · 44,991 turns/s")]
-    VFS[("L1/L2/L3 虚拟文件系统 · memory_nodes\n/global.md · /strategies/ · /taboos/ · /INDEX.md")]
-    L2Idx[("仅 L2 检索增强索引\nLanceDB IVF_RQ / VectorChord / Qdrant\n+ FTS5 / ParadeDB BM25 + 精确符号版本表")]
-    VFS -->|仅活跃 L2 同步| L2Idx
+  Gateway["2. 统一接入与租户隔离层<br/>Python SDK · FastAPI /v2/vfs/* & /v1/* · CLI · OpenAI / MCP 12 Tools<br/>宿主强制绑定 user_id / agent_id / session_id 作用域"]
+
+  subgraph WriteGov["3. 写入治理与并发事务层"]
+    Gate["显著性三问门控 + 三段式状态机<br/>① 拦截界面可见与一次性流水账<br/>② 强制结构：[触发条件] + [动作] + [验证结果]<br/>③ 缺有效验证结果 → 自动锁为 unverified（conf ≤ 0.65）"]
+    Tx["ACID 事务与乐观锁防线<br/>行级 expected_version 校验（冲突即返 HTTP 409）<br/>写前自动生成版本快照 · 成功返回新 version"]
+    Gate -->|"通过显著性门控"| Tx
   end
 
-  subgraph RetrievalLayer["三阶段混合检索与渐进式披露"]
-    S1["Stage 1 · 强制预加载\nL1 /global.md + L2 always_active"]
-    S2["Stage 2 · 结构化目录导航\nls -R tree_outline + read_note"]
-    S3["Stage 3 · Hybrid RAG 重排\nSemantic_Sim x W_verified x W_recency"]
-    PD["渐进式披露（<=50 字 index_summary）\n零中途硬截断 · 按需拉取 detail_body"]
-    Compact["动态目录合并重构\n>10 条或 >3000 Tokens -> GUIDE.md（可整批回滚）"]
+  subgraph Storage["4. 分层混合存储层（SQLite WAL / LanceDB IVF_RQ / PostgreSQL 16+）"]
+    L0[("短期 / 原始记忆 · L0 / STM<br/>Local JSONL.GZ / S3 分块冷存（v1 turns 缓冲）<br/>按 user/agent/session/date 分片 · 严禁向量化")]
+    L1[("工作记忆 · L1 / WM<br/>/global.md 全局身份 + /working/*.md 草稿<br/>v1 任务检查点与临时证据 · 不进长期向量库")]
+    L2[("长期记忆 · L2 + L3 / LTM（memory_nodes 表）<br/>/strategies/ · /taboos/ · /preferences/ + L3 /INDEX.md<br/>含 verification_status · always_active · content_tokens · source_ids")]
+    L2Idx[("仅 L2 同步三路检索索引（L0 / L1 物理隔离）<br/>① 向量 ANN：LanceDB IVF_RQ / VectorChord vchordrq / Qdrant<br/>② 词法检索：SQLite FTS5 / ParadeDB pg_search / vchord_bm25<br/>③ 精确符号与 8 类版本表：memory_node_identifiers")]
+    Evo["离线演化与安全回滚引擎<br/>• 异步做梦：L0 + L1 提炼晋升 L2<br/>• 动态合并：单目录超 10 条或 3,000T → GUIDE.md<br/>• 原子回滚：rollback_batch 一键撤销坏梦与错误合并"]
+
+    L0 -.->|"source_transcript_ids 溯源 / 做梦提炼"| Evo
+    L1 -->|"核验通过 / 任务显式 commit 晋升"| L2
+    L2 -->|"仅活跃 L2 节点实时同步"| L2Idx
+    L2 <-->|"目录膨胀重构 / 整批快照回滚"| Evo
   end
 
-  subgraph V1Compat["v1 认知账本与核验层（完全向后兼容）"]
-    Ledger["双极渐近环 · Chronicle 双时态两跳图 · 证据链核验与部分作答"]
+  Engine["5. 检索调度、渐进装配与证据核验中枢（调用细节见图 2）<br/>v2：Stage 1 预加载 + Stage 2 目录导航 + Stage 3 混合重排 + 渐进披露<br/>v1：双极渐近环 + Chronicle 双时态两跳图 + 单从句证据链核验"]
+
+  subgraph Outputs["6. 具体输出（明确字段与状态）"]
+    OutCtx["输出 A · 高密度上下文包（送入 LLM）<br/>system_prefix（≤360T L3 前缀缓存）<br/>+ Preload + ls -R 大纲 + ≤50字摘要卡"]
+    OutAns["输出 B · 核验作答 / 工具回读<br/>已证结论+引文 / 部分作答+缺失子问 / 严格拒答<br/>或 read_note 完整正文 / L0 原始对话"]
+    OutMeta["输出 C · 治理与状态元数据<br/>score_breakdown · source_transcript_ids<br/>compaction_alerts 目录告警 · 404/409 状态"]
   end
 
-  Client -->|原始轮次| L0
-  Client -->|规则与笔记写入| Salience
-  OptLock --> VFS
-  L0 -.->|异步做梦 / 按溯源 ID 钻取| VFS
-  VFS --> S1
-  VFS --> S2
-  L2Idx --> S3
-  S1 --> PD
-  S2 --> PD
-  S3 --> PD
-  VFS -->|超阈值触发| Compact
-  Compact --> VFS
-  PD -->|稳定前缀 + 高密度上下文| Client
-  Client <-->|/v1/* 与反思核验| Ledger
+  InDlg --> Gateway
+  InRule --> Gateway
+  InQry --> Gateway
+
+  Gateway -->|"① 原始对话直落冷存"| L0
+  Gateway -->|"② 全局身份 / 任务草稿"| L1
+  Gateway -->|"③ 规则与经验写入"| Gate
+  Gateway -->|"④ 查询调用（scope / budget / time）"| Engine
+
+  Tx -->|"原子落盘 + 记录快照"| L2
+
+  L0 -.->|"按溯源 ID 懒加载原话"| Engine
+  L1 -->|"全局身份 + 活跃任务态"| Engine
+  L2 -->|"预加载规则 + 目录树 + 全文"| Engine
+  L2Idx -->|"三路 Top-K 候选与精确匹配"| Engine
+
+  Engine --> OutCtx
+  Engine --> OutAns
+  Engine --> OutMeta
+
+  OutAns -.->|"执行验证产生新结果 → 回写升级 verified（完整闭环）"| Gateway
+
+  classDef io fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#111827
+  classDef ctrl fill:#f5f3ff,stroke:#7c3aed,stroke-width:1.5px,color:#111827
+  classDef store fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#111827
+  classDef idx fill:#fff7ed,stroke:#f97316,stroke-width:1.5px,color:#111827
+  classDef out fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#111827
+  class InDlg,InRule,InQry io
+  class Gateway,Gate,Tx,Engine ctrl
+  class L0,L1,L2,Evo store
+  class L2Idx idx
+  class OutCtx,OutAns,OutMeta out
+```
+
+### 图 2：查询调用链路、三阶段混合检索与渐进式披露闭环
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 46, 'rankSpacing': 54, 'curve': 'basis', 'padding': 16}}}%%
+flowchart TB
+  QIn["查询输入载荷<br/>query · user_id / agent_id · path_prefix<br/>verified_only · reference_time · token_budget · disclosure"]
+
+  Dispatch["检索调度入口<br/>VFSMemoryEngine.build_context() / search()<br/>兼容 v1 CognitiveMemoryEngine.recall() / answer()"]
+
+  QIn --> Dispatch
+
+  subgraph Stage1["Stage 1 · 强制预加载（无条件命中）"]
+    S1["get_preloaded_nodes()<br/>无条件拉取 L1 /global.md<br/>+ L2 always_active=True 高频避坑规则<br/>不受语义相似度波动影响"]
+  end
+
+  subgraph Stage2["Stage 2 · 结构化目录导航"]
+    S2["tree_outline()（轻量 ls -R 大纲）<br/>仅暴露 path + ≤50字 index_summary + 状态徽章<br/>不注入冗长正文 · 供强模型主动浏览选读"]
+  end
+
+  subgraph Stage3["Stage 3 · Hybrid RAG 多路并行检索（仅查活跃 L2）"]
+    C1["向量 ANN 通道<br/>LanceDB IVF_RQ / VectorChord / Qdrant"]
+    C2["词法 BM25 通道<br/>FTS5 / ParadeDB pg_search / vchord_bm25"]
+    C3["精确符号与版本通道<br/>memory_node_identifiers（O(1) 查表）<br/>8 类版本分级 · 稳定版优先于 rc"]
+    Fuse["RRF 融合 + 精确缺失门禁<br/>查无对应版本号 / 错误码 / 代码符号 → 严格空返 []"]
+    Rerank["公式重排 + 时效与日历加权<br/>Final = Semantic_Sim × W_verified × W_recency<br/>verified=1.35 vs unverified=0.55 · 禁忌常驻 W_recency=1.0"]
+
+    C1 --> Fuse
+    C2 --> Fuse
+    C3 --> Fuse
+    Fuse --> Rerank
+  end
+
+  Dispatch -->|"① 必载规则"| S1
+  Dispatch -->|"② 目录导航"| S2
+  Dispatch -->|"③ 并行多路召回（每路 LIMIT fetch_k）"| C1
+  Dispatch --> C2
+  Dispatch --> C3
+
+  Assemble["渐进式披露与预算装配器（杜绝中途硬截断）<br/>• progressive（默认）：仅注入 ≤50字 index_summary 卡片<br/>• full：整篇装入，超预算整篇退化为摘要卡，绝不截断因果前提<br/>• v1 核验路径：admissible_evidence + assess_claims 单从句核验"]
+
+  S1 --> Assemble
+  S2 --> Assemble
+  Rerank --> Assemble
+
+  OutBundle["上下文输出包（注入 LLM Prompt）<br/>• system_prefix：L3 /INDEX.md（≤360T 字节稳定缓存）<br/>• dynamic_memory：Stage 1 + Stage 2 + Stage 3 渐进卡片<br/>• score_breakdown · source_transcript_ids · compaction_alerts"]
+
+  OutVerified["核验作答输出（v1 answer / reflect）<br/>• 证据充分：已证结论 + evidence_ids 引文<br/>• 部分有据：partial=True 仅答已证部分 + 列出缺失子问<br/>• 证据不足：abstained=True 严格拒答不编造"]
+
+  Assemble --> OutBundle
+  Assemble --> OutVerified
+
+  AgentLoop["Agent 决策与按需工具调用闭环<br/>① 命中高相关摘要卡 → read_note(path) 拉取完整 detail_body<br/>② 需复核原始语境 → mem_read_transcripts(ids) 懒加载 L0 原话<br/>③ 任务验证规则有效 → mem_write_rule() 回写升级 verified"]
+
+  OutBundle --> AgentLoop
+  AgentLoop -.->|"按需补查 / 完整正文与原文钻取 / 新验证结果回流"| Dispatch
+
+  classDef inNode fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#111827
+  classDef s1 fill:#fef2f2,stroke:#ef4444,stroke-width:1.5px,color:#111827
+  classDef s2 fill:#f0f9ff,stroke:#0284c7,stroke-width:1.5px,color:#111827
+  classDef s3 fill:#fff7ed,stroke:#f97316,stroke-width:1.5px,color:#111827
+  classDef core fill:#f5f3ff,stroke:#7c3aed,stroke-width:1.5px,color:#111827
+  classDef out fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#111827
+  class QIn inNode
+  class Dispatch,Assemble,AgentLoop core
+  class S1 s1
+  class S2 s2
+  class C1,C2,C3,Fuse,Rerank s3
+  class OutBundle,OutVerified out
 ```
 
 ---
