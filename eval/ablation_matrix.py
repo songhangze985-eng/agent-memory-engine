@@ -53,6 +53,7 @@ def _rank_only(engine, query, stamp, stage):
                                       * (0.30 if fact["version_mismatch"] else 1.0), fact["id"]))
     facts = _fit_context([{**fact, "ce_score": min(1.0, fact["rrf_norm"])} for fact in ranked], TOP_K, TOKEN_BUDGET)
     result = {"ranked": facts, "empty_recall": not facts, "gate_stats": {"tau_abs": .12},
+              "parsed_query": parsed, "matched_entities": [],
               "scope": {"user_id": "default", "agent_id": "default", "session_id": None}}
     context = assemble_context(engine.store, result, prefix="", token_budget=TOKEN_BUDGET,
                                drilldown_top_n=2, drilldown_window=0, query=query)
