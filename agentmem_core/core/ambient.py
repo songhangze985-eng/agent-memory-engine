@@ -14,7 +14,7 @@ from agentmem_core.core.text import stem_terms
 from agentmem_core.identifiers import extract_identifiers
 from agentmem_core.llm import MockLLMClient
 from agentmem_core.textutil import estimate_tokens, strip_step_tags
-from agentmem_core.versioning import extract_versions
+from agentmem_core.versioning import extract_versions, score_version_match
 
 
 class BudgetExceededError(RuntimeError):
@@ -181,7 +181,11 @@ class AmbientPlanner:
                     fid = row["id"]
                     prev = candidates_by_id.get(fid)
                     score = max(1.8, prev["_ambient_score"]) if prev else 1.8
-                    candidates_by_id[fid] = {**row, "_ambient_score": score, "exact_ident_hit": True, "ambient_source": "exact_identifier"}
+                    merged_row = {**(prev or {}), **row}
+                    merged_row["_ambient_score"] = score
+                    merged_row["exact_ident_hit"] = True
+                    merged_row["ambient_source"] = prev["ambient_source"] if prev and prev.get("ambient_source") == "code_anchor" else "exact_identifier"
+                    candidates_by_id[fid] = merged_row
 
             # 4. Fast SQLite/PG FTS5 lexical search on facts (sub-millisecond, 0 LLM, 0 neural)
             if combined_query:
@@ -211,13 +215,12 @@ class AmbientPlanner:
                     score = (1.2 if version_hit else 0.0) + overlap_ratio + 0.15 / (rank_idx + 1) + min(0.25, bm25_raw * 0.02)
                     prev = candidates_by_id.get(fid)
                     if prev is None or score > prev["_ambient_score"]:
-                        candidates_by_id[fid] = {
-                            **fact,
-                            "_ambient_score": score,
-                            "lexical_overlap": overlap,
-                            "overlap_ratio": round(overlap_ratio, 4),
-                            "ambient_source": prev["ambient_source"] if prev and prev["ambient_source"] == "code_anchor" else "lexical_fts",
-                        }
+                        merged_lex = {**(prev or {}), **fact}
+                        merged_lex["_ambient_score"] = score
+                        merged_lex["lexical_overlap"] = overlap
+                        merged_lex["overlap_ratio"] = round(overlap_ratio, 4)
+                        merged_lex["ambient_source"] = prev["ambient_source"] if prev and prev.get("ambient_source") == "code_anchor" else "lexical_fts"
+                        candidates_by_id[fid] = merged_lex
 
             # 5. Enrich unified metadata (scope_key, override_key, vfs_path, staleness_status)
             all_ids = list(candidates_by_id.keys())
@@ -249,11 +252,11 @@ class AmbientPlanner:
                         "staleness_status": item.get("staleness_status", "fresh"),
                         "stale_reason": item.get("stale_reason", ""),
                     }
-                # Enforce exact version discipline: never inject mismatched version facts for a version-pinned query
+                # Enforce exact version discipline via score_version_match (zero version confusion!)
                 if versions:
                     plain_text = merged.get("plain") or ""
                     fact_vers = tuple(extract_versions(plain_text))
-                    if fact_vers and not (set(fact_vers) & set(versions)):
+                    if fact_vers and not any(score_version_match(qv, fv).confidence > 0 for qv in versions for fv in fact_vers):
                         continue
                 enriched.append(merged)
 

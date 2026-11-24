@@ -1,0 +1,592 @@
+{
+  "provenance": {
+    "engine": "UnifiedMemoryEngine (coding profile)",
+    "extractor_model": "C2 SignalExtractor (fail_to_pass)",
+    "reader_model": "DeterministicPairedCodingSimulator",
+    "llm": "none (enforced max_calls=0)",
+    "judge": "deterministic-fix-token-match",
+    "judge_prompt_version": "hindsight-aligned-v1",
+    "embedder": "none (C3 zero-vector ambient path)",
+    "reranker": "none (code-anchor + exact + FTS5)",
+    "top_k": 10,
+    "token_budget": 2048,
+    "split": "full",
+    "protocol": "Step C Coding Experience-Reuse + Staleness + False-Injection Eval (G2)",
+    "protocol_version": "1.0.0",
+    "protocol_sha256": "e232828db8cf2bc690f5f32ed4bd8a6b87b2a96ae56b5e4ae479f686f6ba5db4",
+    "granularity": "procedural-rule + code-anchor",
+    "commit_hash": "0aa3ec8-dirty",
+    "seed": 42,
+    "dataset": "coding_reuse_pairs(n=30, stale_traps=10, distractors=10)",
+    "dataset_sha256": "synthetic/in-memory",
+    "timestamp_utc": "2026-11-24T06:22:26Z"
+  },
+  "gate_pass": true,
+  "summary": {
+    "n_pairs": 30,
+    "no_memory_success_rate": 0.6,
+    "with_memory_success_rate": 1.0,
+    "success_gain_pp": 40.0,
+    "no_memory_avg_steps": 4.4,
+    "with_memory_avg_steps": 1.0,
+    "step_reduction_pct": 77.27,
+    "no_memory_avg_tokens": 2391.7,
+    "with_memory_avg_tokens": 648.7,
+    "token_reduction_pct": 72.88,
+    "experience_fix_recall": 1.0,
+    "false_injection_rate": 0.0,
+    "stale_drift_detection_rate": 1.0,
+    "stale_rule_misleading_rate": 0.0,
+    "ambient_p50_ms": 1.516,
+    "ambient_p95_ms": 3.879,
+    "ambient_llm_calls": 0
+  },
+  "by_pitfall_class": {
+    "version_diff": {
+      "n": 10,
+      "no_memory_success": 0.9,
+      "with_memory_success": 1.0,
+      "no_memory_avg_steps": 4.1,
+      "with_memory_avg_steps": 1.0,
+      "no_memory_avg_tokens": 2250.0,
+      "with_memory_avg_tokens": 581.5,
+      "fix_recall": 1.0
+    },
+    "project_convention": {
+      "n": 10,
+      "no_memory_success": 0.5,
+      "with_memory_success": 1.0,
+      "no_memory_avg_steps": 4.2,
+      "with_memory_avg_steps": 1.0,
+      "no_memory_avg_tokens": 2185.0,
+      "with_memory_avg_tokens": 643.9,
+      "fix_recall": 1.0
+    },
+    "env_error": {
+      "n": 10,
+      "no_memory_success": 0.4,
+      "with_memory_success": 1.0,
+      "no_memory_avg_steps": 4.9,
+      "with_memory_avg_steps": 1.0,
+      "no_memory_avg_tokens": 2740.0,
+      "with_memory_avg_tokens": 720.6,
+      "fix_recall": 1.0
+    }
+  },
+  "pairs": [
+    {
+      "id": "ver_01_pydantic_v2",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2400,
+      "with_memory_tokens": 598,
+      "ambient_ms": 2.561
+    },
+    {
+      "id": "ver_02_sqlalchemy_2",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2200,
+      "with_memory_tokens": 595,
+      "ambient_ms": 1.313
+    },
+    {
+      "id": "ver_03_fastapi_lifespan",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 5,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2700,
+      "with_memory_tokens": 600,
+      "ambient_ms": 1.385
+    },
+    {
+      "id": "ver_04_react_router_v6",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2100,
+      "with_memory_tokens": 566,
+      "ambient_ms": 1.607
+    },
+    {
+      "id": "ver_05_openai_sdk_v1",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2300,
+      "with_memory_tokens": 576,
+      "ambient_ms": 1.288
+    },
+    {
+      "id": "ver_06_pytest_8_tmpdir",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 6,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 3200,
+      "with_memory_tokens": 602,
+      "ambient_ms": 3.823
+    },
+    {
+      "id": "ver_07_ts5_verbatim_module",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 3,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 1900,
+      "with_memory_tokens": 547,
+      "ambient_ms": 2.202
+    },
+    {
+      "id": "ver_08_numpy_2_copy",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2100,
+      "with_memory_tokens": 597,
+      "ambient_ms": 2.762
+    },
+    {
+      "id": "ver_09_ruff_lint_section",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 3,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 1600,
+      "with_memory_tokens": 531,
+      "ambient_ms": 1.432
+    },
+    {
+      "id": "ver_10_psycopg3_placeholders",
+      "pitfall_class": "version_diff",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2000,
+      "with_memory_tokens": 603,
+      "ambient_ms": 1.289
+    },
+    {
+      "id": "conv_01_uv_pytest",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 5,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2600,
+      "with_memory_tokens": 597,
+      "ambient_ms": 2.161
+    },
+    {
+      "id": "conv_02_utc_timestamps",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2100,
+      "with_memory_tokens": 580,
+      "ambient_ms": 1.205
+    },
+    {
+      "id": "conv_03_api_envelope",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 5,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2500,
+      "with_memory_tokens": 580,
+      "ambient_ms": 1.548
+    },
+    {
+      "id": "conv_04_idempotency_header",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 5,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2800,
+      "with_memory_tokens": 733,
+      "ambient_ms": 1.713
+    },
+    {
+      "id": "conv_05_migration_prefix",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 1900,
+      "with_memory_tokens": 588,
+      "ambient_ms": 2.043
+    },
+    {
+      "id": "conv_06_no_sync_requests",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2200,
+      "with_memory_tokens": 738,
+      "ambient_ms": 1.67
+    },
+    {
+      "id": "conv_07_decimal_money",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 3,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 1700,
+      "with_memory_tokens": 738,
+      "ambient_ms": 1.634
+    },
+    {
+      "id": "conv_08_feature_flag_registry",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2000,
+      "with_memory_tokens": 578,
+      "ambient_ms": 1.407
+    },
+    {
+      "id": "conv_09_structured_log_keys",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2100,
+      "with_memory_tokens": 571,
+      "ambient_ms": 1.483
+    },
+    {
+      "id": "conv_10_error_code_enum",
+      "pitfall_class": "project_convention",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 1950,
+      "with_memory_tokens": 736,
+      "ambient_ms": 1.858
+    },
+    {
+      "id": "env_01_openblas_threads",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 6,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 3600,
+      "with_memory_tokens": 615,
+      "ambient_ms": 1.173
+    },
+    {
+      "id": "env_02_pg_port_5433",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 5,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2900,
+      "with_memory_tokens": 623,
+      "ambient_ms": 1.215
+    },
+    {
+      "id": "env_03_macos_fork_safety",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 6,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 3400,
+      "with_memory_tokens": 802,
+      "ambient_ms": 1.61
+    },
+    {
+      "id": "env_04_sqlite_wal_busy",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 5,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2600,
+      "with_memory_tokens": 999,
+      "ambient_ms": 3.924
+    },
+    {
+      "id": "env_05_node_heap_limit",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2200,
+      "with_memory_tokens": 592,
+      "ambient_ms": 1.264
+    },
+    {
+      "id": "env_06_ssl_cert_bundle",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 5,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2900,
+      "with_memory_tokens": 615,
+      "ambient_ms": 4.094
+    },
+    {
+      "id": "env_07_onnx_threads",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 6,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 3300,
+      "with_memory_tokens": 608,
+      "ambient_ms": 1.447
+    },
+    {
+      "id": "env_08_psycopg_binary",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 4,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2300,
+      "with_memory_tokens": 571,
+      "ambient_ms": 3.339
+    },
+    {
+      "id": "env_09_pythonpath_editable",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": true,
+      "with_memory_success": true,
+      "no_memory_steps": 3,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 1500,
+      "with_memory_tokens": 970,
+      "ambient_ms": 4.235
+    },
+    {
+      "id": "env_10_docker_colima_sock",
+      "pitfall_class": "env_error",
+      "signal_captured": true,
+      "recalled_fix": true,
+      "no_memory_success": false,
+      "with_memory_success": true,
+      "no_memory_steps": 5,
+      "with_memory_steps": 1,
+      "no_memory_tokens": 2700,
+      "with_memory_tokens": 811,
+      "ambient_ms": 2.101
+    }
+  ],
+  "stale_traps": [
+    {
+      "id": "stale_01_pydantic_upgrade",
+      "pitfall_class": "version_diff",
+      "drift_detected": true,
+      "stale_misled": false
+    },
+    {
+      "id": "stale_02_auth_signature",
+      "pitfall_class": "project_convention",
+      "drift_detected": true,
+      "stale_misled": false
+    },
+    {
+      "id": "stale_03_port_changed",
+      "pitfall_class": "env_error",
+      "drift_detected": true,
+      "stale_misled": false
+    },
+    {
+      "id": "stale_04_deleted_script",
+      "pitfall_class": "project_convention",
+      "drift_detected": true,
+      "stale_misled": false
+    },
+    {
+      "id": "stale_05_sqlalchemy_upgrade",
+      "pitfall_class": "version_diff",
+      "drift_detected": true,
+      "stale_misled": false
+    },
+    {
+      "id": "stale_06_cache_fn_refactored",
+      "pitfall_class": "project_convention",
+      "drift_detected": true,
+      "stale_misled": false
+    },
+    {
+      "id": "stale_07_node_upgrade",
+      "pitfall_class": "version_diff",
+      "drift_detected": true,
+      "stale_misled": false
+    },
+    {
+      "id": "stale_08_worker_class_changed",
+      "pitfall_class": "project_convention",
+      "drift_detected": true,
+      "stale_misled": false
+    },
+    {
+      "id": "stale_09_env_flag_removed",
+      "pitfall_class": "env_error",
+      "drift_detected": true,
+      "stale_misled": false
+    },
+    {
+      "id": "stale_10_fastapi_upgrade",
+      "pitfall_class": "version_diff",
+      "drift_detected": true,
+      "stale_misled": false
+    }
+  ],
+  "distractors": [
+    {
+      "id": "dist_01",
+      "repo_id": "payments",
+      "false_injected": false,
+      "injected_count": 0
+    },
+    {
+      "id": "dist_02",
+      "repo_id": "payments",
+      "false_injected": false,
+      "injected_count": 0
+    },
+    {
+      "id": "dist_03",
+      "repo_id": "api-gateway",
+      "false_injected": false,
+      "injected_count": 0
+    },
+    {
+      "id": "dist_04",
+      "repo_id": "api-gateway",
+      "false_injected": false,
+      "injected_count": 0
+    },
+    {
+      "id": "dist_05",
+      "repo_id": "ml-runtime",
+      "false_injected": false,
+      "injected_count": 0
+    },
+    {
+      "id": "dist_06",
+      "repo_id": "ml-runtime",
+      "false_injected": false,
+      "injected_count": 0
+    },
+    {
+      "id": "dist_07",
+      "repo_id": "web-console",
+      "false_injected": false,
+      "injected_count": 0
+    },
+    {
+      "id": "dist_08",
+      "repo_id": "web-console",
+      "false_injected": false,
+      "injected_count": 0
+    },
+    {
+      "id": "dist_09",
+      "repo_id": "payments",
+      "false_injected": false,
+      "injected_count": 0
+    },
+    {
+      "id": "dist_10",
+      "repo_id": "api-gateway",
+      "false_injected": false,
+      "injected_count": 0
+    }
+  ]
+}
