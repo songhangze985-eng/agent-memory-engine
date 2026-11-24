@@ -1,8 +1,8 @@
-"""UnifiedMemoryEngine: single core combining L0+FTS5, unified bi-temporal fact layer, VFS/Profile views & tool registry."""
+"""UnifiedMemoryEngine: universal single core driven by declarative MemoryProfile & ScopeChain."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 from agentmem_core.core.answer import unified_answer, unified_reflect
 from agentmem_core.core.assemble import unified_assemble
@@ -12,7 +12,9 @@ from agentmem_core.core.episodes import EpisodeLog
 from agentmem_core.core.facts import UnifiedFactLedger
 from agentmem_core.core.ingest import ingest_conversational_turn, ingest_procedural_rule
 from agentmem_core.core.plan import QueryPlan, RecallConfig, build_query_plan
+from agentmem_core.core.profiles import MemoryProfile, load_profile
 from agentmem_core.core.recall import unified_recall
+from agentmem_core.core.scopes import ScopeChain, resolve_write_scope
 from agentmem_core.core.supersede import SlotSupersedeTracker
 from agentmem_core.engine import CognitiveMemoryEngine
 from agentmem_core.storage.base import RecallFilter
@@ -20,20 +22,136 @@ from agentmem_core.views.profile import ProfileView
 from agentmem_core.views.vfs import VFSView
 
 
+class ProfileBinding:
+    """Lightweight handle binding a declarative MemoryProfile + ScopeChain to a shared UnifiedMemoryEngine.
+
+    Enables a single agent to mount multiple profiles (e.g. ``conversational`` + ``coding``)
+    simultaneously on one core without write-routing or retrieval-routing interference.
+    """
+
+    def __init__(
+        self,
+        engine: "UnifiedMemoryEngine",
+        profile: str | Path | MemoryProfile,
+        *,
+        user_id: str = "default",
+        agent_id: str = "default",
+        session_id: str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | None = None,
+    ):
+        self.engine = engine
+        self.profile = load_profile(profile)
+        self.user_id = user_id
+        self.agent_id = agent_id
+        self.session_id = session_id
+        self.repo_id = repo_id
+        self.project_id = project_id
+        self.scope_chain = ScopeChain.coerce(scope_chain) or ScopeChain.build(
+            hierarchy=self.profile.scope_hierarchy,
+            user_id=user_id,
+            session_id=session_id,
+            repo_id=repo_id,
+            project_id=project_id,
+        )
+
+    def default_write_scope(self, explicit: str | None = None) -> str:
+        return resolve_write_scope(
+            explicit_scope_key=explicit,
+            default_level=self.profile.default_write_scope_level,
+            user_id=self.user_id,
+            session_id=self.session_id,
+            repo_id=self.repo_id,
+            project_id=self.project_id,
+        )
+
+    def ingest_turn(self, text: str, *, scope_key: str | None = None, **kwargs: Any) -> dict:
+        eff_scope = self.default_write_scope(scope_key)
+        return self.engine.ingest_turn(
+            text,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            session_id=kwargs.pop("session_id", None) or self.session_id or "default",
+            scope_key=eff_scope,
+            profile=self.profile,
+            **kwargs,
+        )
+
+    def ingest_rule(self, path: str, *, scope_key: str | None = None, **kwargs: Any) -> dict:
+        eff_scope = self.default_write_scope(scope_key)
+        return self.engine.ingest_rule(
+            path,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            session_id=kwargs.pop("session_id", None) or self.session_id or "default",
+            scope_key=eff_scope,
+            profile=self.profile,
+            **kwargs,
+        )
+
+    def recall(self, query: str, **kwargs: Any) -> dict:
+        return self.engine.recall(
+            query,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            session_id=kwargs.pop("session_id", None),
+            scope_chain=kwargs.pop("scope_chain", None) or self.scope_chain,
+            profile=self.profile,
+            **kwargs,
+        )
+
+    def build_context(self, query: str, **kwargs: Any) -> dict:
+        return self.engine.build_context(
+            query,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            session_id=kwargs.pop("session_id", None),
+            scope_chain=kwargs.pop("scope_chain", None) or self.scope_chain,
+            profile=self.profile,
+            **kwargs,
+        )
+
+    def answer(self, query: str, **kwargs: Any) -> dict:
+        return self.engine.answer(
+            query,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            session_id=kwargs.pop("session_id", None),
+            scope_chain=kwargs.pop("scope_chain", None) or self.scope_chain,
+            profile=self.profile,
+            **kwargs,
+        )
+
+    def read_note(self, path: str) -> dict | None:
+        return self.engine.read_note(
+            path,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            scope_chain=self.scope_chain,
+        )
+
+    def tree_outline(self, dir_path: str = "/") -> str:
+        return self.engine.tree_outline(
+            dir_path,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            scope_chain=self.scope_chain,
+            include_stale=self.profile.stale_policy != "exclude",
+        )
+
+
 class UnifiedMemoryEngine:
-    """Single consolidated memory engine replacing parallel v1/v2 engines.
+    """Universal single-core memory engine parameterized by declarative MemoryProfile & ScopeChain.
 
     Architecture:
       - **L0 Episode Log** (``EpisodeLog``): ``.jsonl.gz`` cold chunks (0 L0 vectors) + SQLite/PG ``raw_turns_fts`` fallback.
       - **Unified Fact Layer** (``UnifiedFactLedger`` over SQLite+LanceDB or PostgreSQL):
-        single ``facts`` ledger with bi-temporal fields, mandatory evidence,
-        ``kind ∈ {world, experience, preference, belief, rule}``, status & slot-level supersede,
-        optimistic lock versions, and rollback snapshots.
-      - **Dual Ingest Tracks**: ungated conversational track (``ingest_turn``) + salience-gated
-        procedural rule track (``ingest_rule``).
-      - **Derived Views**: ``self.vfs`` (``VFSView``) and ``self.profile`` (``ProfileView``) — zero duplicate fact tables.
-      - **Unified Retrieval & Assemble**: 4 parallel channels (vector + BM25[facts+L0 FTS5] + entity_graph + exact)
-        + single ``assemble()`` with ``disclosure`` & ``profile`` parameters + feature-flagged reranking.
+        single ``facts`` ledger with bi-temporal fields, mandatory evidence, hierarchical ``scope_key``,
+        code-anchor staleness state, ``kind ∈ {world, experience, preference, belief, rule}``,
+        slot-level supersede, optimistic lock versions, and rollback snapshots.
+      - **Declarative Profiles** (``MemoryProfile``): loaded from YAML/JSON with zero profile branching in core.
+      - **Derived Views**: ``self.vfs`` (``VFSView``) and ``self.profile_view`` / ``self.profile`` (``ProfileView``).
     """
 
     def __init__(
@@ -48,10 +166,12 @@ class UnifiedMemoryEngine:
         reranker=None,
         clock: Callable[[], float] | None = None,
         config: RecallConfig | None = None,
+        profile: str | Path | MemoryProfile | None = None,
         calculator=None,
         **engine_kwargs,
     ):
-        self.config = config or RecallConfig()
+        self.default_profile = load_profile(profile)
+        self.config = config or self.default_profile.recall
         self.calculator = calculator if calculator is not None else (
             deterministic_calculate if self.config.enable_deterministic_calc else None
         )
@@ -75,12 +195,62 @@ class UnifiedMemoryEngine:
         self.supersede = SlotSupersedeTracker(self.store)
         self.vfs = VFSView(self._engine, self.ledger)
         self.profile = ProfileView(self.store, self.ledger)
+        self.profile_view = self.profile
 
     def close(self) -> None:
         try:
             self.episodes.close()
         finally:
             self.store.close()
+
+    def bind_profile(
+        self,
+        profile: str | Path | MemoryProfile,
+        *,
+        user_id: str = "default",
+        agent_id: str = "default",
+        session_id: str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | None = None,
+    ) -> ProfileBinding:
+        """Bind a declarative profile and scope chain to this shared core instance."""
+        return ProfileBinding(
+            self,
+            profile,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            repo_id=repo_id,
+            project_id=project_id,
+            scope_chain=scope_chain,
+        )
+
+    def _resolve_profile(self, profile: str | Path | MemoryProfile | None) -> MemoryProfile:
+        return self.default_profile if profile is None else load_profile(profile)
+
+    def _resolve_scope_chain(
+        self,
+        spec: MemoryProfile,
+        *,
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | str | None = None,
+        user_id: str = "default",
+        session_id: str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
+    ) -> ScopeChain | None:
+        explicit = ScopeChain.coerce(scope_chain)
+        if explicit is not None:
+            return explicit
+        if repo_id is not None or project_id is not None:
+            return ScopeChain.build(
+                hierarchy=spec.scope_hierarchy,
+                user_id=user_id,
+                session_id=session_id,
+                repo_id=repo_id,
+                project_id=project_id,
+            )
+        return None
 
     def episode_indexed_turn_ids(self, *, user_id: str = "default", agent_id: str = "default", session_id: str | None = None) -> list[int]:
         return self.episodes.indexed_turn_ids(user_id=user_id, agent_id=agent_id, session_id=session_id)
@@ -94,6 +264,11 @@ class UnifiedMemoryEngine:
         user_id: str = "default",
         agent_id: str = "default",
         session_id: str = "default",
+        scope_key: str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
+        override_key: str = "",
+        profile: str | Path | MemoryProfile | None = None,
         role: str = "user",
         timestamp: float | None = None,
         event_time: float | None = None,
@@ -106,6 +281,15 @@ class UnifiedMemoryEngine:
         metadata: dict | None = None,
     ) -> dict:
         """Conversational ingest track (NO salience gate — maximizes conversational recall)."""
+        spec = self._resolve_profile(profile)
+        eff_scope = resolve_write_scope(
+            explicit_scope_key=scope_key,
+            default_level=spec.default_write_scope_level,
+            user_id=user_id,
+            session_id=session_id,
+            repo_id=repo_id,
+            project_id=project_id,
+        )
         return ingest_conversational_turn(
             self._engine,
             self.episodes,
@@ -115,6 +299,8 @@ class UnifiedMemoryEngine:
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
+            scope_key=eff_scope,
+            override_key=override_key,
             role=role,
             timestamp=timestamp,
             event_time=event_time,
@@ -144,6 +330,11 @@ class UnifiedMemoryEngine:
         user_id: str = "default",
         agent_id: str = "default",
         session_id: str = "default",
+        scope_key: str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
+        override_key: str = "",
+        profile: str | Path | MemoryProfile | None = None,
         confidence_score: float = 0.85,
         verification_status: str = "verified",
         salience_tag: str = "core_rule",
@@ -158,6 +349,15 @@ class UnifiedMemoryEngine:
         timestamp: float | None = None,
     ) -> dict:
         """Procedural rule track (3-question salience gate + state machine + optimistic lock -> unified kind='rule')."""
+        spec = self._resolve_profile(profile)
+        eff_scope = resolve_write_scope(
+            explicit_scope_key=scope_key,
+            default_level=spec.default_write_scope_level,
+            user_id=user_id,
+            session_id=session_id,
+            repo_id=repo_id,
+            project_id=project_id,
+        )
         return ingest_procedural_rule(
             self._engine,
             self.episodes,
@@ -172,6 +372,8 @@ class UnifiedMemoryEngine:
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
+            scope_key=eff_scope,
+            override_key=override_key,
             confidence_score=confidence_score,
             verification_status=verification_status,
             salience_tag=salience_tag,
@@ -190,11 +392,39 @@ class UnifiedMemoryEngine:
 
     # ---- Derived VFS View Shortcuts ----
 
-    def read_note(self, path: str, *, user_id: str = "default", agent_id: str = "default") -> dict | None:
-        return self.vfs.read_note(path, user_id=user_id, agent_id=agent_id)
+    def read_note(
+        self,
+        path: str,
+        *,
+        user_id: str = "default",
+        agent_id: str = "default",
+        scope_key: str | None = None,
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | None = None,
+    ) -> dict | None:
+        return self.vfs.read_note(
+            path,
+            user_id=user_id,
+            agent_id=agent_id,
+            scope_key=scope_key,
+            scope_chain=ScopeChain.coerce(scope_chain),
+        )
 
-    def tree_outline(self, dir_path: str = "/", *, user_id: str = "default", agent_id: str = "default") -> str:
-        return self.vfs.tree_outline(dir_path, user_id=user_id, agent_id=agent_id)
+    def tree_outline(
+        self,
+        dir_path: str = "/",
+        *,
+        user_id: str = "default",
+        agent_id: str = "default",
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | None = None,
+        include_stale: bool = True,
+    ) -> str:
+        return self.vfs.tree_outline(
+            dir_path,
+            user_id=user_id,
+            agent_id=agent_id,
+            scope_chain=ScopeChain.coerce(scope_chain),
+            include_stale=include_stale,
+        )
 
     def compact_directory(self, dir_path: str, *, user_id: str = "default", agent_id: str = "default", timestamp: float | None = None) -> dict:
         return self.vfs.compact_directory(dir_path, user_id=user_id, agent_id=agent_id, timestamp=timestamp)
@@ -204,8 +434,17 @@ class UnifiedMemoryEngine:
 
     # ---- Unified Recall, Assemble, Answer, Reflect ----
 
-    def plan(self, query: str, *, reference_time: float | None = None, config: RecallConfig | None = None) -> QueryPlan:
-        return build_query_plan(query, reference_time=reference_time, config=config or self.config)
+    def plan(
+        self,
+        query: str,
+        *,
+        reference_time: float | None = None,
+        config: RecallConfig | None = None,
+        profile: str | Path | MemoryProfile | None = None,
+    ) -> QueryPlan:
+        spec = self._resolve_profile(profile)
+        cfg = spec.to_recall_config(config or self.config)
+        return build_query_plan(query, reference_time=reference_time, config=cfg)
 
     def recall(
         self,
@@ -214,6 +453,10 @@ class UnifiedMemoryEngine:
         user_id: str = "default",
         agent_id: str = "default",
         session_id: str | None = None,
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
+        profile: str | Path | MemoryProfile | None = None,
         reference_time: float | None = None,
         mode: str = "reconstructive",
         token_budget: int = 2048,
@@ -224,6 +467,16 @@ class UnifiedMemoryEngine:
         config: RecallConfig | None = None,
         _trace: list[dict] | None = None,
     ) -> dict:
+        spec = self._resolve_profile(profile)
+        cfg = spec.to_recall_config(config or self.config)
+        eff_chain = self._resolve_scope_chain(
+            spec,
+            scope_chain=scope_chain,
+            user_id=user_id,
+            session_id=session_id,
+            repo_id=repo_id,
+            project_id=project_id,
+        )
         return unified_recall(
             self._engine,
             self.episodes,
@@ -233,6 +486,7 @@ class UnifiedMemoryEngine:
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
+            scope_chain=eff_chain,
             reference_time=reference_time,
             mode=mode,
             token_budget=token_budget,
@@ -240,7 +494,7 @@ class UnifiedMemoryEngine:
             packing_mode=packing_mode,
             include_cold=include_cold,
             filters=filters,
-            config=config or self.config,
+            config=cfg,
             _trace=_trace,
         )
 
@@ -251,31 +505,45 @@ class UnifiedMemoryEngine:
         user_id: str = "default",
         agent_id: str = "default",
         session_id: str | None = None,
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
         reference_time: float | None = None,
         mode: str = "reconstructive",
-        token_budget: int = 2048,
+        token_budget: int | None = None,
         top_k: int | None = None,
         packing_mode: str | None = None,
         include_cold: bool = False,
         filters: RecallFilter | None = None,
         disclosure: Literal["full", "progressive"] | None = None,
-        profile: Literal["conversational", "coding_agent"] | None = None,
+        profile: str | Path | MemoryProfile | None = None,
         drilldown_top_n: int = 2,
         drilldown_window: int = 0,
         config: RecallConfig | None = None,
         _trace: list[dict] | None = None,
     ) -> dict:
-        cfg = config or self.config
-        eff_profile = profile or cfg.profile
-        eff_disclosure = disclosure or cfg.disclosure
+        spec = self._resolve_profile(profile)
+        cfg = spec.to_recall_config(config or self.config)
+        eff_budget = spec.default_token_budget if token_budget is None else int(token_budget)
+        eff_disclosure = disclosure or (config.disclosure if config is not None else spec.disclosure)
+        eff_chain = self._resolve_scope_chain(
+            spec,
+            scope_chain=scope_chain,
+            user_id=user_id,
+            session_id=session_id,
+            repo_id=repo_id,
+            project_id=project_id,
+        )
         recall_result = self.recall(
             query,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
+            scope_chain=eff_chain,
+            profile=spec,
             reference_time=reference_time,
             mode=mode,
-            token_budget=token_budget,
+            token_budget=eff_budget,
             top_k=top_k,
             packing_mode=packing_mode,
             include_cold=include_cold,
@@ -294,11 +562,12 @@ class UnifiedMemoryEngine:
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
-            token_budget=token_budget,
+            scope_chain=eff_chain,
+            token_budget=eff_budget,
             drilldown_top_n=drilldown_top_n,
             drilldown_window=drilldown_window,
             disclosure=eff_disclosure,
-            profile=eff_profile,
+            profile=spec,
         )
 
     def _answer_from_context(self, query: str, bundle: dict) -> dict:
@@ -311,17 +580,23 @@ class UnifiedMemoryEngine:
         user_id: str = "default",
         agent_id: str = "default",
         session_id: str | None = None,
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
         reference_time: float | None = None,
         token_budget: int = 2048,
         mode: str = "reconstructive",
         disclosure: Literal["full", "progressive"] = "full",
-        profile: Literal["conversational", "coding_agent"] | None = None,
+        profile: str | Path | MemoryProfile | None = None,
     ) -> dict:
         bundle = self.build_context(
             query,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
+            scope_chain=scope_chain,
+            repo_id=repo_id,
+            project_id=project_id,
             reference_time=reference_time,
             token_budget=token_budget,
             mode=mode,
@@ -337,6 +612,10 @@ class UnifiedMemoryEngine:
         user_id: str = "default",
         agent_id: str = "default",
         session_id: str = "default",
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
+        profile: str | Path | MemoryProfile | None = None,
         reference_time: float | None = None,
         token_budget: int = 2048,
     ) -> dict:
@@ -345,6 +624,10 @@ class UnifiedMemoryEngine:
             user_id=user_id,
             agent_id=agent_id,
             session_id=None,
+            scope_chain=scope_chain,
+            repo_id=repo_id,
+            project_id=project_id,
+            profile=profile,
             reference_time=reference_time,
             token_budget=token_budget,
         )

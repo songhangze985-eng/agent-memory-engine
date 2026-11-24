@@ -63,7 +63,8 @@ class RecallConfig:
     enable_slot_supersede: bool = True
     enable_graph_enum: bool = True
     enable_deterministic_calc: bool = True
-    profile: Literal["conversational", "coding_agent"] = "conversational"
+    enable_code_anchors: bool = False
+    profile_name: str = "conversational"
     disclosure: Literal["full", "progressive"] = "full"
 
 
@@ -88,7 +89,7 @@ class QueryPlan:
     temporal_order_ask: Literal["first", "last", "duration", "date", None] = None
     exclude_superseded: bool = True
     allow_recency_tiebreak: bool = False
-    profile: Literal["conversational", "coding_agent"] = "conversational"
+    profile_name: str = "conversational"
     extra: dict = field(default_factory=dict)
 
 
@@ -152,7 +153,7 @@ def build_query_plan(
     is_update = bool(_UPDATE_CUE.search(query or "") or change_dir) and not is_historical
     is_aggregate = bool(_AGGREGATE_CUE.search(query or "")) and temporal_order != "duration"
     is_multi_hop = bool(_MULTI_HOP_CUE.search(query or ""))
-    is_coding = cfg.profile == "coding_agent" or bool(identifiers or versions or _CODING_CUE.search(query or ""))
+    is_coding = bool(cfg.enable_code_anchors or identifiers or versions or _CODING_CUE.search(query or ""))
 
     # Strict M2 invariant: recency is ONLY a tie-breaker on non-historical, non-temporal queries!
     allow_recency = bool(cfg.enable_recency_rerank and not is_historical and not is_temporal)
@@ -178,5 +179,5 @@ def build_query_plan(
         temporal_order_ask=temporal_order,
         exclude_superseded=exclude_superseded,
         allow_recency_tiebreak=allow_recency,
-        profile=cfg.profile,
+        profile_name=cfg.profile_name,
     )

@@ -37,6 +37,8 @@ def ingest_conversational_turn(
     user_id: str = "default",
     agent_id: str = "default",
     session_id: str = "default",
+    scope_key: str | None = None,
+    override_key: str = "",
     role: str = "user",
     timestamp: float | None = None,
     event_time: float | None = None,
@@ -123,6 +125,8 @@ def ingest_conversational_turn(
                 user_id=user_id,
                 agent_id=agent_id,
                 kind=kind,
+                scope_key=scope_key,
+                override_key=override_key,
                 title="",
                 content=fact["plain"],
                 verification_status="verified",
@@ -177,6 +181,8 @@ def ingest_procedural_rule(
     user_id: str = "default",
     agent_id: str = "default",
     session_id: str = "default",
+    scope_key: str | None = None,
+    override_key: str = "",
     confidence_score: float = 0.85,
     verification_status: str = "verified",
     salience_tag: str = "core_rule",
@@ -251,7 +257,8 @@ def ingest_procedural_rule(
             tids.append(rec.transcript_id)
 
     # Check optimistic lock BEFORE writing fact so a lock conflict leaves the ledger untouched
-    existing = ledger.get_active_by_path(norm_path, user_id=user_id, agent_id=agent_id)
+    eff_scope = scope_key or (f"user:{user_id}" if user_id else "global")
+    existing = ledger.get_active_by_path(norm_path, user_id=user_id, agent_id=agent_id, scope_key=eff_scope)
     if expected_version is not None:
         from agentmem_core.vfs.models import OptimisticLockError
 
@@ -279,6 +286,8 @@ def ingest_procedural_rule(
         user_id=user_id,
         agent_id=agent_id,
         kind="rule",
+        scope_key=eff_scope,
+        override_key=override_key,
         vfs_path=norm_path,
         title=title.strip(),
         content=structured,
