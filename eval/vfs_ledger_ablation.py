@@ -18,12 +18,12 @@ from eval.longmemeval.run import groups as longmemeval_groups
 from eval.metrics import percentile
 from eval.paired import make_engine
 from eval.version_precision_eval import PRODUCTS
-from memengine.engine import CognitiveMemoryEngine
-from memengine.identifiers import extract_identifiers
-from memengine.llm import MockLLMClient
-from memengine.reranker import CalibratedLocalReranker
-from memengine.vector import HashedTfidfEmbedder
-from memengine.vfs import VFSMemoryEngine
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.identifiers import extract_identifiers
+from agentmem_core.llm import MockLLMClient
+from agentmem_core.reranker import CalibratedLocalReranker
+from agentmem_core.vector import HashedTfidfEmbedder
+from agentmem_core.vfs import VFSMemoryEngine
 
 
 def _mean(values: list[float]) -> float:
@@ -344,8 +344,8 @@ def ablate_storage_backends(scales: tuple[int, ...] = (1000, 5000, 10000), pg_ds
 
 def bench_vfs_retrieval_and_output_optimizations() -> dict:
     """Real measured evaluation of 3-stage retrieval, salience gating, progressive disclosure, and compaction."""
-    from memengine.chrono import DAY
-    from memengine.textutil import estimate_tokens
+    from agentmem_core.chrono import DAY
+    from agentmem_core.textutil import estimate_tokens
 
     with tempfile.TemporaryDirectory() as tmp:
         vfs = VFSMemoryEngine(Path(tmp) / "opt_vfs.db", transcript_dir=Path(tmp) / "l0")

@@ -40,8 +40,8 @@ from eval.membench.score import (
 )
 from eval.metrics import retrieval_report, retrieval_table
 from eval.paired import LABELS, add_backend_argument, cli_backend, evaluate_pair, make_engine
-from memengine.llm import FatalLLMError, MockLLMClient, build_llm_from_env
-from memengine.textutil import estimate_tokens, step_ids_in
+from agentmem_core.llm import FatalLLMError, MockLLMClient, build_llm_from_env
+from agentmem_core.textutil import estimate_tokens, step_ids_in
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = Path(__file__).resolve().parent / ".cache" / "MemData"

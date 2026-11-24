@@ -128,7 +128,7 @@ def test_checkpoint_resume_skips_finished(tmp_path):
 
 def test_fatal_llm_error_keeps_checkpoint(tmp_path):
     from eval.membench.run import _evaluate_all
-    from memengine.llm import FatalLLMError
+    from agentmem_core.llm import FatalLLMError
 
     first = _sample_item(7)
     second = _sample_item(8)
@@ -165,8 +165,8 @@ def test_eval_item_records_notebook_debug_fields():
 
 
 def test_search_falls_back_when_question_names_no_entities():
-    from memengine.engine import CognitiveMemoryEngine
-    from memengine.llm import MockLLMClient
+    from agentmem_core.engine import CognitiveMemoryEngine
+    from agentmem_core.llm import MockLLMClient
 
     engine = CognitiveMemoryEngine(db_path=":memory:", llm=MockLLMClient())
     engine.add("[step 0] user: I really dig the movie Ran\nagent: Nice.", timestamp=1.0)

@@ -12,11 +12,11 @@ from time import perf_counter
 from eval.metrics import percentile
 from eval.paired import make_engine
 from eval.static_report import table, write_result
-from memengine.chrono import parse_session_clock
-from memengine.engine import CognitiveMemoryEngine
-from memengine.llm import MockLLMClient
-from memengine.reranker import CalibratedLocalReranker
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core.chrono import parse_session_clock
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.llm import MockLLMClient
+from agentmem_core.reranker import CalibratedLocalReranker
+from agentmem_core.vector import HashedTfidfEmbedder
 
 SCALES = (1000, 5000, 10000)
 

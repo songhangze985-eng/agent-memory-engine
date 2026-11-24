@@ -10,7 +10,7 @@ from eval.evidence_ablation import sample_rows
 from eval.locomo.run import CATEGORIES as LOCOMO_CAT_MAP, parse_turns
 from eval.qa.harness import QAItem, evaluate_group_qa, summarize_qa_rows
 from eval.qa.provenance import build_provenance
-from memengine.chrono import parse_session_clock
+from agentmem_core.chrono import parse_session_clock
 
 LOCOMO_CATEGORIES = [
     "1 multi-hop",

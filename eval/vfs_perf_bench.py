@@ -12,7 +12,7 @@ from contextlib import closing
 from pathlib import Path
 
 from eval.metrics import percentile
-from memengine.vfs import OptimisticLockError, VFSMemoryEngine
+from agentmem_core.vfs import OptimisticLockError, VFSMemoryEngine
 
 
 def _run_l0_stress(n_turns: int = 10_000) -> dict:

@@ -16,7 +16,7 @@ from eval.corpus import (
     TEST4_BACKGROUND,
     TRAPS,
 )
-from memengine.textutil import estimate_tokens
+from agentmem_core.textutil import estimate_tokens
 
 SCALES = {
     "small": {

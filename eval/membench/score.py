@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 
-from memengine.textutil import char_bigrams, estimate_tokens, jaccard
+from agentmem_core.textutil import char_bigrams, estimate_tokens, jaccard
 
 _LETTER = re.compile(r"\b([ABCD])\b")
 

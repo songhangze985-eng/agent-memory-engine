@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from memengine.chrono import parse_session_clock as _stamp
+from agentmem_core.chrono import parse_session_clock as _stamp
 from eval.evidence_ablation import Question, Turn, run_cli, sample_rows
 
 URL = "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"

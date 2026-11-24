@@ -9,7 +9,7 @@ from eval.locomo.run import groups as locomo_groups
 from eval.longmemeval.run import groups as longmem_groups
 from eval.metrics import evidence_metrics, retrieval_report
 from eval.paired import evaluate_pair, make_engine
-from memengine.lifecycle import DAY
+from agentmem_core.lifecycle import DAY
 
 
 def test_all_five_tool_schemas_are_json_serializable_and_enforced():

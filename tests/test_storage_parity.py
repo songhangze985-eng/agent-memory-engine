@@ -4,10 +4,10 @@ import uuid
 
 import pytest
 
-from memengine.identifiers import extract_identifiers
-from memengine.engine import CognitiveMemoryEngine
-from memengine.storage import open_store
-from memengine.storage.base import RecallFilter
+from agentmem_core.identifiers import extract_identifiers
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.storage import open_store
+from agentmem_core.storage.base import RecallFilter
 
 
 def exercise(store):
@@ -143,7 +143,7 @@ def test_postgres_contract(monkeypatch, degraded):
         pytest.skip("TEST_POSTGRES_DSN is required for the PostgreSQL integration test")
     import psycopg
     from psycopg import sql
-    from memengine.storage.postgres import PostgresStore
+    from agentmem_core.storage.postgres import PostgresStore
     schema = "test_" + uuid.uuid4().hex
     with psycopg.connect(dsn, autocommit=True) as connection:
         connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
@@ -172,7 +172,7 @@ def test_postgres_contract(monkeypatch, degraded):
 
 
 def test_postgres_query_is_parameterized_and_keeps_tenant_and_time_filters():
-    from memengine.storage.postgres import _query
+    from agentmem_core.storage.postgres import _query
     where, args = RecallFilter(as_of=8, scopes=("world",)).sql("f.user_id=? AND f.agent_id=?", ("alice", "agent"))
     sql, _ = _query("SELECT f.id FROM facts f WHERE " + where)
     assert "f.user_id=%s AND f.agent_id=%s" in sql and "f.expires_at>%s" in sql
@@ -181,8 +181,8 @@ def test_postgres_query_is_parameterized_and_keeps_tenant_and_time_filters():
 
 @pytest.mark.parametrize("native", [False, True])
 def test_postgres_schema_and_bounded_index_sql_without_server(native):
-    from memengine.storage.postgres import PostgresStore, _query
-    from memengine.vector import HashedTfidfEmbedder
+    from agentmem_core.storage.postgres import PostgresStore, _query
+    from agentmem_core.vector import HashedTfidfEmbedder
 
     class Recorder:
         def __init__(self):

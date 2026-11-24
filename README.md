@@ -1,26 +1,26 @@
-# Agent Memory Engine（统一单核双时态记忆引擎）
+# `agentmem-core`（统一单核双时态记忆引擎）
 
-面向强模型 Agent 的单核混合记忆引擎（`UnifiedMemoryEngine`），以**统一真相源、同口径端到端评测与实证消融驱动**为核心原则，将历史双引擎收口为一套清晰架构：
+面向强模型 Agent 的单核混合记忆引擎（PyPI 分发名 `agentmem-core` / Python 包名 `agentmem_core` / 核心入口 `UnifiedMemoryEngine`），以**统一真相源、同口径端到端评测与实证消融驱动**为核心原则，将历史双引擎收口为一套清晰架构：
 
-- **双轨写入 + 单真相源存储**：对话轨道（`ingest_turn`）无显著性门控，直落 L0 分块冷存（`.jsonl.gz`，**0 向量化**）并建 turn 级 FTS5 兜底，同时抽取事实写入统一双时态事实账本（`facts`，`kind ∈ {world, experience, preference, belief, rule}`）；程序性轨道（`ingest_rule`）走三问显著性门控、三段式状态机与行级乐观锁（冲突 409）。存储层收口为 **SQLite + LanceDB（默认）** 与 **PostgreSQL 16+（唯一横向扩展档）**，Qdrant / S3 移出核心至 `memengine/contrib/`。
+- **双轨写入 + 单真相源存储**：对话轨道（`ingest_turn`）无显著性门控，直落 L0 分块冷存（`.jsonl.gz`，**0 向量化**）并建 turn 级 FTS5 兜底，同时抽取事实写入统一双时态事实账本（`facts`，`kind ∈ {world, experience, preference, belief, rule}`）；程序性轨道（`ingest_rule`）走三问显著性门控、三段式状态机与行级乐观锁（冲突 409）。存储层收口为 **SQLite + LanceDB（默认）** 与 **PostgreSQL 16+（唯一横向扩展档）**，Qdrant / S3 移出核心至 `agentmem_core/contrib/`。
 - **派生视图零冗余**：VFS 目录树与 `GUIDE.md` 合并（`VFSView`）、实体画像（`ProfileView`）均直接派生于统一事实表，**不再单独维护第二份事实表**。
 - **四路召回 + 槽位更新 + 实体图覆盖打包 + 反思做梦**：并行融合向量、BM25（含 L0 FTS5 兜底）、两跳实体图与精确标识符/8 类版本零串台通道；叠加 M2 槽位级 supersede / `as_of` 时间窗口、M3 实体图分面枚举 / 覆盖优先打包 / 确定性计算器（`count`/`sum`/`diff`/`date_diff`）、M4 带证据引用的反思型 `kind='belief'` 做梦蒸馏。经 M5 端到端消融实测，**双极渐近环与 `W_verified × W_recency` 平局裁决已默认关闭**（仅保留为可选 feature flag）。
 - **单工具注册表 + 兼容层**：`UnifiedToolRegistry` 统一派生 HTTP（`/v2/memory/*`）、CLI、MCP 与 OpenAI Tools；旧 `/v1/*` 保留兼容 shim 并返回 `Deprecation: true` / `Sunset` 响应头。
 
-> **包名迁移说明**：当前 PyPI / Python 包名 `memengine` 与 WWW'25 `MemEngine` 存在命名冲突。M5 阶段保持 100% 向后兼容不破坏现有导入，已准备零停机双阶段更名方案（推荐 `chronomem`），详见 [docs/RENAME_PLAN.md](docs/RENAME_PLAN.md)。
+> **包名已迁移至 `agentmem-core`（零破坏兼容）**：为避免与 WWW'25 `MemEngine` 冲突，项目已正式更名为 `agentmem-core`（导入 `import agentmem_core`，CLI `agentmem-core` / `agentmem`，环境变量 `AGENTMEM_CORE_*`）。原 `import memengine` / `memengine` CLI / `MEMENGINE_*` 环境变量通过透明兼容层完整保留至 `v1.0`，详见 [docs/RENAME_PLAN.md](docs/RENAME_PLAN.md)。
 
 ---
 
 ## 系统架构图
 
-下图严格对应仓库现有代码（`memengine/core/`、`memengine/views/`、`memengine/adapters/`、`memengine/compat/`、`memengine/storage/`），无占位或虚构模块：
+下图严格对应仓库现有代码（`agentmem_core/core/`、`agentmem_core/views/`、`agentmem_core/adapters/`、`agentmem_core/compat/`、`agentmem_core/storage/`），无占位或虚构模块：
 
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 44, 'rankSpacing': 48, 'curve': 'basis', 'padding': 14}}}%%
 flowchart TB
   Caller["调用方 · Python SDK / FastAPI (/v2/memory/*) / CLI / MCP / OpenAI Tools<br/>兼容层：/v1/* 经 compat/v1_shim.py 转发并标注 Deprecation 头"]
 
-  subgraph Core["UnifiedMemoryEngine 单核（memengine/core/）"]
+  subgraph Core["UnifiedMemoryEngine 单核（agentmem_core/core/）"]
     Ingest["1. 双轨写入 · ingest.py + supersede.py<br/>• 对话轨道 ingest_turn()：幂等键 · 无门控 · 槽位 supersede 链<br/>• 程序轨道 ingest_rule()：三问门控 · [触发/动作/验证] 状态机 · 乐观锁(409)"]
 
     subgraph Storage["2. 收口存储层 · SQLite WAL + LanceDB (默认) / PostgreSQL 16+ (唯一扩展档)"]
@@ -28,7 +28,7 @@ flowchart TB
       Facts[("统一双时态事实账本 · facts.py<br/>单 facts 表 + exact_identifiers + 实体边 + 槽位链<br/>kind ∈ {world, experience, preference, belief, rule}")]
     end
 
-    Views["3. 派生视图（零重复建表 · memengine/views/）<br/>• VFSView：kind=rule 路径树 / ls -R 大纲 / GUIDE.md 合并 / 整批回滚<br/>• ProfileView：实体画像与显式偏好聚合"]
+    Views["3. 派生视图（零重复建表 · agentmem_core/views/）<br/>• VFSView：kind=rule 路径树 / ls -R 大纲 / GUIDE.md 合并 / 整批回滚<br/>• ProfileView：实体画像与显式偏好聚合"]
 
     Dream["4. 异步整理与做梦 · consolidate.py + dreaming.py<br/>• 离线/显式触发：实体模式归纳 → 带 source_turn_ids 证据的 kind=belief<br/>• 支持 OpenAI 兼容 LLM（严格引文校验）与确定性离线兜底"]
 
@@ -47,7 +47,7 @@ flowchart TB
     Views -->|"coding_agent 预加载 / 大纲 / 画像"| Assemble
   end
 
-  Contrib["非核心可选扩展 · memengine/contrib/（核心零依赖）<br/>QdrantL2Index · S3TranscriptStore"]
+  Contrib["非核心可选扩展 · agentmem_core/contrib/（核心零依赖）<br/>QdrantL2Index · S3TranscriptStore"]
 
   Caller -->|"ingest_turn / ingest_rule / recall / answer / reflect / consolidate"| Ingest
   Caller -->|"查询（query / scope / reference_time / budget / profile）"| Recall
@@ -69,7 +69,7 @@ flowchart TB
 | 状态 | 范围说明 |
 | :--- | :--- |
 | **已实现并实机实测** | `UnifiedMemoryEngine` 单核全链路（SQLite WAL + FTS5、LanceDB `IVF_RQ`、Docker PostgreSQL 16 `pgvector`+`tsvector`、L0 `.jsonl.gz` + turn 级 FTS5、槽位 supersede、实体图分面枚举、覆盖优先打包、确定性计算器、`dream_beliefs`、`VFSView`、`ProfileView`、`UnifiedToolRegistry` 派生的 `/v2/memory/*` / CLI / MCP / OpenAI Tools、`/v1/*` 弃用 shim）；端到端 QA 评测与 6 桶归因框架（`eval/qa/`）及 4 项 PASS/FAIL 回归门禁（`eval/gates/`）。 |
-| **已写代码适配（仅单测）** | `memengine/contrib/` 中的 `QdrantL2Index`（REST）、`S3TranscriptStore`（boto3）；PostgreSQL `vchordrq` / `diskann` / `pg_search` / `vchord_bm25` 自动探测 SQL 分支；在线 OpenAI 兼容 Reader / Judge / Dreaming LLM 客户端（已通过 HTTP mock 单测，本机无外部 API Key 时自动运行离线确定性后端）。 |
+| **已写代码适配（仅单测）** | `agentmem_core/contrib/` 中的 `QdrantL2Index`（REST）、`S3TranscriptStore`（boto3）；PostgreSQL `vchordrq` / `diskann` / `pg_search` / `vchord_bm25` 自动探测 SQL 分支；在线 OpenAI 兼容 Reader / Judge / Dreaming LLM 客户端（已通过 HTTP mock 单测，本机无外部 API Key 时自动运行离线确定性后端）。 |
 | **不在引擎内部实现（需外部提供）** | ① 后台常驻定时做梦/压缩守护进程（需外部显式调用 `consolidate()` / `compact_directory()`）；② 内置在线大模型推理能力（无 API Key 时仅使用离线确定性 Reader/Extractor，无法替代真实 20B/前沿 LLM 的语义泛化）；③ 自动 Agent 工具调用循环。 |
 
 ---
@@ -145,7 +145,7 @@ pip install -e ".[all]"        # 以上全部后端与服务组件
 ### 统一单核引擎（`UnifiedMemoryEngine`，推荐）
 
 ```python
-from memengine import UnifiedMemoryEngine
+from agentmem_core import UnifiedMemoryEngine
 
 # 支持 ":memory:"、本地 SQLite、lancedb:///path（默认推荐）或 postgresql://...（唯一扩展档）
 engine = UnifiedMemoryEngine("lancedb:///tmp/agent_mem")
@@ -186,12 +186,12 @@ mcp_defs = tools.mcp_definitions()
 ## CLI 与 HTTP 服务（`/v2/memory/*` 统一接口 & `/v1/*` 兼容层）
 
 ```bash
-# 统一 CLI（基于 UnifiedToolRegistry）
-python3 -m memengine.cli --db-url ./memory.db retain "拔牙后一周内禁饮咖啡。" --ttl-seconds 604800
-python3 -m memengine.cli --db-url ./memory.db recall "最近喝咖啡有什么限制？" --mode reconstructive
+# 统一 CLI（基于 UnifiedToolRegistry；`agentmem-core`、`agentmem` 与兼容别名 `memengine` 均可用）
+python3 -m agentmem_core.cli --db-url ./memory.db retain "拔牙后一周内禁饮咖啡。" --ttl-seconds 604800
+python3 -m agentmem_core.cli --db-url ./memory.db recall "最近喝咖啡有什么限制？" --mode reconstructive
 
 # 启动 HTTP 服务（同时挂载统一 /v2/memory/* 与带 Deprecation 头的 /v1/* 兼容层）
-MEMENGINE_DB_URL=./memory.db MEMENGINE_API_KEY=your-key memengine serve
+AGENTMEM_CORE_DB_URL=./memory.db AGENTMEM_CORE_API_KEY=your-key agentmem-core serve
 ```
 
 | 路由组 | 端点 | 状态与说明 |
@@ -209,8 +209,8 @@ MEMENGINE_DB_URL=./memory.db MEMENGINE_API_KEY=your-key memengine serve
 
 | 环境变量 | 含义 |
 | :--- | :--- |
-| `MEMENGINE_DB_URL` | 存储连接地址（SQLite、`lancedb:///...`、`postgresql://...`）。 |
-| `MEMENGINE_API_KEY` | HTTP 服务 Bearer 鉴权密钥。 |
+| `AGENTMEM_CORE_DB_URL` *(兼容 `MEMENGINE_DB_URL`)* | 存储连接地址（SQLite、`lancedb:///...`、`postgresql://...`）。 |
+| `AGENTMEM_CORE_API_KEY` *(兼容 `MEMENGINE_API_KEY`)* | HTTP 服务 Bearer 鉴权密钥。 |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | OpenAI 兼容 Chat 接口（Reader、抽取与做梦共用）。 |
 | `JUDGE_BASE_URL` / `JUDGE_API_KEY` / `JUDGE_MODEL` | 端到端评测 LLM-as-a-Judge 接口。 |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` | 远程 `/embeddings` 向量编码服务。 |

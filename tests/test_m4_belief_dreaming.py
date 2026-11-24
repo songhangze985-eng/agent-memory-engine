@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import json
 
-from memengine.chrono import parse_session_clock
-from memengine.core import UnifiedMemoryEngine
-from memengine.core.dreaming import synthesize_beliefs_with_llm
+from agentmem_core.chrono import parse_session_clock
+from agentmem_core.core import UnifiedMemoryEngine
+from agentmem_core.core.dreaming import synthesize_beliefs_with_llm
 
 
 class _FakeLLM:

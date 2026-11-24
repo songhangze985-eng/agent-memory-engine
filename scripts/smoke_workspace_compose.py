@@ -7,8 +7,8 @@ import time
 from urllib.error import HTTPError, URLError
 from uuid import uuid4
 
-from memengine.chrono import parse_session_clock
-from memengine.client import MemoryClient
+from agentmem_core.chrono import parse_session_clock
+from agentmem_core.client import MemoryClient
 
 
 def ready(client):
@@ -28,7 +28,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     args = parser.parse_args()
-    client = MemoryClient(args.url, api_key=os.environ["MEMENGINE_API_KEY"], timeout=4)
+    api_key = os.environ.get("AGENTMEM_CORE_API_KEY") or os.environ["MEMENGINE_API_KEY"]
+    client = MemoryClient(args.url, api_key=api_key, timeout=4)
     owner = {"user_id": "workspace-smoke-" + uuid4().hex[:12], "agent_id": "verification", "session_id": "first"}
     shared_owner = {key: owner[key] for key in ("user_id", "agent_id")}
 
@@ -56,7 +57,7 @@ def main():
     assert not client.recall(query, **shared_owner)["ranked"]
     print(f"Before restart -> buffered turn {turn}, active task {task}, LTM recall empty", flush=True)
 
-    subprocess.run(["docker", "compose", "restart", "memengine"], check=True)
+    subprocess.run(["docker", "compose", "restart", "agentmem-core"], check=True)
     ready(client)
     workspace = post(f"{path}/workspace")
     assert workspace["status"] == "active" and workspace["checkpoint"] == checkpoint

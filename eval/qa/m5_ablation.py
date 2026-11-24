@@ -16,7 +16,7 @@ from eval.qa.locomo import run_locomo_qa
 from eval.qa.longmemeval import run_longmemeval_qa
 from eval.qa.membench import run_membench_qa
 from eval.qa.provenance import render_provenance_markdown
-from memengine.core.plan import RecallConfig
+from agentmem_core.core.plan import RecallConfig
 
 ABLATION_VARIANTS: list[tuple[str, str, RecallConfig, bool]] = [
     (

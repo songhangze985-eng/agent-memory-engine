@@ -6,13 +6,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from memengine import CognitiveMemoryEngine
-from memengine.identifiers import extract_identifiers
-from memengine.neural import LocalCrossEncoderReranker, LocalNeuralEmbedder, NeuralBackendUnavailableError
-from memengine.reranker import CalibratedLocalReranker
-from memengine.store import Store
-from memengine.textutil import estimate_tokens
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core import CognitiveMemoryEngine
+from agentmem_core.identifiers import extract_identifiers
+from agentmem_core.neural import LocalCrossEncoderReranker, LocalNeuralEmbedder, NeuralBackendUnavailableError
+from agentmem_core.reranker import CalibratedLocalReranker
+from agentmem_core.store import Store
+from agentmem_core.textutil import estimate_tokens
+from agentmem_core.vector import HashedTfidfEmbedder
 
 
 class WeakReranker:
@@ -142,7 +142,7 @@ def test_calibrated_gate_abstains_but_protects_exact_hits():
 
 
 def test_optional_neural_protocol_and_persistent_vectors(tmp_path, monkeypatch):
-    import memengine.neural as neural
+    import agentmem_core.neural as neural
 
     calls = []
 

@@ -4,8 +4,8 @@ import pytest
 
 from eval.paired import make_engine
 from eval.static_report import FROZEN, summary_table
-from memengine.assembler import assemble_context, render_prefix
-from memengine.temporal import temporal_competition
+from agentmem_core.assembler import assemble_context, render_prefix
+from agentmem_core.temporal import temporal_competition
 
 
 def test_summary_uses_the_matching_dataset_and_named_metrics(tmp_path):

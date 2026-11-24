@@ -22,8 +22,8 @@ from eval.vfs_ledger_ablation import (
     ablate_version_precision,
     bench_vfs_retrieval_and_output_optimizations,
 )
-from memengine.textutil import estimate_tokens
-from memengine.vfs import VFSMemoryEngine
+from agentmem_core.textutil import estimate_tokens
+from agentmem_core.vfs import VFSMemoryEngine
 
 _STEP_PATH = re.compile(r"/steps/step_(\d+)\.md$")
 

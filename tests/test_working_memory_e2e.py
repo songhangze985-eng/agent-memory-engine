@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from memengine.engine import CognitiveMemoryEngine
-from memengine.llm import MockLLMClient
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.llm import MockLLMClient
 
 
 OWNER = {"user_id": "alice", "agent_id": "atlas", "session_id": "session"}

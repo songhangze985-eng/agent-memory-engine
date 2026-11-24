@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass
 
 from eval.qa.judge import content_tokens, looks_like_abstention
-from memengine.llm import OpenAICompatibleClient
-from memengine.textutil import strip_step_tags
+from agentmem_core.llm import OpenAICompatibleClient
+from agentmem_core.textutil import strip_step_tags
 
 _SENT_SPLIT = re.compile(r"(?<=[.!?。！？])\s+|\n+")
 

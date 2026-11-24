@@ -2,7 +2,7 @@ from eval.evidence_ablation import Question, Turn
 from eval.online_trace import FUSION_ABLATIONS, diagnose, run_group
 from eval.paired import make_engine
 from eval.packing_replay import oracle_order
-from memengine.retrieval.rerank_budget import RerankBudget, shortlist
+from agentmem_core.retrieval.rerank_budget import RerankBudget, shortlist
 
 
 def test_retrieval_trace_observes_actual_call_without_changing_it():
@@ -124,7 +124,7 @@ def test_runtime_trace_shares_ce_quota_across_reconstruction_passes(monkeypatch)
     memory.reranker = Scorer()
     memory.retain("I prefer quiet history podcasts on my commute.", timestamp=10)
     memory.retain("I also like travel documentaries.", timestamp=12)
-    monkeypatch.setattr("memengine.engine.bridge_keys", lambda *args: ["entity:commute"])
+    monkeypatch.setattr("agentmem_core.engine.bridge_keys", lambda *args: ["entity:commute"])
     observed = []
     result = memory.retrieve("What podcasts do I prefer on my commute?", mode="reconstructive",
                              timestamp=15, token_budget=2048, read_only=True, _trace=observed)

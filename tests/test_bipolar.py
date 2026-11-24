@@ -2,11 +2,11 @@ from unittest.mock import patch
 
 import pytest
 
-from memengine import engine as engine_module
-from memengine.distance import BELT, INNER, NEWS_KEY, OUTER, bipolar_weight, compute_bipolar_radius, score_bipolar
-from memengine.engine import CognitiveMemoryEngine, _fit_context
-from memengine.store import Store
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core import engine as engine_module
+from agentmem_core.distance import BELT, INNER, NEWS_KEY, OUTER, bipolar_weight, compute_bipolar_radius, score_bipolar
+from agentmem_core.engine import CognitiveMemoryEngine, _fit_context
+from agentmem_core.store import Store
+from agentmem_core.vector import HashedTfidfEmbedder
 
 
 def _score(fact, ce_score=1.0, c_max=8, radius=0.25):

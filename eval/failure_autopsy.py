@@ -21,12 +21,12 @@ from eval.membench_static import sample_items
 from eval.metrics import evidence_metrics, mean, percentile
 from eval.paired import evaluate_pair, make_engine
 from eval.static_report import number, table, write_result
-from memengine.distance import BELT
-from memengine.gate import precision_gate
-from memengine.linguistics import stem_terms
-from memengine.retrieval import operators
-from memengine.temporal import competition_terms
-from memengine.vector import weighted_rrf
+from agentmem_core.distance import BELT
+from agentmem_core.gate import precision_gate
+from agentmem_core.linguistics import stem_terms
+from agentmem_core.retrieval import operators
+from agentmem_core.temporal import competition_terms
+from agentmem_core.vector import weighted_rrf
 
 
 ARMS = ("semantic", "lexical", "entity_graph", "temporal", "reconstructive")
@@ -84,8 +84,8 @@ def probe(engine, question, *, rich, mode):
             stack.enter_context(patch.object(target, name, capture(arm, getattr(target, name))))
         stack.enter_context(patch.object(operators, "spreading_activation",
                                          capture("activation", operators.spreading_activation)))
-        stack.enter_context(patch("memengine.engine.weighted_rrf", fuse))
-        stack.enter_context(patch("memengine.engine.precision_gate", gate))
+        stack.enter_context(patch("agentmem_core.engine.weighted_rrf", fuse))
+        stack.enter_context(patch("agentmem_core.engine.precision_gate", gate))
         stack.callback(setattr, engine, "per_channel_k", original_depth)
         engine.per_channel_k = 100
         if engine.reranker.is_calibrated:

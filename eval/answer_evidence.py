@@ -8,10 +8,10 @@ import subprocess
 import sys
 
 from eval.static_report import table, write_result
-from memengine.engine import CognitiveMemoryEngine
-from memengine.llm import MockLLMClient
-from memengine.reranker import CalibratedLocalReranker
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.llm import MockLLMClient
+from agentmem_core.reranker import CalibratedLocalReranker
+from agentmem_core.vector import HashedTfidfEmbedder
 
 
 def answer_cases():

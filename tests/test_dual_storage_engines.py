@@ -5,13 +5,13 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from memengine.engine import CognitiveMemoryEngine
-from memengine.router import match_entities
-from memengine.storage import open_store
-from memengine.storage.base import RecallFilter
-from memengine.storage.postgres import PostgresStore, _query
-from memengine.storage.vector_cache import VectorView
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.router import match_entities
+from agentmem_core.storage import open_store
+from agentmem_core.storage.base import RecallFilter
+from agentmem_core.storage.postgres import PostgresStore, _query
+from agentmem_core.storage.vector_cache import VectorView
+from agentmem_core.vector import HashedTfidfEmbedder
 from tests.test_storage_parity import exercise, exercise_workspace
 
 

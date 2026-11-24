@@ -15,7 +15,7 @@ from eval.baselines import CrudMemory, NaiveRAG
 from eval.generate import build_all
 from eval.metrics import answer_correct, percentile, trap_hallucinated
 from eval.paired import add_backend_argument, cli_backend, make_engine
-from memengine.llm import MockLLMClient, build_llm_from_env
+from agentmem_core.llm import MockLLMClient, build_llm_from_env
 
 ROOT = Path(__file__).resolve().parents[1]
 

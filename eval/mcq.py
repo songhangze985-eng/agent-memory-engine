@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from memengine.textutil import char_bigrams, jaccard
+from agentmem_core.textutil import char_bigrams, jaccard
 
 _CHOICE_LINE = re.compile(r"(?m)^\s*([ABCD])[\.\)]\s+(.+?)\s*$")
 

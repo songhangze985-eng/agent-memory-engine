@@ -3,14 +3,14 @@ import json
 
 import pytest
 
-from memengine import engine as engine_module
-from memengine.distance import BELT, OUTER
-from memengine.embeddings import OpenAICompatibleEmbedder
-from memengine.engine import CognitiveMemoryEngine
-from memengine.llm import MockLLMClient, _labeled_json
-from memengine.notebook import line_body
-from memengine.router import CASUAL, TASK
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core import engine as engine_module
+from agentmem_core.distance import BELT, OUTER
+from agentmem_core.embeddings import OpenAICompatibleEmbedder
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.llm import MockLLMClient, _labeled_json
+from agentmem_core.notebook import line_body
+from agentmem_core.router import CASUAL, TASK
+from agentmem_core.vector import HashedTfidfEmbedder
 
 
 def _op(text, *, keys=(), action="APPEND_ADJACENT_LINE", topic="profile", **extra):

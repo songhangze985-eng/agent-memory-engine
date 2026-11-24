@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from memengine.vfs import (
+from agentmem_core.vfs import (
     LocalChunkTranscriptStore,
     OptimisticLockError,
     PostgresVFSStore,
@@ -14,7 +14,7 @@ from memengine.vfs import (
     S3TranscriptStore,
     VFSMemoryEngine,
 )
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core.vector import HashedTfidfEmbedder
 
 
 def _exercise_vfs_engine(engine: VFSMemoryEngine):
@@ -222,8 +222,8 @@ def test_vfs_claude_style_tools_and_mcp_definitions(tmp_path):
 
 
 def test_three_stage_retrieval_rerank_and_version_precision(tmp_path):
-    from memengine.chrono import DAY
-    from memengine.vfs.store import W_UNVERIFIED, W_VERIFIED
+    from agentmem_core.chrono import DAY
+    from agentmem_core.vfs.store import W_UNVERIFIED, W_VERIFIED
 
     engine = VFSMemoryEngine(tmp_path / "three_stage.db", transcript_dir=tmp_path / "l0")
     with closing(engine):
@@ -550,10 +550,10 @@ def test_vfs_http_server_and_cli_connectivity(tmp_path, capsys, monkeypatch):
     fastapi = pytest.importorskip("fastapi")
     _ = fastapi
     from fastapi.testclient import TestClient
-    import memengine.client as client_mod
-    from memengine.cli import main as cli_main
-    from memengine.client import MemoryClient
-    from memengine.server import create_app
+    import agentmem_core.client as client_mod
+    from agentmem_core.cli import main as cli_main
+    from agentmem_core.client import MemoryClient
+    from agentmem_core.server import create_app
 
     v1_db = tmp_path / "v1.db"
     vfs_db = tmp_path / "vfs.db"

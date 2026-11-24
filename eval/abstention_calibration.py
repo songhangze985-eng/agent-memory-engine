@@ -9,10 +9,10 @@ from math import floor
 from pathlib import Path
 
 from eval.abstention_cohort import SEED, build_cases
-from memengine.engine import CognitiveMemoryEngine
-from memengine.reranker import CalibratedLocalReranker
-from memengine.retrieval.abstention import abstention_features, abstention_group
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.reranker import CalibratedLocalReranker
+from agentmem_core.retrieval.abstention import abstention_features, abstention_group
+from agentmem_core.vector import HashedTfidfEmbedder
 
 ALPHA = 0.02
 SCORES = ("ce", "support", "combined", "facet_support")

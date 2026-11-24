@@ -19,8 +19,8 @@ from pathlib import Path
 
 from eval.metrics import evidence_metrics, mean, print_retrieval_reports, retrieval_report
 from eval.paired import LABELS, TOKEN_BUDGET, TOP_K, add_backend_argument, cli_backend, evaluate_pair, make_engine, attach_consolidated_context
-from memengine.llm import build_llm_from_env
-from memengine.textutil import estimate_tokens
+from agentmem_core.llm import build_llm_from_env
+from agentmem_core.textutil import estimate_tokens
 
 MODES = ("bipolar", "rrf")
 OFFICIAL_SHA256 = {"LoCoMo": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",

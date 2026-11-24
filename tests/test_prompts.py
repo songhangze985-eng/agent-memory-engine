@@ -1,6 +1,6 @@
-from memengine.extract import extract_facts
-from memengine.llm import MockLLMClient, loads_json_object
-from memengine.prompts import load_prompt, prompt_dir, render_prompt
+from agentmem_core.extract import extract_facts
+from agentmem_core.llm import MockLLMClient, loads_json_object
+from agentmem_core.prompts import load_prompt, prompt_dir, render_prompt
 
 
 def test_prompt_dir_resolves_spec_files():

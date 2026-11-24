@@ -1,5 +1,5 @@
-from memengine.notebook import apply_write_op, render_block
-from memengine.store import Store
+from agentmem_core.notebook import apply_write_op, render_block
+from agentmem_core.store import Store
 
 
 def _op(action, block, line="", formatted="x", zkeys=None, surprise=0.5):

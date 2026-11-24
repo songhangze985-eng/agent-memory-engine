@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from memengine import OptimisticLockError, RecallConfig, UnifiedMemoryEngine, UnifiedToolRegistry
-from memengine.adapters import mcp_tool_definitions, openai_tool_definitions
-from memengine.contrib import QdrantL2Index, S3TranscriptStore
+from agentmem_core import OptimisticLockError, RecallConfig, UnifiedMemoryEngine, UnifiedToolRegistry
+from agentmem_core.adapters import mcp_tool_definitions, openai_tool_definitions
+from agentmem_core.contrib import QdrantL2Index, S3TranscriptStore
 
 
 def test_dual_ingest_tracks_and_l0_fts5_zero_vector_invariant(tmp_path):
@@ -161,7 +161,7 @@ def test_unified_tool_registry_adapters_and_v1_deprecation_shim(tmp_path):
         pytest.importorskip("fastapi")
         pytest.importorskip("httpx")
         from fastapi.testclient import TestClient
-        from memengine.server import create_app
+        from agentmem_core.server import create_app
 
         app = create_app(unified_engine=engine)
         with TestClient(app) as client:

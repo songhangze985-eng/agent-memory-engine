@@ -4,9 +4,9 @@ from collections import Counter
 from eval.evidence_ablation import fact_turns
 from eval.metrics import evidence_metrics, mean
 from eval.static_report import number, table
-from memengine.assembler import assemble_context
-from memengine.engine import _fit_context
-from memengine.textutil import estimate_tokens
+from agentmem_core.assembler import assemble_context
+from agentmem_core.engine import _fit_context
+from agentmem_core.textutil import estimate_tokens
 
 
 def measure_context(context, sources, gold, gold_sessions):

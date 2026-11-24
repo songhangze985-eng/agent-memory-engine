@@ -13,8 +13,8 @@ from eval.membench.score import choice_correct, extract_steps, mean, recall_at_1
 from eval.metrics import print_retrieval_reports, retrieval_report
 from eval.paired import LABELS, TOKEN_BUDGET, TOP_K, add_backend_argument, cli_backend, evaluate_pair, make_engine, paired_retrieve, attach_consolidated_context
 from eval.stress_corpus import stress_dialogue
-from memengine.distance import compute_bipolar_radius, consolidation_count, is_noise
-from memengine.textutil import estimate_tokens
+from agentmem_core.distance import compute_bipolar_radius, consolidation_count, is_noise
+from agentmem_core.textutil import estimate_tokens
 
 
 def measure(item, facts):

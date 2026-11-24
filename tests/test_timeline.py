@@ -1,4 +1,4 @@
-from memengine.timeline import TimelineBook, record_timeline_buffered
+from agentmem_core.timeline import TimelineBook, record_timeline_buffered
 
 
 def test_merge_extends_t_end_and_overwrites_payload():

@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-from memengine.chrono import parse_session_clock
+from agentmem_core.chrono import parse_session_clock
 from eval.evidence_ablation import Question, Turn, run_cli, sample_rows
 
 URL = "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
