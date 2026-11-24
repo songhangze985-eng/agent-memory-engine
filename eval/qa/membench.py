@@ -53,7 +53,7 @@ def _parse_membench_item(item: dict) -> tuple[list[Turn], QAItem]:
 
 
 def _worker(args):
-    turns, qa, engine_kind, llm_model, judge_model, consolidate, token_budget = args
+    turns, qa, engine_kind, llm_model, judge_model, consolidate, token_budget, recall_config = args
     # MemBench trajectories are step-level trajectories; v2_session_md maps to step-level turns here
     effective_engine = "v2_turn_md" if engine_kind == "v2_session_md" else engine_kind
     return evaluate_group_qa(
@@ -64,6 +64,7 @@ def _worker(args):
         judge_model=judge_model,
         consolidate=consolidate,
         token_budget=token_budget,
+        recall_config=recall_config,
     )
 
 
@@ -78,12 +79,13 @@ def run_membench_qa(
     judge_model: str | None = None,
     consolidate: bool = False,
     token_budget: int = 2048,
+    recall_config=None,
 ) -> dict[str, Any]:
     raw_items, missing = sample_membench_items(data_dir, seed, per_category)
     tasks = []
     for item in raw_items:
         turns, qa = _parse_membench_item(item)
-        tasks.append((turns, qa, engine_kind, llm_model, judge_model, consolidate, token_budget))
+        tasks.append((turns, qa, engine_kind, llm_model, judge_model, consolidate, token_budget, recall_config))
 
     if workers <= 1:
         nested = [_worker(t) for t in tasks]

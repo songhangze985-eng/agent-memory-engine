@@ -22,7 +22,7 @@ LOCOMO_CATEGORIES = [
 
 
 def _worker(args):
-    turns, qas, engine_kind, llm_model, judge_model, consolidate, token_budget = args
+    turns, qas, engine_kind, llm_model, judge_model, consolidate, token_budget, recall_config = args
     return evaluate_group_qa(
         turns,
         qas,
@@ -31,6 +31,7 @@ def _worker(args):
         judge_model=judge_model,
         consolidate=consolidate,
         token_budget=token_budget,
+        recall_config=recall_config,
     )
 
 
@@ -45,6 +46,7 @@ def run_locomo_qa(
     judge_model: str | None = None,
     consolidate: bool = False,
     token_budget: int = 2048,
+    recall_config=None,
 ) -> dict[str, Any]:
     data = json.loads(dataset_path.read_text(encoding="utf-8"))
     pool_rows = [
@@ -84,7 +86,7 @@ def run_locomo_qa(
                     unanswerable=(cat_id == 5),
                 )
             )
-        tasks.append((turns, qas, engine_kind, llm_model, judge_model, consolidate, token_budget))
+        tasks.append((turns, qas, engine_kind, llm_model, judge_model, consolidate, token_budget, recall_config))
 
     if workers <= 1:
         nested = [_worker(t) for t in tasks]

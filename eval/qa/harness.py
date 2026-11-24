@@ -89,12 +89,13 @@ def _eval_v1_group(
     judge,
     consolidate: bool = False,
     token_budget: int = TOKEN_BUDGET,
+    recall_config=None,
 ) -> list[dict[str, Any]]:
     """Run v1_standard, v1_chronicle, or unified engine over one dialogue group."""
     if engine_kind == "unified":
         from memengine.core import UnifiedMemoryEngine
 
-        engine = UnifiedMemoryEngine(":memory:")
+        engine = UnifiedMemoryEngine(":memory:", config=recall_config)
     else:
         engine = make_engine("mock")
 
@@ -490,6 +491,7 @@ def evaluate_group_qa(
     judge_model: str | None = None,
     consolidate: bool = False,
     token_budget: int = TOKEN_BUDGET,
+    recall_config=None,
 ) -> list[dict[str, Any]]:
     reader = make_reader(llm_model)
     judge = make_judge(judge_model)
@@ -504,6 +506,7 @@ def evaluate_group_qa(
             judge=judge,
             consolidate=consolidate,
             token_budget=token_budget,
+            recall_config=recall_config,
         )
     raise ValueError(f"unsupported engine_kind: {engine_kind!r}")
 
