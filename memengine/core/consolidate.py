@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 
+from memengine.core.dreaming import dream_beliefs
 from memengine.core.episodes import EpisodeLog
 from memengine.core.facts import UnifiedFactLedger
 
@@ -18,7 +19,7 @@ def run_consolidation(
     force: bool = False,
     timestamp: float | None = None,
 ) -> dict:
-    """Run core consolidation and register newly distilled observations as unified ``kind='belief'`` facts."""
+    """Run core consolidation + M4 evidence-backed belief dreaming into unified ``kind='belief'`` facts."""
     now = engine._now() if timestamp is None else float(timestamp)
     result = engine.consolidate(
         user_id=user_id,
@@ -44,7 +45,20 @@ def run_consolidation(
                 timestamp=now,
             )
         engine.store.commit()
-    return result
+
+    dream_res = dream_beliefs(
+        engine,
+        ledger,
+        user_id=user_id,
+        agent_id=agent_id,
+        timestamp=now,
+    )
+    return {
+        **result,
+        "belief_ids": dream_res["belief_ids"],
+        "belief_mode": dream_res["mode"],
+        "belief_count": dream_res["count"],
+    }
 
 
 def rebuild_from_episodes(
