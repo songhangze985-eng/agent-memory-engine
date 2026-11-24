@@ -157,7 +157,8 @@ def validate_full(directory):
                     add(name, "taboo MRR", row["taboo_mrr"], "==", 1)
                     add(name, "current rank", row["current_rank"], "==", 1)
                     add(name, "hot reduction", row["hot_compression"], ">=", .7995)
-                    add(name, "injected tokens", row["average_tokens"], "<=", 1923 / 7)
+                    # Commit af7ae61 added the 3-token "[禁忌] " prefix to taboo facts (+3 total tokens across 7 queries).
+                    add(name, "injected tokens", row["average_tokens"], "<=", 1926 / 7)
             else:
                 add(name, "leaks", report["isolation"]["leaks"], "==", 0)
                 add(name, "isolation probes", report["isolation"]["queries"], "==", 200)

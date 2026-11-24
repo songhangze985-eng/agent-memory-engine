@@ -244,38 +244,11 @@ def eval_vfs_full_dataset(name: str, dataset_path: Path, group_fn, *, sample: in
     }
 
 
-def compute_weighted_summary(
-    *,
-    membench_r10: float,
-    longmemeval_r10: float,
-    locomo_r10: float,
-    technical_p1: float,
-) -> dict:
-    """Transparent MemBench-weighted composite retrieval index (MemBench 40% / LongMemEval 25% / LoCoMo 20% / Tech 15%)."""
-    weights = {"membench": 0.40, "longmemeval": 0.25, "locomo": 0.20, "technical": 0.15}
-    score = (
-        weights["membench"] * membench_r10
-        + weights["longmemeval"] * longmemeval_r10
-        + weights["locomo"] * locomo_r10
-        + weights["technical"] * technical_p1
-    )
-    return {
-        "weights": weights,
-        "components": {
-            "membench_r10": round(membench_r10, 6),
-            "longmemeval_r10": round(longmemeval_r10, 6),
-            "locomo_r10": round(locomo_r10, 6),
-            "technical_p1": round(technical_p1, 6),
-        },
-        "weighted_composite": round(score, 6),
-    }
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--locomo", type=Path, default=Path("/private/tmp/ame-benchmark-data/locomo10.json"))
-    parser.add_argument("--longmemeval", type=Path, default=Path("/private/tmp/ame-benchmark-data/longmemeval_s_cleaned.json"))
-    parser.add_argument("--memdata", type=Path, default=Path("/private/tmp/agent-memory-engine.Fl1ikV/eval/membench/.cache/MemData"))
+    parser = argparse.ArgumentParser(description="Unweighted per-benchmark retrieval & gate runner (no composite weighting).")
+    parser.add_argument("--locomo", type=Path, default=Path("eval/locomo/.cache/locomo10.json"))
+    parser.add_argument("--longmemeval", type=Path, default=Path("eval/longmemeval/.cache/longmemeval_s_cleaned.json"))
+    parser.add_argument("--memdata", type=Path, default=Path("eval/membench/.cache/MemData"))
     parser.add_argument("--membench-per-cat", type=int, default=200)
     parser.add_argument("--workers", type=int, default=max(1, min(6, (os.cpu_count() or 4) - 1)))
     parser.add_argument("--seed", type=int, default=42)
@@ -287,31 +260,29 @@ def main() -> None:
 
     t0 = time.perf_counter()
     vfs_membench = eval_vfs_membench(args.memdata, seed=args.seed, per_category=args.membench_per_cat, workers=args.workers)
-    vfs_locomo = eval_vfs_full_dataset("LoCoMo (Full 1,986Q)", args.locomo, locomo_groups, sample=None, seed=args.seed, workers=args.workers)
-    vfs_longmem = eval_vfs_full_dataset("LongMemEval-S (Full 500Q)", args.longmemeval, longmemeval_groups, sample=None, seed=args.seed, workers=args.workers)
+    vfs_locomo = eval_vfs_full_dataset("LoCoMo (Full 1,986Q, supplementary session-level)", args.locomo, locomo_groups, sample=None, seed=args.seed, workers=args.workers)
+    vfs_longmem = eval_vfs_full_dataset("LongMemEval-S (Full 500Q, supplementary session-level)", args.longmemeval, longmemeval_groups, sample=None, seed=args.seed, workers=args.workers)
     vfs_exact = ablate_exact_identifiers(seed=args.seed)
     vfs_version = ablate_version_precision()
     vfs_opt = bench_vfs_retrieval_and_output_optimizations()
 
-    tech_p1 = 0.5 * (vfs_exact["vfs_l2"]["precision_at_1"] + vfs_version["vfs_l2"]["precision_at_1"])
-    vfs_weighted = compute_weighted_summary(
-        membench_r10=vfs_membench["overall"]["recall_at_10"],
-        longmemeval_r10=vfs_longmem["session_recall_at_10"],
-        locomo_r10=vfs_locomo["session_recall_at_10"],
-        technical_p1=tech_p1,
-    )
+    gates = {
+        "exact_ident_gate": "PASS" if (vfs_exact["vfs_l2"]["precision_at_1"] == 1.0 and vfs_exact["vfs_l2"]["version_confusion_rate"] == 0.0) else "FAIL",
+        "version_precision_gate": "PASS" if (vfs_version["vfs_l2"]["precision_at_1"] == 1.0 and vfs_version["vfs_l2"]["confusion_count"] == 0) else "FAIL",
+    }
 
     payload = {
         "seed": args.seed,
         "workers": args.workers,
         "elapsed_s": round(time.perf_counter() - t0, 1),
+        "granularity_note": "MemBench is step-level; v2 VFS LoCoMo/LongMemEval columns here are session-level supplementary only. Use eval.retrieval.turn_level and eval.qa for cross-version comparison.",
+        "regression_gates": gates,
         "vfs_membench": vfs_membench,
-        "vfs_locomo_full": vfs_locomo,
-        "vfs_longmemeval_full": vfs_longmem,
+        "vfs_locomo_full_session_supp": vfs_locomo,
+        "vfs_longmemeval_full_session_supp": vfs_longmem,
         "vfs_exact_120": vfs_exact,
         "vfs_version_80": vfs_version,
         "vfs_retrieval_output_opt": vfs_opt,
-        "vfs_membench_weighted_summary": vfs_weighted,
     }
 
     if not args.skip_v1_membench:
