@@ -4,9 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from agentmem_core.core.ambient import AmbientPlanner, enforce_llm_budget
 from agentmem_core.core.answer import unified_answer, unified_reflect
 from agentmem_core.core.assemble import unified_assemble
 from agentmem_core.core.calc import deterministic_calculate
+from agentmem_core.core.code_anchors import CodeAnchor, CodeAnchorManager
 from agentmem_core.core.consolidate import rebuild_from_episodes, run_consolidation
 from agentmem_core.core.episodes import EpisodeLog
 from agentmem_core.core.facts import UnifiedFactLedger
@@ -15,6 +17,7 @@ from agentmem_core.core.plan import QueryPlan, RecallConfig, build_query_plan
 from agentmem_core.core.profiles import MemoryProfile, load_profile
 from agentmem_core.core.recall import unified_recall
 from agentmem_core.core.scopes import ScopeChain, resolve_write_scope
+from agentmem_core.core.signals import AgentEvent, SignalExtractor
 from agentmem_core.core.supersede import SlotSupersedeTracker
 from agentmem_core.engine import CognitiveMemoryEngine
 from agentmem_core.storage.base import RecallFilter
@@ -140,6 +143,39 @@ class ProfileBinding:
             include_stale=self.profile.stale_policy != "exclude",
         )
 
+    def ambient_context(self, query: str = "", **kwargs: Any) -> dict:
+        return self.engine.ambient_context(
+            query,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            session_id=kwargs.pop("session_id", None) or self.session_id,
+            scope_chain=kwargs.pop("scope_chain", None) or self.scope_chain,
+            profile=self.profile,
+            **kwargs,
+        )
+
+    def ingest_event(self, event: AgentEvent | dict[str, Any], *, scope_key: str | None = None, **kwargs: Any) -> dict:
+        eff_scope = self.default_write_scope(scope_key)
+        return self.engine.ingest_event(
+            event,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            session_id=kwargs.pop("session_id", None) or self.session_id or "default",
+            scope_key=eff_scope,
+            repo_id=self.repo_id,
+            project_id=self.project_id,
+            profile=self.profile,
+            **kwargs,
+        )
+
+    def verify_anchors(self, **kwargs: Any) -> dict:
+        return self.engine.verify_anchors(
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            scope_chain=kwargs.pop("scope_chain", None) or self.scope_chain,
+            **kwargs,
+        )
+
 
 class UnifiedMemoryEngine:
     """Universal single-core memory engine parameterized by declarative MemoryProfile & ScopeChain.
@@ -192,10 +228,13 @@ class UnifiedMemoryEngine:
             transcript_store=transcript_store,
         )
         self.ledger = UnifiedFactLedger(self.store)
+        self.anchors = CodeAnchorManager(self.store, self.ledger)
         self.supersede = SlotSupersedeTracker(self.store)
         self.vfs = VFSView(self._engine, self.ledger)
         self.profile = ProfileView(self.store, self.ledger)
         self.profile_view = self.profile
+        self.signals = SignalExtractor(self)
+        self.ambient_planner = AmbientPlanner(self)
 
     def close(self) -> None:
         try:
@@ -278,6 +317,8 @@ class UnifiedMemoryEngine:
         ttl_seconds: float | None = None,
         expires_at: float | str | None = None,
         valid_from: float | str | None = None,
+        anchors: list[CodeAnchor | dict[str, Any] | str] | tuple[CodeAnchor | dict[str, Any] | str, ...] = (),
+        repo_root: str | Path | None = None,
         metadata: dict | None = None,
     ) -> dict:
         """Conversational ingest track (NO salience gate — maximizes conversational recall)."""
@@ -290,7 +331,7 @@ class UnifiedMemoryEngine:
             repo_id=repo_id,
             project_id=project_id,
         )
-        return ingest_conversational_turn(
+        res = ingest_conversational_turn(
             self._engine,
             self.episodes,
             self.ledger,
@@ -312,6 +353,25 @@ class UnifiedMemoryEngine:
             valid_from=valid_from,
             metadata=metadata,
         )
+        attached_anchors: list[dict] = []
+        if anchors and not res.get("deduplicated"):
+            for op in res.get("operations", ()):
+                fid = op.get("line_id")
+                if fid:
+                    attached_anchors.extend(
+                        self.anchors.attach(
+                            fid,
+                            anchors,
+                            user_id=user_id,
+                            agent_id=agent_id,
+                            scope_key=eff_scope,
+                            repo_root=repo_root,
+                            timestamp=timestamp,
+                        )
+                    )
+        if attached_anchors:
+            res = {**res, "anchors": attached_anchors}
+        return res
 
     def retain(self, text: str, **kwargs) -> dict:
         """Alias for conversational ``ingest_turn``."""
@@ -344,6 +404,8 @@ class UnifiedMemoryEngine:
         future_pitfall_risk: bool = True,
         source_turn_ids: list[int] | tuple[int, ...] = (),
         source_transcript_ids: list[str] | tuple[str, ...] = (),
+        anchors: list[CodeAnchor | dict[str, Any] | str] | tuple[CodeAnchor | dict[str, Any] | str, ...] = (),
+        repo_root: str | Path | None = None,
         expected_version: int | None = None,
         batch_id: str | None = None,
         timestamp: float | None = None,
@@ -358,7 +420,7 @@ class UnifiedMemoryEngine:
             repo_id=repo_id,
             project_id=project_id,
         )
-        return ingest_procedural_rule(
+        res = ingest_procedural_rule(
             self._engine,
             self.episodes,
             self.ledger,
@@ -387,8 +449,110 @@ class UnifiedMemoryEngine:
             batch_id=batch_id,
             timestamp=timestamp,
         )
+        if anchors and res.get("accepted") and res.get("fact_id"):
+            attached = self.anchors.attach(
+                res["fact_id"],
+                anchors,
+                user_id=user_id,
+                agent_id=agent_id,
+                scope_key=eff_scope,
+                repo_root=repo_root,
+                timestamp=timestamp,
+            )
+            res = {**res, "anchors": attached}
+        else:
+            res.setdefault("anchors", [])
+        return res
 
     write_rule = ingest_rule
+
+    # ---- C1 Anchors, C2 Signal Ingest & C3 Ambient Path ----
+
+    def verify_anchors(
+        self,
+        *,
+        repo_root: str | Path | None = None,
+        changed_files: list[str] | tuple[str, ...] | set[str] | None = None,
+        file_contents: dict[str, str] | None = None,
+        user_id: str = "default",
+        agent_id: str = "default",
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | str | None = None,
+        fact_id: str | None = None,
+        timestamp: float | None = None,
+    ) -> dict:
+        """C1: Verify code anchors against workspace or changed files and mark drifted facts ``stale``."""
+        return self.anchors.verify_anchors(
+            repo_root=repo_root,
+            changed_files=changed_files,
+            file_contents=file_contents,
+            user_id=user_id,
+            agent_id=agent_id,
+            scope_chain=ScopeChain.coerce(scope_chain),
+            fact_id=fact_id,
+            timestamp=timestamp,
+        )
+
+    def ingest_event(
+        self,
+        event: AgentEvent | dict[str, Any],
+        *,
+        user_id: str = "default",
+        agent_id: str = "default",
+        session_id: str = "default",
+        scope_key: str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
+        repo_root: str | Path | None = None,
+        profile: str | Path | MemoryProfile | None = None,
+    ) -> dict:
+        """C2: Process a runtime event (fail->pass, user correction, file edit) under G4 write cost caps."""
+        return self.signals.process_event(
+            event,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            scope_key=scope_key,
+            repo_id=repo_id,
+            project_id=project_id,
+            repo_root=repo_root,
+            profile=profile,
+        )
+
+    def ambient_context(
+        self,
+        query: str = "",
+        *,
+        active_files: list[str] | tuple[str, ...] = (),
+        active_symbols: list[str] | tuple[str, ...] = (),
+        error_text: str = "",
+        user_id: str = "default",
+        agent_id: str = "default",
+        session_id: str | None = None,
+        scope_chain: ScopeChain | list[str] | tuple[str, ...] | str | None = None,
+        repo_id: str | None = None,
+        project_id: str | None = None,
+        profile: str | Path | MemoryProfile | None = None,
+        token_budget: int | None = None,
+        top_k: int | None = None,
+        min_overlap_ratio: float = 0.25,
+    ) -> dict:
+        """C3 & G4: Zero-LLM millisecond ambient retrieval & context assembly."""
+        return self.ambient_planner.plan_and_assemble(
+            query,
+            active_files=active_files,
+            active_symbols=active_symbols,
+            error_text=error_text,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            scope_chain=scope_chain,
+            repo_id=repo_id,
+            project_id=project_id,
+            profile=profile,
+            token_budget=token_budget,
+            top_k=top_k,
+            min_overlap_ratio=min_overlap_ratio,
+        )
 
     # ---- Derived VFS View Shortcuts ----
 
@@ -589,21 +753,24 @@ class UnifiedMemoryEngine:
         disclosure: Literal["full", "progressive"] = "full",
         profile: str | Path | MemoryProfile | None = None,
     ) -> dict:
-        bundle = self.build_context(
-            query,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            scope_chain=scope_chain,
-            repo_id=repo_id,
-            project_id=project_id,
-            reference_time=reference_time,
-            token_budget=token_budget,
-            mode=mode,
-            disclosure=disclosure,
-            profile=profile,
-        )
-        return self._answer_from_context(query, bundle)
+        spec = self._resolve_profile(profile)
+        with enforce_llm_budget(self, max_calls=spec.max_question_llm_calls, path_name="question") as guard:
+            bundle = self.build_context(
+                query,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                scope_chain=scope_chain,
+                repo_id=repo_id,
+                project_id=project_id,
+                reference_time=reference_time,
+                token_budget=token_budget,
+                mode=mode,
+                disclosure=disclosure,
+                profile=spec,
+            )
+            res = self._answer_from_context(query, bundle)
+            return {**res, "llm_calls": guard.calls, "llm_budget": spec.max_question_llm_calls}
 
     def reflect(
         self,
@@ -619,29 +786,32 @@ class UnifiedMemoryEngine:
         reference_time: float | None = None,
         token_budget: int = 2048,
     ) -> dict:
-        bundle = self.build_context(
-            query,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=None,
-            scope_chain=scope_chain,
-            repo_id=repo_id,
-            project_id=project_id,
-            profile=profile,
-            reference_time=reference_time,
-            token_budget=token_budget,
-        )
-        return unified_reflect(
-            self._engine,
-            self.episodes,
-            self.ledger,
-            query,
-            bundle,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            timestamp=reference_time,
-        )
+        spec = self._resolve_profile(profile)
+        with enforce_llm_budget(self, max_calls=spec.max_question_llm_calls, path_name="question") as guard:
+            bundle = self.build_context(
+                query,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=None,
+                scope_chain=scope_chain,
+                repo_id=repo_id,
+                project_id=project_id,
+                profile=spec,
+                reference_time=reference_time,
+                token_budget=token_budget,
+            )
+            res = unified_reflect(
+                self._engine,
+                self.episodes,
+                self.ledger,
+                query,
+                bundle,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                timestamp=reference_time,
+            )
+            return {**res, "llm_calls": guard.calls, "llm_budget": spec.max_question_llm_calls}
 
     # ---- Maintenance & Lifecycle ----
 

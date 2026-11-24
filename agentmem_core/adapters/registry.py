@@ -28,35 +28,95 @@ _TOOL_SPECS: tuple[ToolSpec, ...] = (
             "timestamp": {"type": ["number", "null"]},
             "mention_time": {"type": ["number", "string", "null"]},
             "idempotency_key": {"type": ["string", "null"]},
+            "scope_key": {"type": ["string", "null"]},
+            "override_key": {"type": "string", "default": ""},
+            "anchors": {"type": "array", "items": {"type": ["string", "object"]}, "default": []},
         },
         required=("text",),
         http_path="/v2/memory/retain",
     ),
     ToolSpec(
         name="memory_search",
-        description="Unified 4-channel recall (vector + BM25[facts+L0 FTS5] + entity_graph + exact/version).",
+        description="Unified 4-channel recall (vector + BM25[facts+L0 FTS5] + entity_graph + exact/version) with scope chain.",
         parameters={
             "query": {"type": "string", "minLength": 1},
             "top_k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
             "reference_time": {"type": ["number", "null"]},
             "include_cold": {"type": "boolean", "default": False},
             "mode": {"type": "string", "enum": ["single_query", "reconstructive"], "default": "reconstructive"},
+            "scope_chain": {"type": ["array", "null"], "items": {"type": "string"}},
+            "profile": {"type": ["string", "null"]},
         },
         required=("query",),
         http_path="/v2/memory/search",
     ),
     ToolSpec(
         name="memory_build_context",
-        description="Assemble bounded context pack with full or progressive disclosure and conversational/coding profile.",
+        description="Assemble bounded context pack driven by declarative MemoryProfile and ScopeChain.",
         parameters={
             "query": {"type": "string", "minLength": 1},
             "token_budget": {"type": "integer", "minimum": 64, "maximum": 32768, "default": 2048},
-            "disclosure": {"type": "string", "enum": ["full", "progressive"], "default": "full"},
-            "profile": {"type": "string", "enum": ["conversational", "coding_agent"], "default": "conversational"},
+            "disclosure": {"type": ["string", "null"], "enum": ["full", "progressive", None]},
+            "profile": {"type": "string", "default": "conversational"},
+            "scope_chain": {"type": ["array", "null"], "items": {"type": "string"}},
+            "repo_id": {"type": ["string", "null"]},
+            "project_id": {"type": ["string", "null"]},
             "reference_time": {"type": ["number", "null"]},
         },
         required=("query",),
         http_path="/v2/memory/context",
+    ),
+    ToolSpec(
+        name="memory_ambient_context",
+        description="Zero-LLM millisecond ambient hot-path context injection using code anchors, exact identifiers, and FTS5.",
+        parameters={
+            "query": {"type": "string", "default": ""},
+            "active_files": {"type": "array", "items": {"type": "string"}, "default": []},
+            "active_symbols": {"type": "array", "items": {"type": "string"}, "default": []},
+            "error_text": {"type": "string", "default": ""},
+            "profile": {"type": "string", "default": "coding"},
+            "scope_chain": {"type": ["array", "null"], "items": {"type": "string"}},
+            "repo_id": {"type": ["string", "null"]},
+            "project_id": {"type": ["string", "null"]},
+            "token_budget": {"type": ["integer", "null"], "minimum": 64, "maximum": 8192},
+            "top_k": {"type": ["integer", "null"], "minimum": 1, "maximum": 30},
+        },
+        required=(),
+        http_path="/v2/memory/ambient",
+    ),
+    ToolSpec(
+        name="memory_ingest_event",
+        description="Signal-driven event ingest (fail->pass rule capture, user corrections, file-edit anchor drift) with write cap.",
+        parameters={
+            "event_type": {"type": "string", "enum": ["tool_result", "user_message", "assistant_message", "file_edit", "git_commit", "test_result"]},
+            "text": {"type": "string", "default": ""},
+            "tool_name": {"type": "string", "default": ""},
+            "command": {"type": "string", "default": ""},
+            "exit_code": {"type": ["integer", "null"]},
+            "error_signature": {"type": "string", "default": ""},
+            "file_paths": {"type": "array", "items": {"type": "string"}, "default": []},
+            "symbols": {"type": "array", "items": {"type": "string"}, "default": []},
+            "override_key": {"type": "string", "default": ""},
+            "scope_key": {"type": ["string", "null"]},
+            "repo_id": {"type": ["string", "null"]},
+            "project_id": {"type": ["string", "null"]},
+            "repo_root": {"type": ["string", "null"]},
+            "profile": {"type": "string", "default": "coding"},
+        },
+        required=("event_type",),
+        http_path="/v2/memory/events",
+    ),
+    ToolSpec(
+        name="memory_verify_anchors",
+        description="Verify fact code anchors against workspace or changed files and mark drifted rules stale.",
+        parameters={
+            "repo_root": {"type": ["string", "null"]},
+            "changed_files": {"type": ["array", "null"], "items": {"type": "string"}},
+            "scope_chain": {"type": ["array", "null"], "items": {"type": "string"}},
+            "fact_id": {"type": ["string", "null"]},
+        },
+        required=(),
+        http_path="/v2/memory/verify-anchors",
     ),
     ToolSpec(
         name="memory_answer",
@@ -95,6 +155,10 @@ _TOOL_SPECS: tuple[ToolSpec, ...] = (
             "visible_in_context": {"type": "boolean", "default": False},
             "reusable_pattern": {"type": "boolean", "default": True},
             "future_pitfall_risk": {"type": "boolean", "default": True},
+            "scope_key": {"type": ["string", "null"]},
+            "override_key": {"type": "string", "default": ""},
+            "anchors": {"type": "array", "items": {"type": ["string", "object"]}, "default": []},
+            "repo_root": {"type": ["string", "null"]},
             "expected_version": {"type": ["integer", "null"]},
         },
         required=("path", "title", "trigger_condition", "action"),
@@ -280,9 +344,44 @@ class UnifiedToolRegistry:
             "dynamic_memory": ctx["dynamic_memory"],
             "disclosure": ctx["disclosure"],
             "profile": ctx["profile"],
+            "scope_chain": ctx.get("scope_chain"),
+            "excluded_stale_ids": ctx.get("excluded_stale_ids", []),
             "empty_recall": ctx["empty_recall"],
             "token_breakdown": ctx["token_breakdown"],
         }
+
+    def _handle_memory_ambient_context(self, **kwargs):
+        return self.engine.ambient_context(
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            session_id=self.session_id,
+            **kwargs,
+        )
+
+    def _handle_memory_ingest_event(self, **kwargs):
+        scope_key = kwargs.pop("scope_key", None)
+        repo_id = kwargs.pop("repo_id", None)
+        project_id = kwargs.pop("project_id", None)
+        repo_root = kwargs.pop("repo_root", None)
+        profile = kwargs.pop("profile", "coding")
+        return self.engine.ingest_event(
+            kwargs,
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            session_id=self._scope_session(),
+            scope_key=scope_key,
+            repo_id=repo_id,
+            project_id=project_id,
+            repo_root=repo_root,
+            profile=profile,
+        )
+
+    def _handle_memory_verify_anchors(self, **kwargs):
+        return self.engine.verify_anchors(
+            user_id=self.user_id,
+            agent_id=self.agent_id,
+            **kwargs,
+        )
 
     def _handle_memory_answer(self, **kwargs):
         ans = self.engine.answer(
