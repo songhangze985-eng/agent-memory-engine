@@ -8,7 +8,7 @@ from memengine.chrono import date_iso, resolve_temporal_spans
 from memengine.core.episodes import EpisodeLog
 from memengine.core.facts import UnifiedFactLedger
 from memengine.core.supersede import _parse_num, resolve_relative_occurrence
-from memengine.core.text import light_stem, stem_terms
+from memengine.core.text import expand_category_stems, light_stem, stem_terms
 from memengine.llm import MockLLMClient
 from memengine.textutil import strip_step_tags
 from memengine.verification import admissible_evidence
@@ -92,25 +92,26 @@ def stem_evidence_matches_query(
     """Return ``(matched, overlap_ratio, overlap_count)`` using stem-normalized content terms."""
     if exact_hit:
         return True, 1.0, 2
-    q_stems = stem_terms(query)
-    if not q_stems:
+    raw_q_stems = stem_terms(query)
+    if not raw_q_stems:
         return False, 0.0, 0
+    q_stems = expand_category_stems(raw_q_stems)
     e_stems = stem_terms(text)
     overlap = q_stems & e_stems
     count = len(overlap)
-    ratio = count / len(q_stems)
+    ratio = min(1.0, count / len(raw_q_stems))
     if count == 0:
         return False, 0.0, 0
     sp_stems = stem_terms(speaker) if speaker else set()
-    non_speaker_q = q_stems - sp_stems
+    non_speaker_q = raw_q_stems - sp_stems
     non_speaker_overlap = overlap - sp_stems
     if non_speaker_q and not non_speaker_overlap:
         return False, 0.0, 0
     if len(non_speaker_q) >= 3 and len(non_speaker_overlap) < 2 and ratio < 0.50:
         return False, ratio, count
-    if len(q_stems) <= 2:
+    if len(raw_q_stems) <= 2:
         return (count >= 1), ratio, count
-    if len(q_stems) <= 4:
+    if len(raw_q_stems) <= 4:
         return (count >= 2 or (entity_anchor and len(non_speaker_overlap) >= 1) or ratio >= 0.45), ratio, count
     return (count >= 2 and ratio >= 0.25) or (entity_anchor and len(non_speaker_overlap) >= 2), ratio, count
 
@@ -341,9 +342,14 @@ def _extract_focused_claims(query: str, rows: list[dict], *, qplan=None, max_wor
 
         resolved_ts = resolve_row_event_ts(row)
         occ = date_iso(resolved_ts) if resolved_ts is not None else (date_iso(row.get("occurrence_start")) or date_iso(row.get("mention_time")))
-        sentences = [s.strip() for s in _SENT_SPLIT.split(cleaned) if len(s.strip()) >= 4] or [cleaned]
+        # Strip leading "Speaker: " prefix BEFORE sentence splitting so greetings like "Melanie: Wow, Caroline!"
+        # never steal speaker-name lexical score from the actual factual sentence in the turn!
+        row_speaker = str(row.get("speaker") or "").strip()
+        sp_stems = stem_terms(row_speaker) if row_speaker else set()
+        body_no_speaker = re.sub(r"^[A-Za-z][A-Za-z0-9 _.-]{0,30}:\s+", "", cleaned, count=1) if ":" in cleaned[:36] else cleaned
+        non_sp_q = expand_category_stems(q_stems - sp_stems) or expand_category_stems(q_stems)
+        sentences = [s.strip() for s in _SENT_SPLIT.split(body_no_speaker) if len(s.strip()) >= 4] or [body_no_speaker]
         for s_idx, sent in enumerate(sentences):
-            # If a turn has a rhetorical question followed by its declarative answer, pair them so anaphora ("ones") resolves!
             effective_sent = sent
             if sent.rstrip().endswith(("?", "？")) and s_idx + 1 < len(sentences) and not sentences[s_idx + 1].rstrip().endswith(("?", "？")):
                 effective_sent = sentences[s_idx + 1]
@@ -352,8 +358,11 @@ def _extract_focused_claims(query: str, rows: list[dict], *, qplan=None, max_wor
             else:
                 s_stems = stem_terms(sent)
                 is_question_sent = sent.rstrip().endswith(("?", "？"))
-            s_hits = len(q_stems & s_stems)
-            s_ratio = s_hits / max(1, len(q_stems))
+            # Score sentences strictly by non-speaker content stems so greetings ("Wow, Caroline!") score 0!
+            s_hits = len(non_sp_q & s_stems)
+            s_ratio = min(1.0, s_hits / max(1, len(q_stems - sp_stems) or len(q_stems)))
+            if s_hits == 0 and len(sentences) > 1:
+                continue
             rare_bonus = 0.22 * (len(rare_stems & s_stems) / max(1, len(rare_stems))) if rare_stems else 0.0
             num_bonus = 0.18 if (wants_num and _NUM_IN_TEXT.search(effective_sent)) else 0.0
             date_bonus = 0.22 if (wants_date and (_DATE_RE.search(effective_sent) or occ)) else 0.0
@@ -384,28 +393,51 @@ def _extract_focused_claims(query: str, rows: list[dict], *, qplan=None, max_wor
         return []
 
     candidates.sort(key=lambda item: (-item[0], item[1]))
+    # Only apply multi-session 3-claim packing on genuine multi-hop listing queries (not single-fact knowledge-update counts!)
+    is_multi_item = bool(qplan and qplan.is_multi_hop_query and not has_latest)
+    max_claims = 3 if is_multi_item else 2
+    effective_max_words = 62 if is_multi_item else max_words
+
     claims: list[dict] = []
     seen_norm: set[str] = set()
+    seen_sessions: set[str] = set()
     used_words = 0
-    for _, _, text, row in candidates:
+
+    ordered_candidates = candidates
+    if is_multi_item and len(candidates) > 1:
+        distinct_pass: list[tuple[float, int, str, dict]] = []
+        remainder: list[tuple[float, int, str, dict]] = []
+        seen_s: set[str] = set()
+        for cand in candidates:
+            sid = str(cand[3].get("session_id") or cand[3].get("evidence_id"))
+            if sid not in seen_s:
+                seen_s.add(sid)
+                distinct_pass.append(cand)
+            else:
+                remainder.append(cand)
+        ordered_candidates = [*distinct_pass, *remainder]
+
+    for _, _, text, row in ordered_candidates:
         norm = text.casefold().strip()
         if norm in seen_norm:
             continue
         words = text.split()
-        if len(words) > max_words:
-            if claims:
-                continue
-            text = " ".join(words[:max_words])
+        per_claim_cap = 26 if (is_multi_item and len(words) > 26) else effective_max_words
+        if len(words) > per_claim_cap:
+            text = " ".join(words[:per_claim_cap])
             words = text.split()
-        if claims and used_words + len(words) > max_words:
+        if claims and used_words + len(words) > effective_max_words:
             break
         seen_norm.add(norm)
+        sid = str(row.get("session_id") or "")
+        if sid:
+            seen_sessions.add(sid)
         claims.append({
             "text": text,
             "evidence_ids": [row["evidence_id"]],
         })
         used_words += len(words)
-        if len(claims) >= 2:
+        if len(claims) >= max_claims:
             break
     return claims
 
