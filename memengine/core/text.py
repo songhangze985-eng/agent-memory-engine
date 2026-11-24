@@ -41,6 +41,36 @@ def light_stem(word: str) -> str:
     return w
 
 
+_CATEGORY_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "pet": ("dog", "cat", "puppy", "pupp", "kitten", "bird", "rabbit", "hamster", "guinea", "fish", "turtle", "horse"),
+    "child": ("son", "daughter", "kid", "boy", "girl", "baby", "toddler"),
+    "children": ("son", "daughter", "kid", "boy", "girl", "baby", "toddler"),
+    "kid": ("son", "daughter", "child", "children", "boy", "girl"),
+    "parent": ("mom", "mother", "dad", "father"),
+    "sibling": ("brother", "sister"),
+    "hobby": ("enjoy", "love", "writ", "read", "hik", "paint", "music", "movi", "cook", "garden", "photograph", "craft", "play", "camp", "run"),
+    "hobbi": ("enjoy", "love", "writ", "read", "hik", "paint", "music", "movi", "cook", "garden", "photograph", "craft", "play", "camp", "run"),
+    "country": ("visit", "trip", "travel", "vacat", "flew", "abroad", "canada", "greenland", "japan", "france", "italy", "spain", "germany", "mexico", "europe"),
+    "countri": ("visit", "trip", "travel", "vacat", "flew", "abroad", "canada", "greenland", "japan", "france", "italy", "spain", "germany", "mexico", "europe"),
+    "beer": ("stout", "lager", "ipa", "ale", "pilsner", "brew", "pint"),
+    "pottery": ("bowl", "cup", "mug", "vase", "plate", "clay", "ceramic"),
+    "potteri": ("bowl", "cup", "mug", "vase", "plate", "clay", "ceramic"),
+    "doctor": ("physician", "specialist", "dermatologist", "dentist", "therapist", "ent", "clinic", "checkup"),
+    "tournament": ("championship", "competition", "match", "won", "trophy", "medal", "league"),
+    "event": ("workshop", "seminar", "competition", "conference", "festival", "party", "concert", "meetup"),
+}
+
+
+def expand_category_stems(stems: set[str]) -> set[str]:
+    """Expand high-level category query stems (e.g. 'pet' -> 'dog'/'cat', 'children' -> 'son'/'daughter')."""
+    expanded = set(stems)
+    for stem in stems:
+        extras = _CATEGORY_EXPANSIONS.get(stem)
+        if extras:
+            expanded.update(extras)
+    return expanded
+
+
 def stem_terms(text: str) -> set[str]:
     cleaned = strip_step_tags(text or "")
     out: set[str] = set()

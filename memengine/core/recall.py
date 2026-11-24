@@ -8,6 +8,7 @@ import time
 from memengine.core.text import stem_terms
 from memengine.core.episodes import EpisodeLog
 from memengine.core.facts import UnifiedFactLedger
+from memengine.core.graph_enum import coverage_first_session_pack, enumerate_entity_graph_candidates
 from memengine.core.plan import QueryPlan, RecallConfig, build_query_plan
 from memengine.core.supersede import SlotSupersedeTracker, resolve_relative_occurrence
 from memengine.engine import _compact_evidence, _fit_context, baseline_rrf
@@ -482,6 +483,39 @@ def unified_recall(
                     rest_tail = [f for f in ranked if f["id"] not in p_ids and f["id"] not in pin_ids]
                     ranked = [*pinned_head, *promoted, *rest_tail]
         ranked = _resolve_cross_session_updates(ranked, query, qplan)
+
+    # 5b. M3 Entity-Graph Enumeration & Coverage-First Distinct-Session Packing (aggregate / multi-hop)
+    if (
+        cfg.enable_graph_enum
+        and (qplan.is_aggregate_query or qplan.is_multi_hop_query)
+        and not qplan.identifiers
+        and not qplan.versions
+        and not any(f.get("is_superseding_latest") or f.get("is_update_latest") for f in ranked[:5])
+    ):
+        existing_ids = {f["id"] for f in ranked}
+        enumerated = enumerate_entity_graph_candidates(
+            engine,
+            episodes,
+            query,
+            scope=scope,
+            existing_ids=existing_ids,
+            exclude_superseded=qplan.exclude_superseded,
+            include_cold=include_cold or qplan.is_historical,
+            packing_mode=effective_packing,
+        )
+        if enumerated:
+            ranked = [*ranked, *enumerated]
+        ranked = coverage_first_session_pack(
+            ranked,
+            query,
+            is_aggregate=qplan.is_aggregate_query,
+            is_multi_hop=qplan.is_multi_hop_query,
+            pinned_fn=_is_pinned,
+        )
+        if effective_packing == "top_k":
+            ranked = ranked[:effective_top_k]
+        else:
+            ranked = _fit_context(ranked, max(effective_top_k, 50), token_budget)
 
     # 6. Enrich with unified fact metadata
     meta_by_id = ledger.meta_map([f["id"] for f in ranked])

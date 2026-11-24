@@ -6,6 +6,7 @@ from typing import Callable, Literal
 
 from memengine.core.answer import unified_answer, unified_reflect
 from memengine.core.assemble import unified_assemble
+from memengine.core.calc import deterministic_calculate
 from memengine.core.consolidate import rebuild_from_episodes, run_consolidation
 from memengine.core.episodes import EpisodeLog
 from memengine.core.facts import UnifiedFactLedger
@@ -51,7 +52,9 @@ class UnifiedMemoryEngine:
         **engine_kwargs,
     ):
         self.config = config or RecallConfig()
-        self.calculator = calculator
+        self.calculator = calculator if calculator is not None else (
+            deterministic_calculate if self.config.enable_deterministic_calc else None
+        )
         self._engine = CognitiveMemoryEngine(
             db_path=str(db_path),
             db_url=db_url,

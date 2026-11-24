@@ -27,8 +27,14 @@ _HISTORICAL_BEFORE_CUE = re.compile(
 _AS_OF_CUE = re.compile(r"\b(?:as\s+of|by\s+the\s+end\s+of|back\s+in|at\s+the\s+time\s+of)\b|截至", re.I)
 _CHANGE_DIR_CUE = re.compile(r"\b(?:increase\s+or\s+decrease|increased\s+or\s+decreased|more\s+or\s+less|higher\s+or\s+lower|go\s+up\s+or\s+down)\b|增加还是减少|涨了还是跌了", re.I)
 _AGGREGATE_CUE = re.compile(
-    r"\b(?:how many|how much|total|all|both|every|list|count|number of|altogether|combined)\b|"
+    r"\b(?:how many|how much|total|all|both|every|list|count|number of|altogether|combined|compared to|average)\b|"
     r"一共|总共|多少个|多少次|列出|全部|所有",
+    re.I,
+)
+_MULTI_HOP_CUE = re.compile(
+    r"\b(?:what\s+are\b|what\s+(?:types?|kinds?|styles?|activities|hobbies|places|books|movies|names|things|events|sports)\b|"
+    r"which\s+(?:countries|cities|places|events|books|movies|people)\b|where\s+(?:has|have)\b|"
+    r"names?\s+of\b|both\b|compared\s+to\b|\band\s+(?:her|his|their|my)\b)",
     re.I,
 )
 _ORDER_FIRST_CUE = re.compile(r"\b(?:which\s+(?:event\s+)?(?:happened|came|occurred|started|was)\s+first|happened\s+earlier|came\s+earlier)\b|哪件事先发生|哪个更早", re.I)
@@ -55,6 +61,8 @@ class RecallConfig:
     enable_episode_fts: bool = True
     enable_entity_graph: bool = True
     enable_slot_supersede: bool = True
+    enable_graph_enum: bool = True
+    enable_deterministic_calc: bool = True
     profile: Literal["conversational", "coding_agent"] = "conversational"
     disclosure: Literal["full", "progressive"] = "full"
 
@@ -74,6 +82,7 @@ class QueryPlan:
     is_temporal: bool = False
     is_update_query: bool = False
     is_aggregate_query: bool = False
+    is_multi_hop_query: bool = False
     is_coding_query: bool = False
     change_direction_ask: bool = False
     temporal_order_ask: Literal["first", "last", "duration", "date", None] = None
@@ -142,6 +151,7 @@ def build_query_plan(
     )
     is_update = bool(_UPDATE_CUE.search(query or "") or change_dir) and not is_historical
     is_aggregate = bool(_AGGREGATE_CUE.search(query or "")) and temporal_order != "duration"
+    is_multi_hop = bool(_MULTI_HOP_CUE.search(query or ""))
     is_coding = cfg.profile == "coding_agent" or bool(identifiers or versions or _CODING_CUE.search(query or ""))
 
     # Strict M2 invariant: recency is ONLY a tie-breaker on non-historical, non-temporal queries!
@@ -162,6 +172,7 @@ def build_query_plan(
         is_temporal=is_temporal,
         is_update_query=is_update,
         is_aggregate_query=is_aggregate,
+        is_multi_hop_query=is_multi_hop,
         is_coding_query=is_coding,
         change_direction_ask=change_dir,
         temporal_order_ask=temporal_order,
