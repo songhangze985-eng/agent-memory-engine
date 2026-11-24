@@ -1,0 +1,31 @@
+name: conversational
+description: Long-horizon multi-session conversational memory profile (LongMemEval / LoCoMo / MemBench).
+disclosure: full
+default_token_budget: 2048
+preload_paths: []
+preload_always_active: false
+include_directory_outline: false
+enable_code_anchors: false
+stale_policy: warn
+ingest_track: conversational
+enable_salience_gate: false
+scope_hierarchy:
+  - session
+  - user
+  - global
+default_write_scope_level: user
+ambient_token_budget: 512
+ambient_top_k: 6
+enable_ambient_llm: false
+max_writes_per_window: 128
+write_window_seconds: 3600
+max_question_llm_calls: 2
+recall:
+  enable_bipolar: false
+  enable_recency_rerank: false
+  enable_episode_fts: true
+  enable_entity_graph: true
+  enable_slot_supersede: true
+  enable_graph_enum: true
+  enable_deterministic_calc: true
+  enable_code_anchors: false

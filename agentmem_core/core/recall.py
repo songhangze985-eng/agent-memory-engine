@@ -9,6 +9,7 @@ from agentmem_core.core.episodes import EpisodeLog
 from agentmem_core.core.facts import UnifiedFactLedger
 from agentmem_core.core.graph_enum import coverage_first_session_pack, enumerate_entity_graph_candidates
 from agentmem_core.core.plan import QueryPlan, RecallConfig, build_query_plan
+from agentmem_core.core.scopes import ScopeChain, apply_scope_precedence
 from agentmem_core.core.supersede import SlotSupersedeTracker, resolve_relative_occurrence
 from agentmem_core.engine import _compact_evidence, _fit_context
 from agentmem_core.storage.base import RecallFilter
@@ -191,6 +192,7 @@ def unified_recall(
     user_id: str = "default",
     agent_id: str = "default",
     session_id: str | None = None,
+    scope_chain: ScopeChain | None = None,
     reference_time: float | None = None,
     mode: str = "reconstructive",
     token_budget: int = 2048,
@@ -439,21 +441,35 @@ def unified_recall(
         else:
             ranked = _fit_context(ranked, max(effective_top_k, 50), token_budget)
 
-    # 6. Enrich with unified fact metadata
+    # 6. Enrich with unified fact metadata (scope_key, override_key, staleness)
     meta_by_id = ledger.meta_map([f["id"] for f in ranked])
     for fact in ranked:
         meta = meta_by_id.get(fact["id"])
         if meta:
             fact["kind"] = meta["kind"]
+            fact["scope_key"] = meta.get("scope_key", "global")
+            fact["override_key"] = meta.get("override_key", "")
             fact["vfs_path"] = meta["vfs_path"]
             fact["index_summary"] = meta["index_summary"]
             fact["verification_status"] = meta["verification_status"]
             fact["salience_tag"] = meta["salience_tag"]
             fact["always_active"] = meta["always_active"]
+            fact["staleness_status"] = meta.get("staleness_status", "fresh")
+            fact["stale_reason"] = meta.get("stale_reason", "")
         else:
             fact.setdefault("kind", "rule" if fact.get("memory_type") == "procedural" else "world")
+            fact.setdefault("scope_key", f"user:{user_id}" if user_id else "global")
+            fact.setdefault("override_key", "")
             fact.setdefault("verification_status", "verified")
             fact.setdefault("always_active", False)
+            fact.setdefault("staleness_status", "fresh")
+            fact.setdefault("stale_reason", "")
+
+    # 6b. Hierarchical Scope Chain Filtering & Precedence Resolution (project/repo overrides user/global)
+    eff_scope_chain = ScopeChain.coerce(scope_chain)
+    overridden_by_scope: list[dict] = []
+    if eff_scope_chain is not None:
+        ranked, overridden_by_scope = apply_scope_precedence(ranked, eff_scope_chain, suppress_overridden=True)
 
     # 7. M2 Demoted Recency Tie-Breaker: ONLY breaks near-ties (<=5% gap) on non-historical, non-temporal queries!
     if qplan.allow_recency_tiebreak and len(ranked) >= 2:
@@ -474,5 +490,10 @@ def unified_recall(
         "ranked": ranked,
         "empty_recall": not ranked and not episode_fallback_turns,
         "query_plan": qplan,
+        "scope_chain": eff_scope_chain.as_list() if eff_scope_chain is not None else None,
+        "scope_overridden": [
+            {"id": item["id"], "scope_key": item["scope_key"], "overridden_by_scope": item.get("overridden_by_scope")}
+            for item in overridden_by_scope
+        ],
         "episode_fallback_turns": episode_fallback_turns[:6],
     }

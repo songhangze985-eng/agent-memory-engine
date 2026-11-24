@@ -1,4 +1,4 @@
-"""Provenance metadata stamped automatically into every evaluation report."""
+"""Provenance metadata stamped automatically and validated (G5) into every evaluation report."""
 from __future__ import annotations
 
 import hashlib
@@ -6,6 +6,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from eval.qa.protocol import DEFAULT_PROTOCOL_PATH, load_protocol, validate_provenance
 
 
 def file_sha256(path: Path | str | None) -> str | None:
@@ -66,19 +68,45 @@ def build_provenance(
     dataset: str,
     dataset_path: Path | str | None = None,
     dataset_sha256: str | None = None,
+    extractor_model: str | None = None,
+    reader_model: str | None = None,
+    judge_prompt_version: str = "hindsight-aligned-v1",
+    top_k: int = 10,
+    token_budget: int = 2048,
+    split: str = "full",
+    protocol_path: Path | str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     sha = dataset_sha256
     if sha is None and dataset_path is not None:
         p = Path(dataset_path)
         sha = file_sha256(p) if p.is_file() else dir_manifest_sha256(p)
+
+    proto_ver = "1.0.0"
+    proto_sha = "unfrozen"
+    p_target = Path(protocol_path) if protocol_path is not None else DEFAULT_PROTOCOL_PATH
+    if p_target.is_file():
+        loaded, proto_sha = load_protocol(p_target)
+        proto_ver = str(loaded.get("protocol_version") or "1.0.0")
+
+    eff_reader = reader_model or llm
+    eff_extractor = extractor_model or ("DeterministicRuleExtractor" if "MockLLMClient" in eff_reader else eff_reader)
+
     prov: dict[str, Any] = {
         "engine": engine,
-        "embedder": embedder,
-        "reranker": reranker,
+        "extractor_model": eff_extractor,
+        "reader_model": eff_reader,
         "llm": llm,
         "judge": judge,
+        "judge_prompt_version": judge_prompt_version,
+        "embedder": embedder,
+        "reranker": reranker,
+        "top_k": int(top_k),
+        "token_budget": int(token_budget),
+        "split": str(split),
         "protocol": protocol,
+        "protocol_version": proto_ver,
+        "protocol_sha256": proto_sha,
         "granularity": granularity,
         "commit_hash": git_commit_hash(),
         "seed": int(seed),
@@ -88,6 +116,7 @@ def build_provenance(
     }
     if extra:
         prov.update(extra)
+    validate_provenance(prov)
     return prov
 
 
@@ -98,14 +127,22 @@ def render_provenance_markdown(prov: dict[str, Any]) -> str:
     ]
     for key in (
         "engine",
+        "extractor_model",
+        "reader_model",
+        "judge",
+        "judge_prompt_version",
         "embedder",
         "reranker",
-        "llm",
-        "judge",
+        "top_k",
+        "token_budget",
+        "split",
         "protocol",
+        "protocol_version",
+        "protocol_sha256",
         "granularity",
         "commit_hash",
         "seed",
+        "seeds",
         "dataset",
         "dataset_sha256",
         "timestamp_utc",

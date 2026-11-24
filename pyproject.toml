@@ -29,6 +29,7 @@ include = ["agentmem_core*", "memengine*"]
 
 [tool.setuptools.data-files]
 "share/agentmem_core/prompts" = ["prompts/*.txt"]
+"share/agentmem_core/profiles" = ["profiles/*.yaml"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

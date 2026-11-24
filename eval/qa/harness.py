@@ -482,6 +482,245 @@ def _eval_vfs_group(
             return rows
 
 
+def _eval_full_context_group(
+    turns: list[Turn],
+    questions: list[QAItem],
+    *,
+    reader,
+    judge,
+    max_tokens: int = 128000,
+) -> list[dict[str, Any]]:
+    """Step A Arm 1: Full chronological dialogue context (NO memory engine)."""
+    ingested_turns = {t.ref for t in turns}
+    # Build chronological transcript once (bounded by max_tokens)
+    rendered_lines: list[str] = []
+    packed_turns: set[str] = set()
+    used_tokens = 0
+    for turn in turns:
+        date_str = _iso_date(turn.timestamp)
+        line = f"[{date_str} | {turn.session}] {turn.text}".strip()
+        cost = estimate_tokens(line) + 1
+        if used_tokens + cost > max_tokens:
+            break
+        rendered_lines.append(line)
+        packed_turns.add(turn.ref)
+        used_tokens += cost
+    full_context = "\n".join(rendered_lines)
+
+    rows: list[dict[str, Any]] = []
+    for q in questions:
+        t0 = time.perf_counter()
+        out = reader.answer_from_context(
+            q.question,
+            full_context,
+            reference_date=_iso_date(q.timestamp, q.question_date),
+            empty_recall=not rendered_lines,
+            choices=q.choices or None,
+        )
+        retrieval_ms = (time.perf_counter() - t0) * 1000.0
+        verdict = judge.evaluate(
+            question=q.question,
+            gold_answer=q.gold_answer,
+            predicted_answer=out.answer,
+            category=q.category,
+            unanswerable=q.unanswerable,
+            abstained=out.abstained,
+            mcq_gold=q.mcq_gold,
+            mcq_predicted=out.predicted_choice,
+        )
+        bucket = classify_failure(
+            correct=verdict.correct,
+            unanswerable=q.unanswerable,
+            gold_turns=q.evidence_turns,
+            ingested_turns=ingested_turns,
+            recalled_turns=packed_turns,
+            ranked_turns=packed_turns,
+            packed_turns=packed_turns,
+            borderline_judge=verdict.borderline,
+        )
+        gold_sessions = set(q.evidence_sessions) if q.evidence_sessions else {
+            t.session for t in turns if t.ref in q.evidence_turns
+        }
+        ret_metrics = evaluate_turn_retrieval_item(
+            ranked_turn_sets=[{t.ref} for t in turns[:10]],
+            ranked_session_sets=[{t.session} for t in turns[:10]],
+            gold_turns=set(q.evidence_turns),
+            gold_sessions=gold_sessions,
+            unanswerable=q.unanswerable,
+            latest_session=q.latest_session,
+            older_sessions=q.older_sessions,
+            superseded_older_archived=False,
+        )
+        rows.append({
+            "id": q.id,
+            "category": q.category,
+            "question": q.question,
+            "gold_answer": q.gold_answer,
+            "predicted_answer": out.answer,
+            "abstained": out.abstained,
+            "unanswerable": q.unanswerable,
+            "correct": verdict.correct,
+            "judge_score": verdict.score,
+            "judge_label": verdict.label,
+            "judge_reason": verdict.reason,
+            "attribution": bucket,
+            "injected_tokens": used_tokens,
+            "retrieval_ms": round(retrieval_ms, 3),
+            **ret_metrics,
+        })
+    return rows
+
+
+def _eval_turn_rrf_group(
+    turns: list[Turn],
+    questions: list[QAItem],
+    *,
+    reader,
+    judge,
+    token_budget: int = TOKEN_BUDGET,
+    top_k: int = 10,
+    rrf_k: int = 60,
+) -> list[dict[str, Any]]:
+    """Step A Arm 2: Pure turn-level hybrid retrieval floor (BM25 + dense cosine fused via RRF; zero extraction/graph)."""
+    import sqlite3
+    import numpy as np
+    from agentmem_core.embeddings import HashedTfidfEmbedder
+    from agentmem_core.textutil import tokenize_for_fts
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE VIRTUAL TABLE turn_fts USING fts5(ref UNINDEXED, content)")
+    embedder = HashedTfidfEmbedder()
+    turn_by_idx = list(turns)
+    ingested_turns = {t.ref for t in turns}
+
+    texts = [t.text for t in turn_by_idx]
+    for idx, turn in enumerate(turn_by_idx):
+        conn.execute("INSERT INTO turn_fts(rowid, ref, content) VALUES (?, ?, ?)", (idx, turn.ref, tokenize_for_fts(turn.text)))
+    conn.commit()
+    vecs = np.asarray(embedder.encode(texts), dtype=np.float32) if texts else np.zeros((0, embedder.dim), dtype=np.float32)
+
+    try:
+        rows: list[dict[str, Any]] = []
+        for q in questions:
+            t0 = time.perf_counter()
+            # 1. Lexical BM25 top-50
+            q_terms = list(dict.fromkeys(tokenize_for_fts(q.question).split()))[:64]
+            bm25_order: list[int] = []
+            if q_terms:
+                expr = " OR ".join(f'"{t}"' for t in q_terms)
+                try:
+                    bm25_order = [
+                        int(r[0])
+                        for r in conn.execute(
+                            "SELECT rowid FROM turn_fts WHERE turn_fts MATCH ? ORDER BY bm25(turn_fts) LIMIT 50",
+                            (expr,),
+                        ).fetchall()
+                    ]
+                except sqlite3.OperationalError:
+                    bm25_order = []
+
+            # 2. Dense cosine top-50
+            dense_order: list[int] = []
+            if len(vecs) > 0:
+                q_vec = np.asarray(embedder.encode([q.question])[0], dtype=np.float32)
+                sims = vecs @ q_vec
+                top_n = min(50, len(vecs))
+                top_indices = np.argsort(-sims)[:top_n]
+                dense_order = [int(i) for i in top_indices if float(sims[i]) > 0.0]
+
+            # 3. Standard RRF fusion: 1 / (rrf_k + rank)
+            rrf_scores: dict[int, float] = {}
+            for rank, idx in enumerate(bm25_order, start=1):
+                rrf_scores[idx] = rrf_scores.get(idx, 0.0) + 1.0 / (rrf_k + rank)
+            for rank, idx in enumerate(dense_order, start=1):
+                rrf_scores[idx] = rrf_scores.get(idx, 0.0) + 1.0 / (rrf_k + rank)
+
+            fused_indices = [idx for idx, _ in sorted(rrf_scores.items(), key=lambda kv: (-kv[1], kv[0]))]
+            recalled_turns = {turn_by_idx[i].ref for i in fused_indices[:50]}
+            top_ranked = [turn_by_idx[i] for i in fused_indices[:top_k]]
+
+            # Pack within token_budget
+            packed_lines: list[str] = []
+            packed_turns: set[str] = set()
+            used_tokens = 0
+            for t in top_ranked:
+                d_str = _iso_date(t.timestamp)
+                line = f"[{d_str} | {t.session}] {t.text}".strip()
+                cost = estimate_tokens(line) + 1
+                if used_tokens + cost > token_budget:
+                    break
+                packed_lines.append(line)
+                packed_turns.add(t.ref)
+                used_tokens += cost
+            context_text = "\n".join(packed_lines)
+            retrieval_ms = (time.perf_counter() - t0) * 1000.0
+
+            top_rrf = rrf_scores[fused_indices[0]] if fused_indices else 0.0
+            out = reader.answer_from_context(
+                q.question,
+                context_text,
+                reference_date=_iso_date(q.timestamp, q.question_date),
+                empty_recall=not packed_lines,
+                top_score=top_rrf,
+                min_score=0.005,
+                choices=q.choices or None,
+            )
+            verdict = judge.evaluate(
+                question=q.question,
+                gold_answer=q.gold_answer,
+                predicted_answer=out.answer,
+                category=q.category,
+                unanswerable=q.unanswerable,
+                abstained=out.abstained,
+                mcq_gold=q.mcq_gold,
+                mcq_predicted=out.predicted_choice,
+            )
+            ranked_turns_flat = {t.ref for t in top_ranked}
+            bucket = classify_failure(
+                correct=verdict.correct,
+                unanswerable=q.unanswerable,
+                gold_turns=q.evidence_turns,
+                ingested_turns=ingested_turns,
+                recalled_turns=recalled_turns,
+                ranked_turns=ranked_turns_flat,
+                packed_turns=packed_turns,
+                borderline_judge=verdict.borderline,
+            )
+            gold_sessions = set(q.evidence_sessions) if q.evidence_sessions else {
+                t.session for t in turns if t.ref in q.evidence_turns
+            }
+            ret_metrics = evaluate_turn_retrieval_item(
+                ranked_turn_sets=[{t.ref} for t in top_ranked],
+                ranked_session_sets=[{t.session} for t in top_ranked],
+                gold_turns=set(q.evidence_turns),
+                gold_sessions=gold_sessions,
+                unanswerable=q.unanswerable,
+                latest_session=q.latest_session,
+                older_sessions=q.older_sessions,
+                superseded_older_archived=False,
+            )
+            rows.append({
+                "id": q.id,
+                "category": q.category,
+                "question": q.question,
+                "gold_answer": q.gold_answer,
+                "predicted_answer": out.answer,
+                "abstained": out.abstained,
+                "unanswerable": q.unanswerable,
+                "correct": verdict.correct,
+                "judge_score": verdict.score,
+                "judge_label": verdict.label,
+                "judge_reason": verdict.reason,
+                "attribution": bucket,
+                "injected_tokens": used_tokens,
+                "retrieval_ms": round(retrieval_ms, 3),
+                **ret_metrics,
+            })
+        return rows
+    finally:
+        conn.close()
+
+
 def evaluate_group_qa(
     turns: list[Turn],
     questions: list[QAItem],
@@ -495,6 +734,10 @@ def evaluate_group_qa(
 ) -> list[dict[str, Any]]:
     reader = make_reader(llm_model)
     judge = make_judge(judge_model)
+    if engine_kind == "full_context":
+        return _eval_full_context_group(turns, questions, reader=reader, judge=judge)
+    if engine_kind == "turn_rrf":
+        return _eval_turn_rrf_group(turns, questions, reader=reader, judge=judge, token_budget=token_budget)
     if engine_kind in {"v2_session_md", "v2_turn_md"}:
         return _eval_vfs_group(turns, questions, engine_kind=engine_kind, reader=reader, judge=judge, token_budget=token_budget)
     if engine_kind in {"v1_standard", "v1_chronicle", "unified"}:

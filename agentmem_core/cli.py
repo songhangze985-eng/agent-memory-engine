@@ -2,6 +2,7 @@
 import argparse
 from contextlib import closing
 import json
+import sys
 
 from agentmem_core.engine import CognitiveMemoryEngine
 from agentmem_core.vfs import VFSMemoryEngine
@@ -16,6 +17,46 @@ def main(argv=None):
     serve = commands.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+
+    mcp_cmd = commands.add_parser("mcp-serve", help="Run JSON-RPC 2.0 stdio MCP server for Claude Code, Codex, OpenCode & MCP clients")
+    mcp_cmd.add_argument("--profile", default="coding")
+    mcp_cmd.add_argument("--user-id", default="default")
+    mcp_cmd.add_argument("--agent-id", default="default")
+    mcp_cmd.add_argument("--session-id", default=None)
+    mcp_cmd.add_argument("--repo-id", default=None)
+    mcp_cmd.add_argument("--project-id", default=None)
+    mcp_cmd.add_argument("--repo-root", default=None)
+
+    amb_cmd = commands.add_parser("ambient", help="Run zero-LLM millisecond ambient context assembly")
+    amb_cmd.add_argument("query", nargs="?", default="")
+    amb_cmd.add_argument("--file", action="append", dest="active_files", default=[])
+    amb_cmd.add_argument("--symbol", action="append", dest="active_symbols", default=[])
+    amb_cmd.add_argument("--error", dest="error_text", default="")
+    amb_cmd.add_argument("--profile", default="coding")
+    amb_cmd.add_argument("--user-id", default="default")
+    amb_cmd.add_argument("--agent-id", default="default")
+    amb_cmd.add_argument("--repo-id", default=None)
+    amb_cmd.add_argument("--project-id", default=None)
+    amb_cmd.add_argument("--token-budget", type=int, default=None)
+
+    host_cmd = commands.add_parser("host", help="Install or handle hooks for general-purpose coding hosts (claude-code/cc, codex, opencode)")
+    host_sub = host_cmd.add_subparsers(dest="host_action", required=True)
+    host_install = host_sub.add_parser("install")
+    host_install.add_argument("host_name", choices=("claude-code", "cc", "codex", "opencode"))
+    host_install.add_argument("--repo-root", default=".")
+    host_install.add_argument("--user-id", default="default")
+    host_install.add_argument("--profile", default="coding")
+    host_install.add_argument("--repo-id", default=None)
+    host_install.add_argument("--dry-run", action="store_true")
+
+    host_hook = host_sub.add_parser("hook")
+    host_hook.add_argument("host_name", choices=("claude-code", "cc", "codex"))
+    host_hook.add_argument("event_name")
+    host_hook.add_argument("--repo-root", default=None)
+    host_hook.add_argument("--user-id", default="default")
+    host_hook.add_argument("--profile", default="coding")
+    host_hook.add_argument("--repo-id", default=None)
+    host_hook.add_argument("--payload", default=None, help="Optional JSON payload string (reads stdin if omitted)")
     vfs_cmd = commands.add_parser("vfs", help="v2 Virtual Filesystem memory engine commands")
     vfs_cmd.add_argument("--transcript-dir", help="Optional L0 chunked transcript directory")
     vfs_cmd.add_argument("--user-id", default="default")
@@ -78,6 +119,54 @@ def main(argv=None):
         except ImportError:
             parser.error("serve requires pip install 'agentmem-core[server]'")
         uvicorn.run(create_app(db_url=db_url), **args)
+        return 0
+    if command == "mcp-serve":
+        from agentmem_core.adapters.mcp_server import run_mcp_stdio
+
+        return run_mcp_stdio(db_url=db_url, **args)
+    if command == "ambient":
+        from agentmem_core.core import UnifiedMemoryEngine
+
+        engine = UnifiedMemoryEngine(db_url=db_url, profile=args["profile"])
+        with closing(engine):
+            result = engine.ambient_context(**args)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if command == "host":
+        from agentmem_core.core import UnifiedMemoryEngine
+        from agentmem_core.hosts import handle_host_hook, install_host
+
+        action = args.pop("host_action")
+        host_name = args.pop("host_name")
+        if action == "install":
+            result = install_host(
+                host_name,
+                args["repo_root"],
+                db_path=db_url,
+                user_id=args["user_id"],
+                profile=args["profile"],
+                repo_id=args["repo_id"],
+                dry_run=args["dry_run"],
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        raw_payload = args["payload"]
+        if raw_payload is None:
+            raw_payload = sys.stdin.read() if not sys.stdin.isatty() else "{}"
+        payload = json.loads(raw_payload) if raw_payload.strip() else {}
+        engine = UnifiedMemoryEngine(db_url=db_url, profile=args["profile"])
+        with closing(engine):
+            result = handle_host_hook(
+                host_name,
+                args["event_name"],
+                payload,
+                engine,
+                user_id=args["user_id"],
+                repo_id=args["repo_id"],
+                repo_root=args["repo_root"],
+                profile=args["profile"],
+            )
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
     if command == "vfs":
         action = args.pop("vfs_action")

@@ -5,6 +5,7 @@ import time
 import uuid
 
 from agentmem_core.core.facts import UnifiedFactLedger
+from agentmem_core.core.scopes import ScopeChain
 from agentmem_core.textutil import estimate_tokens
 from agentmem_core.vfs.models import (
     make_index_summary,
@@ -38,8 +39,22 @@ class VFSView:
         self.max_notes_per_dir = max(2, int(max_notes_per_dir))
         self.max_dir_tokens = max(256, int(max_dir_tokens))
 
-    def read_note(self, path: str, *, user_id: str = "default", agent_id: str = "default") -> dict | None:
-        row = self._ledger.get_active_by_path(path, user_id=user_id, agent_id=agent_id)
+    def read_note(
+        self,
+        path: str,
+        *,
+        user_id: str = "default",
+        agent_id: str = "default",
+        scope_key: str | None = None,
+        scope_chain: ScopeChain | None = None,
+    ) -> dict | None:
+        row = self._ledger.get_active_by_path(
+            path,
+            user_id=user_id,
+            agent_id=agent_id,
+            scope_key=scope_key,
+            scope_chain=scope_chain,
+        )
         if row is None:
             return None
         return {
@@ -47,9 +62,14 @@ class VFSView:
             "path": row["vfs_path"],
             "parent_path": row["parent_path"],
             "kind": row["kind"],
+            "scope_key": row.get("scope_key", "global"),
+            "override_key": row.get("override_key", ""),
+            "staleness_status": row.get("staleness_status", "fresh"),
+            "stale_reason": row.get("stale_reason", ""),
             "title": row["title"],
             "index_summary": row["index_summary"],
             "content": row["plain"],
+            "detail_body": row["plain"],
             "verification_status": row["verification_status"],
             "salience_tag": row["salience_tag"],
             "always_active": row["always_active"],
@@ -58,14 +78,28 @@ class VFSView:
             "updated_at": row["updated_at"],
         }
 
-    def preload_always_active(self, *, user_id: str = "default", agent_id: str = "default") -> list[dict]:
-        """Stage-1 coding-agent preload: ``/global.md`` + ``always_active`` rules."""
-        rows = self._ledger.list_path_facts(user_id=user_id, agent_id=agent_id)
+    def preload_always_active(
+        self,
+        *,
+        user_id: str = "default",
+        agent_id: str = "default",
+        preload_paths: tuple[str, ...] = ("/global.md",),
+        scope_chain: ScopeChain | None = None,
+        include_stale: bool = False,
+    ) -> list[dict]:
+        """Stage-1 deterministic preload for configured paths + ``always_active`` rules."""
+        path_set = set(preload_paths)
+        rows = self._ledger.list_path_facts(
+            user_id=user_id,
+            agent_id=agent_id,
+            scope_chain=scope_chain,
+            include_stale=include_stale,
+        )
         selected = [
             r for r in rows
-            if r["vfs_path"] == "/global.md" or r["always_active"]
+            if r["vfs_path"] in path_set or r["always_active"]
         ]
-        selected.sort(key=lambda r: (0 if r["vfs_path"] == "/global.md" else 1, r["vfs_path"]))
+        selected.sort(key=lambda r: (0 if r["vfs_path"] in path_set else 1, int(r.get("scope_rank", 99)), r["vfs_path"]))
         return selected
 
     def tree_outline(
@@ -75,6 +109,8 @@ class VFSView:
         user_id: str = "default",
         agent_id: str = "default",
         kinds: tuple[str, ...] | None = None,
+        scope_chain: ScopeChain | None = None,
+        include_stale: bool = True,
     ) -> str:
         """Compact ``ls -R`` style directory outline with <=50-char ``index_summary``."""
         norm_dir = normalize_dir_path(dir_path)
@@ -83,6 +119,8 @@ class VFSView:
             agent_id=agent_id,
             path_prefix=norm_dir,
             kinds=kinds,
+            scope_chain=scope_chain,
+            include_stale=include_stale,
         )
         if not rows:
             return f"{norm_dir}\n(empty)"
@@ -95,8 +133,9 @@ class VFSView:
             for row in sorted(by_dir[parent], key=lambda r: r["vfs_path"]):
                 fname = row["vfs_path"].rsplit("/", 1)[-1]
                 pin = "|always_active" if row["always_active"] else ""
+                stale = "|STALE" if row.get("staleness_status") == "stale" else ""
                 lines.append(
-                    f"- {fname} [{row['kind']}|{row['verification_status']}|v{row['version']}{pin}] — {row['index_summary']}"
+                    f"- {fname} [{row['kind']}|{row['verification_status']}|v{row['version']}{pin}{stale}] — {row['index_summary']}"
                 )
         return "\n".join(lines)
 

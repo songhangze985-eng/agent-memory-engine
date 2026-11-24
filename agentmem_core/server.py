@@ -212,25 +212,39 @@ class VFSRollback(Owner):
 
 def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_engine=None, unified_engine=None):
     from agentmem_core.adapters.http import build_unified_router
-    from agentmem_core.compat.v1_shim import attach_v1_deprecation_middleware
+    from agentmem_core.compat.v1_shim import UnifiedV1Shim, UnifiedVFSShim, attach_v1_deprecation_middleware
     from agentmem_core.core import UnifiedMemoryEngine
     from agentmem_core.env import getenv_compat
 
     key = getenv_compat("API_KEY") if api_key is None else api_key
     lock = RLock()
 
-    def _get_vfs(app) -> VFSMemoryEngine:
-        if app.state.vfs is None:
-            target = vfs_db_url or getenv_compat("VFS_DB_URL") or db_url
-            app.state.vfs = VFSMemoryEngine(db_url=target)
-            app.state.vfs_owned = True
-        return app.state.vfs
-
     def _get_unified(app) -> UnifiedMemoryEngine:
         if app.state.unified is None:
             app.state.unified = UnifiedMemoryEngine(db_url=db_url)
             app.state.unified_owned = True
         return app.state.unified
+
+    def _get_v1_shim(app) -> UnifiedV1Shim | None:
+        if app.state.unified is not None:
+            if app.state.v1_shim is None:
+                app.state.v1_shim = UnifiedV1Shim(app.state.unified)
+            return app.state.v1_shim
+        return None
+
+    def _get_vfs(app):
+        # Legacy explicit vfs_engine / vfs_db_url override preserved for backward compatibility;
+        # default single-core mode forwards /v2/vfs/* directly through UnifiedVFSShim onto UnifiedMemoryEngine!
+        if app.state.vfs is not None:
+            return app.state.vfs
+        explicit_vfs_url = vfs_db_url or getenv_compat("VFS_DB_URL")
+        if explicit_vfs_url:
+            app.state.vfs = VFSMemoryEngine(db_url=explicit_vfs_url)
+            app.state.vfs_owned = True
+            return app.state.vfs
+        if app.state.vfs_shim is None:
+            app.state.vfs_shim = UnifiedVFSShim(_get_unified(app))
+        return app.state.vfs_shim
 
     @asynccontextmanager
     async def lifespan(app):
@@ -245,13 +259,15 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
             app.state.unified = None
             app.state.unified_owned = False
         else:
-            # Default: single unified core shared across /v2/memory/* and deprecated /v1/* shim
+            # Default: single unified core shared across /v2/memory/*, /v1/* shim, and /v2/vfs/* shim
             app.state.unified = UnifiedMemoryEngine(db_url=db_url)
             app.state.unified_owned = True
             app.state.engine = app.state.unified._engine
             app.state.engine_owned = False
         app.state.vfs = vfs_engine
         app.state.vfs_owned = False
+        app.state.v1_shim = None
+        app.state.vfs_shim = None
         try:
             yield
         finally:
@@ -306,6 +322,9 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
             if body.turns is not None:
                 if body.text is not None or body.epistemic_scope is not None or body.expires_at is not None or body.ttl_seconds is not None:
                     raise ValueError("provide either turns or a single memory")
+                shim = _get_v1_shim(app)
+                if shim is not None:
+                    return {"turns": [shim.retain_turn(**turn.model_dump(), **scope) for turn in body.turns]}
                 return {"turns": [service.retain(**turn.model_dump(), **scope) for turn in body.turns]}
             if not body.text or not body.text.strip():
                 raise ValueError("nonempty text is required")
@@ -331,6 +350,9 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
                 return {"id": service.remember(body.text, **scope, source_turn_ids=turns, timestamp=body.timestamp,
                     memory_type=body.memory_type, epistemic_scope=body.epistemic_scope, trigger=body.trigger,
                     confidence=body.confidence, is_constraint=body.is_constraint, zkeys=body.zkeys, **expiry, **chronicle)}
+            shim = _get_v1_shim(app)
+            if shim is not None:
+                return shim.retain_turn(body.text, **scope, role=body.role, timestamp=body.timestamp, event_time=body.event_time, **expiry, **chronicle)
             return service.retain(body.text, **scope, role=body.role, timestamp=body.timestamp, event_time=body.event_time, **expiry, **chronicle)
 
     @app.post("/v1/memories/recall", include_in_schema=False)
@@ -443,12 +465,13 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
             return app.state.engine.dispatch_tool(body.name, body.arguments, **body.owner(),
                                                   session_id=body.session_id, tool_call_id=body.tool_call_id)
 
-    # ---- v2 VFS Memory Engine endpoints ----
+    # ---- v2 VFS Memory Engine endpoints (shim to UnifiedMemoryEngine by default) ----
 
     @app.get("/v2/vfs/health")
     def vfs_health():
         with lock:
-            return _get_vfs(app).store.health_check()
+            vfs = _get_vfs(app)
+            return vfs.health_check() if hasattr(vfs, "health_check") else vfs.store.health_check()
 
     @app.post("/v2/vfs/transcripts")
     def vfs_append_transcript(body: VFSTranscript):
@@ -457,6 +480,8 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
                 body.text, role=body.role, timestamp=body.timestamp, speaker=body.speaker,
                 metadata=body.metadata, **body.session_owner(),
             )
+            if isinstance(rec, dict):
+                return rec
             return {"transcript_id": rec.transcript_id, "session_id": rec.session_id, "timestamp": rec.timestamp}
 
     @app.post("/v2/vfs/write")
@@ -480,7 +505,12 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
     @app.post("/v2/vfs/tree")
     def vfs_tree(body: VFSPath):
         with lock:
-            return {"path": body.path, "outline": _get_vfs(app).tree_outline(path=body.path, layer=body.layer or "L2", **body.owner())}
+            vfs = _get_vfs(app)
+            if hasattr(vfs, "store"):
+                outline = vfs.tree_outline(path=body.path, layer=body.layer or "L2", **body.owner())
+            else:
+                outline = vfs.tree_outline(path=body.path, **body.owner())
+            return {"path": body.path, "outline": outline}
 
     @app.post("/v2/vfs/search")
     def vfs_search(body: VFSSearch):
@@ -505,6 +535,8 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
     def vfs_rollback(body: VFSRollback):
         with lock:
             vfs = _get_vfs(app)
+            if not hasattr(vfs, "store"):
+                return vfs.rollback(path=body.path, snapshot_id=body.snapshot_id, dream_batch_id=body.dream_batch_id, **body.owner())
             if body.dream_batch_id:
                 return {"restored": vfs.rollback_batch(body.dream_batch_id, **body.owner())}
             if body.path:
@@ -514,11 +546,15 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
     @app.get("/v2/vfs/tools/schema")
     def vfs_tools_schema():
         with lock:
-            return _get_vfs(app).as_tools()
+            vfs = _get_vfs(app)
+            return vfs.as_tools() if hasattr(vfs, "store") else _get_unified(app).as_tools().openai_definitions()
 
     @app.post("/v2/vfs/tools/dispatch")
     def vfs_tools_dispatch(body: Dispatch):
         with lock:
-            return _get_vfs(app).as_tools(**body.owner()).dispatch_tool(body.name, body.arguments)
+            vfs = _get_vfs(app)
+            if hasattr(vfs, "store"):
+                return vfs.as_tools(**body.owner()).dispatch_tool(body.name, body.arguments)
+            return _get_unified(app).dispatch_tool(body.name, body.arguments, **body.owner(), session_id=body.session_id)
 
     return app

@@ -1,0 +1,30 @@
+name: eval-nightly
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  nightly-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Tier 2 — Full Pass/Fail Regression Gates (including long-horizon)
+        run: python3 -m eval.gates.run_gates
+      - name: Tier 2 — C3 Zero-LLM Ambient P95 Stress Benchmark (1,000 facts x 240 queries)
+        run: python3 -m eval.ambient_perf_bench --facts 1000 --queries 240 --out /tmp/c3_nightly.json --md-out /tmp/c3_nightly.md
+      - name: Tier 2 — Step C Coding Experience-Reuse & Hygiene Benchmark (G2)
+        run: python3 -m eval.coding.run_coding_eval --out /tmp/step_c_nightly.json --md-out /tmp/step_c_nightly.md
+      - name: Tier 2 — Step D RealMem-Style Hybrid Project Benchmark
+        run: python3 -m eval.hybrid.realmem_eval --out /tmp/step_d_nightly.json --md-out /tmp/step_d_nightly.md
+      - name: Upload Nightly Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-eval-reports
+          path: /tmp/*nightly*
