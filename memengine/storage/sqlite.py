@@ -995,6 +995,49 @@ class SQLiteStore(Chronicle, WorkspaceStore):
                                           (expression, *args, top_n)))
         return self._search_results(sorted(hits, key=lambda hit: (hit["bm25_score"], hit["id"]))[:top_n], scope, ids_only)
 
+    def search_raw_turns_fts(self, query, *, user_id="default", agent_id="default", session_id=None, top_n=40):
+        """Zero-vector L0 episode fallback: BM25 search directly over ``raw_turns_fts``."""
+        terms = list(dict.fromkeys(tokenize_for_fts(query).split()))
+        terms = [term for term in terms if term not in _FTS_STOP] or terms
+        if not terms or top_n <= 0:
+            return []
+        scope = (user_id, agent_id, session_id)
+        where, args = _scope_where(scope, "r.")
+        expression = " OR ".join(f'"{term}"' for term in terms[:128])
+        rows = self.conn.execute(
+            f"""SELECT r.turn_id, r.session_id, r.role, r.text, r.event_ts, r.ingest_ts,
+                       r.speaker, r.mention_time, bm25(raw_turns_fts) AS bm25_score
+                FROM raw_turns_fts
+                JOIN raw_turns r ON r.turn_id = raw_turns_fts.rowid
+                WHERE raw_turns_fts MATCH ? AND {where}
+                ORDER BY bm25_score, r.turn_id LIMIT ?""",
+            (expression, *args, top_n),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def facts_for_turn_ids(self, turn_ids, *, user_id="default", agent_id="default", session_id=None,
+                           include_superseded=False, include_cold=False):
+        """Map L0 ``turn_id`` values back to derived fact IDs in the unified ledger."""
+        ids = sorted({int(tid) for tid in turn_ids if tid is not None})
+        if not ids:
+            return {}
+        scope = (user_id, agent_id, session_id)
+        where, args = _scope_where(scope, "f.")
+        status_sql = "f.status IN ('active','superseded')" if include_superseded else "f.status='active'"
+        tier_sql = "" if include_cold else " AND f.tier='hot'"
+        rows = self.conn.execute(
+            f"""SELECT CAST(je.value AS INTEGER) AS tid, f.id
+                FROM facts f, json_each(f.source_turn_ids) je
+                WHERE {where} AND {status_sql}{tier_sql}
+                  AND CAST(je.value AS INTEGER) IN ({_IDS})
+                ORDER BY f.revision DESC, f.ingest_time DESC, f.id""",
+            (*args, _dump(ids)),
+        ).fetchall()
+        mapping: dict[int, list[str]] = {}
+        for row in rows:
+            mapping.setdefault(int(row["tid"]), []).append(row["id"])
+        return mapping
+
     def search_temporal(self, user_id="default", agent_id="default", start_ts=None, end_ts=None,
                         include_superseded=True, top_n=40, *, session_id=None, order_hint=None,
                         rev_index=None, entities=(), previous_only=False, ids_only=False, include_cold=False, filters=None):

@@ -210,7 +210,11 @@ class VFSRollback(Owner):
     dream_batch_id: str | None = None
 
 
-def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_engine=None):
+def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_engine=None, unified_engine=None):
+    from memengine.adapters.http import build_unified_router
+    from memengine.compat.v1_shim import attach_v1_deprecation_middleware
+    from memengine.core import UnifiedMemoryEngine
+
     key = os.getenv("MEMENGINE_API_KEY") if api_key is None else api_key
     lock = RLock()
 
@@ -221,15 +225,38 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
             app.state.vfs_owned = True
         return app.state.vfs
 
+    def _get_unified(app) -> UnifiedMemoryEngine:
+        if app.state.unified is None:
+            app.state.unified = UnifiedMemoryEngine(db_url=db_url)
+            app.state.unified_owned = True
+        return app.state.unified
+
     @asynccontextmanager
     async def lifespan(app):
-        app.state.engine = engine or CognitiveMemoryEngine(db_url=db_url)
+        if unified_engine is not None:
+            app.state.unified = unified_engine
+            app.state.unified_owned = False
+            app.state.engine = engine or unified_engine._engine
+            app.state.engine_owned = False
+        elif engine is not None:
+            app.state.engine = engine
+            app.state.engine_owned = False
+            app.state.unified = None
+            app.state.unified_owned = False
+        else:
+            # Default: single unified core shared across /v2/memory/* and deprecated /v1/* shim
+            app.state.unified = UnifiedMemoryEngine(db_url=db_url)
+            app.state.unified_owned = True
+            app.state.engine = app.state.unified._engine
+            app.state.engine_owned = False
         app.state.vfs = vfs_engine
         app.state.vfs_owned = False
         try:
             yield
         finally:
-            if engine is None:
+            if app.state.unified is not None and app.state.unified_owned:
+                app.state.unified.close()
+            elif app.state.engine_owned:
                 app.state.engine.store.close()
             if app.state.vfs is not None and app.state.vfs_owned:
                 app.state.vfs.close()
@@ -239,6 +266,8 @@ def create_app(*, db_url=None, api_key=None, engine=None, vfs_db_url=None, vfs_e
             raise HTTPException(401, "invalid bearer credentials", headers={"WWW-Authenticate": "Bearer"})
 
     app = FastAPI(title="Agent Memory Engine", lifespan=lifespan, dependencies=[Depends(authenticate)])
+    attach_v1_deprecation_middleware(app)
+    app.include_router(build_unified_router(lambda: _get_unified(app), lock))
 
     @app.exception_handler(ValueError)
     async def bad_input(request, error):

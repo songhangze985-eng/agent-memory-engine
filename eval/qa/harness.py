@@ -102,7 +102,7 @@ def _eval_v1_group(
     mode = "reconstructive" if is_chronicle else "single_query"
     packing_mode = "token_budget" if is_chronicle else "top_k"
 
-    with closing(engine.store):
+    with closing(engine if engine_kind == "unified" else engine.store):
         turn_id_to_ref: dict[int, str] = {}
         turn_id_to_session: dict[int, str] = {}
         turn_texts: dict[str, str] = {t.ref: t.text for t in turns}

@@ -427,6 +427,52 @@ class PostgresStore(SQLiteStore):
         hits = [row for table in tables for row in self._lexical(table, query, where, args, top_n)]
         return self._search_results(sorted(hits, key=lambda row: (row["bm25_score"], row["id"]))[:top_n], scope, ids_only)
 
+    def search_raw_turns_fts(self, query, *, user_id="default", agent_id="default", session_id=None, top_n=40):
+        """Zero-vector L0 episode fallback: lexical search over ``raw_turns_fts`` on PostgreSQL."""
+        terms = list(dict.fromkeys(tokenize_for_fts(query).split()))
+        terms = [term for term in terms if term not in _FTS_STOP] or terms
+        if not terms or top_n <= 0:
+            return []
+        scope = (user_id, agent_id, session_id)
+        where, args = _scope_where(scope, "r.")
+        expression = " OR ".join(terms[:64])
+        rows = self.conn.execute(
+            f"""WITH q AS (SELECT websearch_to_tsquery('simple', ?) AS ts)
+                SELECT r.turn_id, r.session_id, r.role, r.text, r.event_ts, r.ingest_ts,
+                       r.speaker, r.mention_time,
+                       -ts_rank_cd(to_tsvector('simple', f.fts_tokens), q.ts) AS bm25_score
+                FROM raw_turns_fts f
+                JOIN raw_turns r ON r.turn_id = f.rowid
+                CROSS JOIN q
+                WHERE to_tsvector('simple', f.fts_tokens) @@ q.ts AND {where}
+                ORDER BY bm25_score, r.turn_id LIMIT ?""",
+            (expression, *args, top_n),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def facts_for_turn_ids(self, turn_ids, *, user_id="default", agent_id="default", session_id=None,
+                           include_superseded=False, include_cold=False):
+        """Map L0 ``turn_id`` values back to derived fact IDs on PostgreSQL."""
+        ids = sorted({int(tid) for tid in turn_ids if tid is not None})
+        if not ids:
+            return {}
+        scope = (user_id, agent_id, session_id)
+        where, args = _scope_where(scope, "f.")
+        status_sql = "f.status IN ('active','superseded')" if include_superseded else "f.status='active'"
+        tier_sql = "" if include_cold else " AND f.tier='hot'"
+        rows = self.conn.execute(
+            f"""SELECT CAST(je.value AS BIGINT) AS tid, f.id
+                FROM facts f, jsonb_array_elements_text(f.source_turn_ids::jsonb) AS je(value)
+                WHERE {where} AND {status_sql}{tier_sql}
+                  AND CAST(je.value AS BIGINT) = ANY(?)
+                ORDER BY f.revision DESC, f.ingest_time DESC, f.id""",
+            (*args, ids),
+        ).fetchall()
+        mapping: dict[int, list[str]] = {}
+        for row in rows:
+            mapping.setdefault(int(row["tid"]), []).append(row["id"])
+        return mapping
+
     def _vectors(self, table, query, where, args, top_n):
         if not query.strip() or top_n <= 0:
             return []
