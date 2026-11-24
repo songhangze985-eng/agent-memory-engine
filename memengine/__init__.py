@@ -1,7 +1,19 @@
-"""认知记忆引擎（v2 VFS 虚拟文件系统主引擎 + v1 账本兼容入口）。"""
+"""Unified cognitive memory engine: L0+FTS5, single bi-temporal fact layer, derived VFS/Profile views & tool registry."""
 
+from memengine.adapters import UnifiedToolRegistry
+from memengine.core import FACT_KINDS, QueryPlan, RecallConfig, UnifiedMemoryEngine
 from memengine.engine import CognitiveMemoryEngine
 from memengine.vfs import OptimisticLockError, VFSMemoryEngine, open_vfs_store
 
-__all__ = ["VFSMemoryEngine", "open_vfs_store", "OptimisticLockError", "CognitiveMemoryEngine"]
-__version__ = "0.2.0"
+__all__ = [
+    "FACT_KINDS",
+    "OptimisticLockError",
+    "QueryPlan",
+    "RecallConfig",
+    "UnifiedMemoryEngine",
+    "UnifiedToolRegistry",
+    "CognitiveMemoryEngine",
+    "VFSMemoryEngine",
+    "open_vfs_store",
+]
+__version__ = "0.3.0"
