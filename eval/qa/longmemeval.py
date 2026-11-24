@@ -9,6 +9,7 @@ from typing import Any
 from eval.evidence_ablation import Turn, sample_rows
 from eval.longmemeval.run import category as lme_category
 from eval.qa.harness import QAItem, evaluate_group_qa, summarize_qa_rows
+from eval.qa.protocol import partition_by_split
 from eval.qa.provenance import build_provenance
 from agentmem_core.chrono import parse_session_clock as _stamp
 
@@ -102,13 +103,18 @@ def run_longmemeval_qa(
     seed: int = 42,
     workers: int = 4,
     llm_model: str | None = None,
+    extractor_model: str | None = None,
     judge_model: str | None = None,
     consolidate: bool = False,
     token_budget: int = 2048,
+    split: str = "full",
+    dev_ratio: float = 0.25,
+    protocol_path: Path | None = None,
     recall_config=None,
 ) -> dict[str, Any]:
     data = json.loads(dataset_path.read_text(encoding="utf-8"))
-    selected = sample_rows(data, sample, seed, lme_category)
+    split_rows = partition_by_split(data, lambda r: str(r["question_id"]), split=split, dev_ratio=dev_ratio)
+    selected = sample_rows(split_rows, sample, seed, lme_category)
     tasks = []
     for row in selected:
         turns, qa = parse_longmemeval_qa(row)
@@ -122,22 +128,40 @@ def run_longmemeval_qa(
     items = [r for batch in nested for r in batch]
 
     granularity = (
-        "turn-level (session_md projected 1-turn/hit; session-level supplementary)"
-        if engine_kind == "v2_session_md"
-        else "turn-level (primary); session-level supplementary"
+        "full-context (no memory engine)"
+        if engine_kind == "full_context"
+        else (
+            "turn-level RRF (BM25 + dense, zero extraction)"
+            if engine_kind == "turn_rrf"
+            else (
+                "turn-level (session_md projected 1-turn/hit; session-level supplementary)"
+                if engine_kind == "v2_session_md"
+                else "turn-level (primary); session-level supplementary"
+            )
+        )
     )
+    reranker_name = (
+        "none"
+        if engine_kind in {"full_context", "turn_rrf"}
+        else ("CalibratedLocalReranker" if engine_kind not in {"v2_session_md", "v2_turn_md"} else "VFS_W_verified_x_W_recency")
+    )
+    embedder_name = "none" if engine_kind == "full_context" else "HashedTfidfEmbedder"
     prov = build_provenance(
         engine=engine_kind,
-        embedder="HashedTfidfEmbedder",
-        reranker="CalibratedLocalReranker" if engine_kind != "v2_session_md" and engine_kind != "v2_turn_md" else "VFS_W_verified_x_W_recency",
+        embedder=embedder_name,
+        reranker=reranker_name,
         llm=f"llm:{llm_model}" if llm_model else "MockLLMClient/DeterministicReader",
+        extractor_model=extractor_model,
         judge=f"llm-judge:{judge_model}" if judge_model else "deterministic-v1",
         protocol="LongMemEval-S end-to-end QA + turn-level retrieval + 6-bucket attribution",
         granularity=granularity,
         seed=seed,
-        dataset=f"LongMemEval-S (n={len(items)})",
+        split=split,
+        token_budget=token_budget,
+        protocol_path=protocol_path,
+        dataset=f"LongMemEval-S ({split}, n={len(items)})",
         dataset_path=dataset_path,
-        extra={"consolidate": consolidate, "token_budget": token_budget},
+        extra={"consolidate": consolidate},
     )
     return {
         "benchmark": "LongMemEval-S",

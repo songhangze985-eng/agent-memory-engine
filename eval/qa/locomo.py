@@ -9,6 +9,7 @@ from typing import Any
 from eval.evidence_ablation import sample_rows
 from eval.locomo.run import CATEGORIES as LOCOMO_CAT_MAP, parse_turns
 from eval.qa.harness import QAItem, evaluate_group_qa, summarize_qa_rows
+from eval.qa.protocol import partition_by_split
 from eval.qa.provenance import build_provenance
 from agentmem_core.chrono import parse_session_clock
 
@@ -43,9 +44,13 @@ def run_locomo_qa(
     seed: int = 42,
     workers: int = 4,
     llm_model: str | None = None,
+    extractor_model: str | None = None,
     judge_model: str | None = None,
     consolidate: bool = False,
     token_budget: int = 2048,
+    split: str = "full",
+    dev_ratio: float = 0.25,
+    protocol_path: Path | None = None,
     recall_config=None,
 ) -> dict[str, Any]:
     data = json.loads(dataset_path.read_text(encoding="utf-8"))
@@ -54,7 +59,13 @@ def run_locomo_qa(
         for ordinal, dialog in enumerate(data)
         for index, item in enumerate(dialog["qa"])
     ]
-    selected = sample_rows(pool_rows, sample, seed, lambda row: LOCOMO_CAT_MAP[int(row[2]["category"])])
+    split_rows = partition_by_split(
+        pool_rows,
+        lambda r: f"{data[r[0]]['sample_id']}:{r[1]}",
+        split=split,
+        dev_ratio=dev_ratio,
+    )
+    selected = sample_rows(split_rows, sample, seed, lambda row: LOCOMO_CAT_MAP[int(row[2]["category"])])
     by_dialog: dict[int, list[tuple[int, dict]]] = {}
     for ordinal, index, item in selected:
         by_dialog.setdefault(ordinal, []).append((index, item))
@@ -96,22 +107,40 @@ def run_locomo_qa(
     items = [r for batch in nested for r in batch]
 
     granularity = (
-        "turn-level (session_md projected 1-turn/hit; session-level supplementary)"
-        if engine_kind == "v2_session_md"
-        else "turn-level (primary); session-level supplementary"
+        "full-context (no memory engine)"
+        if engine_kind == "full_context"
+        else (
+            "turn-level RRF (BM25 + dense, zero extraction)"
+            if engine_kind == "turn_rrf"
+            else (
+                "turn-level (session_md projected 1-turn/hit; session-level supplementary)"
+                if engine_kind == "v2_session_md"
+                else "turn-level (primary); session-level supplementary"
+            )
+        )
     )
+    reranker_name = (
+        "none"
+        if engine_kind in {"full_context", "turn_rrf"}
+        else ("CalibratedLocalReranker" if engine_kind not in {"v2_session_md", "v2_turn_md"} else "VFS_W_verified_x_W_recency")
+    )
+    embedder_name = "none" if engine_kind == "full_context" else "HashedTfidfEmbedder"
     prov = build_provenance(
         engine=engine_kind,
-        embedder="HashedTfidfEmbedder",
-        reranker="CalibratedLocalReranker" if engine_kind not in {"v2_session_md", "v2_turn_md"} else "VFS_W_verified_x_W_recency",
+        embedder=embedder_name,
+        reranker=reranker_name,
         llm=f"llm:{llm_model}" if llm_model else "MockLLMClient/DeterministicReader",
+        extractor_model=extractor_model,
         judge=f"llm-judge:{judge_model}" if judge_model else "deterministic-v1",
         protocol="LoCoMo end-to-end QA + turn-level retrieval + 6-bucket attribution",
         granularity=granularity,
         seed=seed,
-        dataset=f"LoCoMo (n={len(items)})",
+        split=split,
+        token_budget=token_budget,
+        protocol_path=protocol_path,
+        dataset=f"LoCoMo ({split}, n={len(items)})",
         dataset_path=dataset_path,
-        extra={"consolidate": consolidate, "token_budget": token_budget},
+        extra={"consolidate": consolidate},
     )
     return {
         "benchmark": "LoCoMo",
