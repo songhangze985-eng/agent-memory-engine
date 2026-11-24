@@ -1,12 +1,12 @@
-name: ci
+name: ci-pr-fast-gate
 
 on:
   push:
-    branches: [main, "cursor/**", "refactor/**"]
+    branches: [main, "cursor/**", "refactor/**", "feat/**"]
   pull_request:
 
 jobs:
-  test:
+  fast-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,9 +15,13 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install -e ".[dev]"
-      - name: Unit tests
+      - name: Tier 1 — Unit, Dual-Profile Contract, C1/C2/C3, Host & Hybrid Tests
         run: python3 -m pytest -q
-      - name: Deterministic pass/fail regression gates
+      - name: Tier 1 — Deterministic Pass/Fail Regression Gates (exact, version, chrono, stress)
         run: python3 -m eval.gates.run_gates --skip-long-horizon
-      - name: Small mock eval smoke
+      - name: Tier 1 — Step C Coding Reuse & Staleness Gate (G2)
+        run: python3 -m eval.coding.run_coding_eval --out /tmp/coding_gate.json --md-out /tmp/coding_gate.md
+      - name: Tier 1 — Step D Mixed-Profile & Scope-Chain Gate
+        run: python3 -m eval.hybrid.realmem_eval --out /tmp/hybrid_gate.json --md-out /tmp/hybrid_gate.md
+      - name: Tier 1 — Small Mock Eval Smoke
         run: python3 -m eval.run_eval --scale small --mode mock --out /tmp/small_eval.json

@@ -1,245 +1,219 @@
-# `agentmem-core`（统一单核双时态记忆引擎）
+# `agentmem-core` — 通用 Agent 记忆核心（一个核心 + 声明式 Profiles + 通用宿主）
 
-面向强模型 Agent 的单核混合记忆引擎（PyPI 分发名 `agentmem-core` / Python 包名 `agentmem_core` / 核心入口 `UnifiedMemoryEngine`），以**统一真相源、同口径端到端评测与实证消融驱动**为核心原则，将历史双引擎收口为一套清晰架构：
+`agentmem-core`（Python 导入 `agentmem_core`，兼容旧名 `memengine`）是一个面向 **LLM 长期对话** 与 **Coding Agent** 的**通用单核双时态记忆引擎**（`UnifiedMemoryEngine`）。
 
-- **双轨写入 + 单真相源存储**：对话轨道（`ingest_turn`）无显著性门控，直落 L0 分块冷存（`.jsonl.gz`，**0 向量化**）并建 turn 级 FTS5 兜底，同时抽取事实写入统一双时态事实账本（`facts`，`kind ∈ {world, experience, preference, belief, rule}`）；程序性轨道（`ingest_rule`）走三问显著性门控、三段式状态机与行级乐观锁（冲突 409）。存储层收口为 **SQLite + LanceDB（默认）** 与 **PostgreSQL 16+（唯一横向扩展档）**，Qdrant / S3 移出核心至 `agentmem_core/contrib/`。
-- **派生视图零冗余**：VFS 目录树与 `GUIDE.md` 合并（`VFSView`）、实体画像（`ProfileView`）均直接派生于统一事实表，**不再单独维护第二份事实表**。
-- **四路召回 + 槽位更新 + 实体图覆盖打包 + 反思做梦**：并行融合向量、BM25（含 L0 FTS5 兜底）、两跳实体图与精确标识符/8 类版本零串台通道；叠加 M2 槽位级 supersede / `as_of` 时间窗口、M3 实体图分面枚举 / 覆盖优先打包 / 确定性计算器（`count`/`sum`/`diff`/`date_diff`）、M4 带证据引用的反思型 `kind='belief'` 做梦蒸馏。经 M5 端到端消融实测，**双极渐近环与 `W_verified × W_recency` 平局裁决已默认关闭**（仅保留为可选 feature flag）。
-- **单工具注册表 + 兼容层**：`UnifiedToolRegistry` 统一派生 HTTP（`/v2/memory/*`）、CLI、MCP 与 OpenAI Tools；旧 `/v1/*` 保留兼容 shim 并返回 `Deprecation: true` / `Sunset` 响应头。
+整个系统只有**一个统一核心与单一事实层**，零 `if profile == ...` 分支：对话记忆（`conversational`）、编程记忆（`coding`）与项目混合记忆（`hybrid`）完全通过声明式 YAML 配置（[profiles/](profiles/)）和分层作用域链（`ScopeChain`）驱动，并通过标准 **MCP stdio 服务**与原生宿主适配器支持 **Claude Code (`cc`)、OpenAI Codex CLI (`codex`)、OpenCode** 及任意 MCP/HTTP/CLI 客户端。
 
-> **包名已迁移至 `agentmem-core`（零破坏兼容）**：为避免与 WWW'25 `MemEngine` 冲突，项目已正式更名为 `agentmem-core`（导入 `import agentmem_core`，CLI `agentmem-core` / `agentmem`，环境变量 `AGENTMEM_CORE_*`）。原 `import memengine` / `memengine` CLI / `MEMENGINE_*` 环境变量通过透明兼容层完整保留至 `v1.0`，详见 [docs/RENAME_PLAN.md](docs/RENAME_PLAN.md)。
+> **包名与 API 迁移说明**：为解决历史包名 `memengine` 与 WWW'25 `MemEngine` 重名问题，发行包已正式更名为 `agentmem-core`（导入 `agentmem_core`，CLI `agentmem-core` / `agentmem`，环境变量 `AGENTMEM_CORE_*`）。旧导入 `memengine` 及旧 HTTP 路由 `/v1/*`、`/v2/vfs/*` 均通过透明 shim 转发到单一 `UnifiedMemoryEngine`（返回 `Deprecation: true` 与 `Sunset: 2027-06-01`），详见文末迁移时间表与 [docs/RENAME_PLAN.md](docs/RENAME_PLAN.md)。
 
 ---
 
-## 系统架构图
+## 一、核心评测与实测结论（QA 准确率优先，零加权综合分）
 
-下图严格对应仓库现有代码（`agentmem_core/core/`、`agentmem_core/views/`、`agentmem_core/adapters/`、`agentmem_core/compat/`、`agentmem_core/storage/`），无占位或虚构模块：
+> **评测协议与口径声明（G1 & G5）**：
+> 1. **无加权综合分**：永久移除历史加权综合分；自建技术专项（`eval/gates/`）已饱和在 100%，**仅作 PASS/FAIL 回归门禁**，绝不计分或对外宣称成绩。
+> 2. **冻结评测协议**：所有对话评测参数冻结于 [eval/protocol.yaml](eval/protocol.yaml)（`protocol_version=1.0.0`），强制记录 `extractor_model`、`reader_model`、`judge`、`judge_prompt_version`、`embedder`、`reranker`、`top_k`、`token_budget`、`seeds`、`split`（`dev`/`test` 严格隔离，防过拟合）、`dataset_sha256`、`protocol_sha256`、`commit_hash`。
+> 3. **同口径外部参照线声明**：
+>    - Hindsight 20B 开源模型口径：LongMemEval `83.6%`、LoCoMo `83.2%`；
+>    - Hindsight Gemini-3 Pro 口径：LongMemEval `91.4%`（与 20B 口径不同）；
+>    - Hindsight 预印本最高 LoCoMo 口径：`89.61%`（与 20B 口径不同）。
+>    - 下表当前运行于**本机离线确定性 CI 轨**（`DeterministicReader` + `deterministic-v1`，零外部 API Key），**严禁与上述在线大模型成绩混比**；接入 20B 开源模型或前沿模型 API 后，用同一 [eval/protocol.yaml](eval/protocol.yaml) 一键出同口径榜单。
+
+### 1. 对话场景：步骤 A 冻结协议三臂基线（`dev` 切分，3 seeds `[42, 137, 2026]`）
+
+对比三条臂：① `full_context`（全上下文无记忆）、② `turn_rrf`（纯 turn 级 BM25+稠密 RRF 地板）、③ `unified`（统一单核 `conversational` profile），完整报告见 [eval/results/step_a_3arm_dev_baseline.md](eval/results/step_a_3arm_dev_baseline.md)：
+
+| 基准 (`split=dev`) | 对照臂 | Seeds | 离线 QA 均值 | Seed 区间 (Min–Max) | Turn R@10 | 平均注入 Token | P95 延迟 |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| `LongMemEval-S` (n=40/seed) | `full_context` | `[42,137,2026]` | **30.83%** | 25.00%–40.00% | 1.01% | 126,895.0 | 271.79 ms |
+| `LongMemEval-S` (n=40/seed) | `turn_rrf`（地板） | `[42,137,2026]` | **35.83%** | 32.50%–40.00% | **79.17%** | 1,651.4 | 1.67 ms |
+| `LongMemEval-S` (n=40/seed) | `unified` | `[42,137,2026]` | **30.83%** | 27.50%–35.00% | 72.66% | 2,039.2 | 203.62 ms |
+| `LoCoMo` (n=80/seed) | `full_context` | `[42,137,2026]` | **5.00%** | 2.50%–7.50% | 2.86% | 25,048.0 | 88.20 ms |
+| `LoCoMo` (n=80/seed) | `turn_rrf`（地板） | `[42,137,2026]` | **9.17%** | 6.25%–12.50% | 38.26% | 384.6 | 0.99 ms |
+| `LoCoMo` (n=80/seed) | `unified` | `[42,137,2026]` | **12.92%** | 11.25%–13.75% | **49.87%** | 2,000.7 | 82.91 ms |
+
+- **6 桶归因结论**：`unified` 在 LongMemEval-S `dev` 上 `extraction_miss = 0.00%`、`assembly_truncation = 0.00%`，`73.08%` 的错题来自离线 `DeterministicReader` 推理能力不足（`reasoning_error`），`19.23%` 来自离线字符串裁判噪声（`judge_noise`）；在 LoCoMo 上 `unified` 的 Turn R@10 显著领先 `turn_rrf` 地板 `+11.61 pp`，而在 LongMemEval-S 助理长回复子桶上 `turn_rrf` 的原始轮次直出仍有优势（已定位为步骤 B 接入真实 LLM 后的首要检索优化项）。
+- **M0 → M5 历史消融演进**（已裁剪双极渐近环与 recency 平局默认项）：详见 [eval/results/m5_ablation_report.md](eval/results/m5_ablation_report.md) 与 [eval/results/m5_unified_pruned_report.md](eval/results/m5_unified_pruned_report.md)。
+
+### 2. Coding 场景：步骤 C 经验复用、陈旧防误导与误注入评测（G2）
+
+30 对经验复用任务（版本差异 / 项目约定 / 环境报错各 10 对，任务 A 经 C2 `fail_to_pass` 自动捕获并挂 C1 代码锚点，任务 B 经 C3 零 LLM `ambient_context` 召回）+ 10 个代码/依赖变更陈旧陷阱 + 10 个无关干扰项，完整报告见 [eval/results/step_c_coding_eval_report.md](eval/results/step_c_coding_eval_report.md)：
+
+| 指标 | 无记忆 (`no_memory`) | 有记忆 (`coding` profile) | 变化 / 验收判据 |
+| :--- | ---: | ---: | :--- |
+| 任务 B 成功率（30 对） | 60.00% | **100.00%** | **`+40.00 pp`**（三类坑均 100%） |
+| 平均步数 / 任务 | 4.40 | **1.00** | **`-77.3%`** |
+| 平均 Token / 任务 | 2,391.7 | **648.7** | **`-72.9%`** |
+| 经验自动捕获与修复召回率 | — | **100.00%** (30/30) | C2 自动抽取 + C3 召回 |
+| 无关任务误注入率（10 干扰项） | — | **0.00%** (0/10) | 判据 `<= 5%` |
+| 代码/版本漂移检测率（10 陷阱） | — | **100.00%** (10/10) | C1 锚点自动标 `stale` |
+| 陈旧规则误导率（10 陷阱） | — | **0.00%** (0/10) | `stale_policy=exclude` 零误导 |
+| Ambient 路径延迟 / LLM 调用 | — | **P95 3.879 ms / 0 LLM** | 满足 G4 硬约束 |
+
+### 3. 性能、混合场景与回归门禁（G3 / G4 / 步骤 D）
+
+| 验证项 | 规模与内容 | 实测结果 | 证据报告 / 测试 |
+| :--- | :--- | :--- | :--- |
+| **C3 Ambient 压测 (G4)** | 1,000 条事实/规则/锚点 × 240 次混合查询（挂毒丸 LLM） | **0 LLM 调用** · **P50 2.87 ms / P95 4.892 ms / P99 5.42 ms** · 锚点召回 100% · 陈旧泄漏 0% · 误注入 0% | [c3_ambient_perf_report.md](eval/results/c3_ambient_perf_report.md) |
+| **步骤 D 混合场景 (RealMem)** | 2 项目多会话演进：跨对话/coding 用户偏好共享、项目规则覆盖用户偏好、跨仓库隔离、中期升级陈旧剔除、双 profile 并行挂载 | **8/8 PASS (100%)** | [step_d_hybrid_realmem_report.md](eval/results/step_d_hybrid_realmem_report.md) |
+| **G3 架构通用契约** | AST + 正则扫描 `agentmem_core/core/` 零 `if profile == ...`；单表双 profile 契约；`/v1/*` & `/v2/vfs/*` 零独立表真转发 | **PASS**（核心 0 分支） | [test_universal_profiles_and_scopes.py](tests/test_universal_profiles_and_scopes.py) |
+| **自建专项门禁** | 精确标识符 120 题 + 版本号 80 题 + 日历 60 题 + 抗压长程 | **PASS / FAIL 门禁（100% PASS，不计综合分）** | `python3 -m eval.gates.run_gates` |
+
+---
+
+## 二、架构总览：一个通用核心 + 声明式 Profiles + 通用宿主
 
 ```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 44, 'rankSpacing': 48, 'curve': 'basis', 'padding': 14}}}%%
 flowchart TB
-  Caller["调用方 · Python SDK / FastAPI (/v2/memory/*) / CLI / MCP / OpenAI Tools<br/>兼容层：/v1/* 经 compat/v1_shim.py 转发并标注 Deprecation 头"]
+  Hosts["通用 Agent 宿主层 · agentmem_core/hosts/ & adapters/<br/>Claude Code (cc) Hooks+MCP · OpenAI Codex CLI MCP+Notify · OpenCode · MCP stdio · FastAPI (/v2/memory/*) · CLI<br/>弃用兼容 shim：/v1/* 与 /v2/vfs/* 均转发至单一核心"]
 
-  subgraph Core["UnifiedMemoryEngine 单核（agentmem_core/core/）"]
-    Ingest["1. 双轨写入 · ingest.py + supersede.py<br/>• 对话轨道 ingest_turn()：幂等键 · 无门控 · 槽位 supersede 链<br/>• 程序轨道 ingest_rule()：三问门控 · [触发/动作/验证] 状态机 · 乐观锁(409)"]
+  Profiles["声明式 Profile 配置（零核心分支）· profiles/*.yaml<br/>conversational.yaml · coding.yaml · hybrid.yaml · 自定义 YAML/JSON<br/>ScopeChain：session > repo > project > user > global"]
 
-    subgraph Storage["2. 收口存储层 · SQLite WAL + LanceDB (默认) / PostgreSQL 16+ (唯一扩展档)"]
-      L0[("L0 原始日志 · episodes.py<br/>.jsonl.gz 分块冷存（0 向量）<br/>+ turn 级 FTS5 兜底索引")]
-      Facts[("统一双时态事实账本 · facts.py<br/>单 facts 表 + exact_identifiers + 实体边 + 槽位链<br/>kind ∈ {world, experience, preference, belief, rule}")]
+  subgraph Core["UnifiedMemoryEngine 单一通用核心（agentmem_core/core/）"]
+    Ingest["1. 写入与信号抽取 · ingest.py + signals.py + supersede.py<br/>• 对话轨道 ingest_turn()：无门控 · 幂等 · 槽位 supersede<br/>• 规则轨道 ingest_rule()：三问门控 · 乐观锁(409) · 代码锚点<br/>• 信号轨道 ingest_event()：fail→pass / 用户纠正 / 文件漂移 + G4 写入上限"]
+
+    subgraph Storage["2. 收口单一真相源 · SQLite WAL + LanceDB (默认) / PostgreSQL 16+ (唯一扩展档)"]
+      L0[("L0 原始日志 · episodes.py<br/>.jsonl.gz 分块冷存（0 向量）<br/>+ turn 级 FTS5 兜底")]
+      Facts[("统一双时态事实账本 · facts.py + code_anchors.py<br/>单 facts 表 + fact_unified_meta(scope_key, staleness) + fact_code_anchors<br/>kind ∈ {world, experience, preference, belief, rule}")]
     end
 
-    Views["3. 派生视图（零重复建表 · agentmem_core/views/）<br/>• VFSView：kind=rule 路径树 / ls -R 大纲 / GUIDE.md 合并 / 整批回滚<br/>• ProfileView：实体画像与显式偏好聚合"]
+    Hot["3a. Ambient 热路径（G4：0 LLM，P95 < 5ms）· ambient.py<br/>代码锚点 O(log N) + 精确标识/版本 + FTS5 + ScopeChain 覆盖 + stale 剔除"]
+    Deep["3b. Question 深度路径（G4：≤2 LLM）· plan.py + recall.py + assemble.py + answer.py<br/>QueryPlan(as_of/时间窗) + 四路召回 + 图枚举覆盖打包 + 确定性计算 + 核验作答"]
+    Views["4. 派生视图与整理 · views/ + dreaming.py<br/>VFSView(目录大纲/GUIDE 合并/回滚) · ProfileView · 反思 belief 做梦"]
 
-    Dream["4. 异步整理与做梦 · consolidate.py + dreaming.py<br/>• 离线/显式触发：实体模式归纳 → 带 source_turn_ids 证据的 kind=belief<br/>• 支持 OpenAI 兼容 LLM（严格引文校验）与确定性离线兜底"]
-
-    Recall["5. 规划与四路召回 · plan.py + recall.py + graph_enum.py<br/>• QueryPlan：as_of / 时间窗口 / 历史与更新意图 / 聚合分面<br/>• 四路召回：Vector + BM25(facts + L0 FTS5) + 实体图枚举 + 精确符号/版本门禁<br/>• 槽位状态过滤 + 覆盖优先分会话打包（双极环 & recency 经 M5 消融默认关闭）"]
-
-    Assemble["6. 单一装配与核验作答 · assemble.py + answer.py + calc.py<br/>• assemble(disclosure=full|progressive, profile=conversational|coding_agent)<br/>• coding_agent 前置 Stage-1 预加载 + Stage-2 目录大纲<br/>• answer()/reflect()：单从句证据核验 · 确定性计算 · 部分作答 / 严格拒答"]
-
-    Ingest -->|"全量对话直落"| L0
-    Ingest -->|"事实抽取 / 槽位 supersede / 规则快照"| Facts
-    Facts -->|"派生视图（只读投影 + 规则写回）"| Views
-    L0 -.->|"episode 重建 / 溯源"| Dream
-    Facts <-->|"读取事实 → 写回 evidence-backed belief"| Dream
-    L0 -->|"turn 级 FTS5 兜底与原话钻取"| Recall
-    Facts -->|"四路候选与槽位状态"| Recall
-    Recall -->|"排序证据集 + QueryPlan"| Assemble
-    Views -->|"coding_agent 预加载 / 大纲 / 画像"| Assemble
+    Ingest --> L0
+    Ingest --> Facts
+    Facts --> Views
+    Facts --> Hot
+    Facts --> Deep
+    L0 --> Deep
   end
 
-  Contrib["非核心可选扩展 · agentmem_core/contrib/（核心零依赖）<br/>QdrantL2Index · S3TranscriptStore"]
+  Contrib["非核心外挂扩展 · agentmem_core/contrib/<br/>QdrantL2Index · S3TranscriptStore"]
 
-  Caller -->|"ingest_turn / ingest_rule / recall / answer / reflect / consolidate"| Ingest
-  Caller -->|"查询（query / scope / reference_time / budget / profile）"| Recall
-  Assemble -->|"上下文包 / 核验作答 / 拒答 / 溯源 turn_ids"| Caller
-  Storage -.->|"可选外挂（仅由调用方显式注入）"| Contrib
-
-  classDef io fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#111827
-  classDef ctrl fill:#f5f3ff,stroke:#7c3aed,stroke-width:1.5px,color:#111827
-  classDef store fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#111827
-  classDef aux fill:#f8fafc,stroke:#64748b,stroke-width:1.5px,color:#111827
-  class Caller io
-  class Ingest,Recall,Assemble,Dream,Views ctrl
-  class L0,Facts store
-  class Contrib aux
+  Hosts --> Profiles --> Core
+  Storage -.-> Contrib
 ```
 
-### 能力边界清单（已实测 vs 仅单测适配 vs 非内置）
+### 后端收口策略
 
-| 状态 | 范围说明 |
-| :--- | :--- |
-| **已实现并实机实测** | `UnifiedMemoryEngine` 单核全链路（SQLite WAL + FTS5、LanceDB `IVF_RQ`、Docker PostgreSQL 16 `pgvector`+`tsvector`、L0 `.jsonl.gz` + turn 级 FTS5、槽位 supersede、实体图分面枚举、覆盖优先打包、确定性计算器、`dream_beliefs`、`VFSView`、`ProfileView`、`UnifiedToolRegistry` 派生的 `/v2/memory/*` / CLI / MCP / OpenAI Tools、`/v1/*` 弃用 shim）；端到端 QA 评测与 6 桶归因框架（`eval/qa/`）及 4 项 PASS/FAIL 回归门禁（`eval/gates/`）。 |
-| **已写代码适配（仅单测）** | `agentmem_core/contrib/` 中的 `QdrantL2Index`（REST）、`S3TranscriptStore`（boto3）；PostgreSQL `vchordrq` / `diskann` / `pg_search` / `vchord_bm25` 自动探测 SQL 分支；在线 OpenAI 兼容 Reader / Judge / Dreaming LLM 客户端（已通过 HTTP mock 单测，本机无外部 API Key 时自动运行离线确定性后端）。 |
-| **不在引擎内部实现（需外部提供）** | ① 后台常驻定时做梦/压缩守护进程（需外部显式调用 `consolidate()` / `compact_directory()`）；② 内置在线大模型推理能力（无 API Key 时仅使用离线确定性 Reader/Extractor，无法替代真实 20B/前沿 LLM 的语义泛化）；③ 自动 Agent 工具调用循环。 |
+- **默认核心后端**：`SQLite WAL + FTS5`（内置零依赖）与 `LanceDB`（嵌入式零拷贝 ANN，可选 `[lance]`）。
+- **唯一横向扩展档**：`PostgreSQL 16+`（`pgvector` / `vchordrq` + `tsvector`，可选 `[postgres]`）。
+- **移出核心**：Qdrant（`agentmem_core/contrib/qdrant.py`）与 S3 冷存（`agentmem_core/contrib/s3_transcripts.py`）作为非核心 contrib 扩展，核心对其零依赖。
 
 ---
 
-## 评测体系与 M0 → M5 实测演进
+## 三、快速开始与通用宿主接入（保留 Claude Code `cc`、Codex、OpenCode、MCP）
 
-> **严正评测口径声明（彻底移除加权综合分）**：
-> 1. 本仓库**已永久删除历史加权综合分**（原 `compute_weighted_summary`），不再混合不同粒度指标。
-> 2. 跨引擎检索对比**统一使用 Turn / Step 级召回（`Turn R@10` / `MRR@10`）作为主指标**，Session 级召回仅作辅助参考。
-> 3. 下表离线实测全部使用 **`HashedTfidfEmbedder` + `CalibratedLocalReranker` + `MockLLMClient/DeterministicReader` + `deterministic-v1 / exact-mcq-match` 裁判**（完整 provenance 见每份报告 JSON/MD）。**离线确定性分数不可直接与使用真实前沿 LLM 的外部论文成绩（如 Hindsight）作横向对比**；如需对标，请使用下方 `--llm-model` 与 `--judge-model` 命令跑真实在线 LLM 评测。
-
-### 1. M0 → M5 端到端 QA 与 Turn 级检索演进（冻结 500 题队列）
-
-- **队列 Provenance**：`seed=42`，`LongMemEval-S` 100 题（SHA-256 `d6f21ea9...`）+ `LoCoMo` 200 题（SHA-256 `79fa87e9...`）+ `MemBench` 200 题（4×50，SHA-256 `10737d41...`），`token_budget=2048`。
-- **更新支配（`Update Dom`）定义**：70 道（冻结队列 14 道）`knowledge-update` 题中，新版本会话排名严格压过旧版本会话（或旧版本未进入候选）的比例；严格版本链归档占比同时记录为 `update_strict_archived`。
-
-| 基准 / 关键子桶 | M0 `v1_chronicle` | M0 `v2_session_md` | M0 `v2_turn_md` | M1 `unified` | M2 `unified` | M3 `unified` | M4 `unified+dream` | **M5 裁剪默认 (`pruned`)** |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **LongMemEval-S 整体 QA** | 10.00% | 9.00% | 24.00% | 24.00% | 30.00% | 31.00% | 31.00% | **31.00%** *(可答 36.05%)* |
-| **LongMemEval-S Turn R@10 / MRR** | 71.61% / 0.4919 | 36.43% / 0.3866 | 80.08% / 0.5801 | 71.61% / 0.4919 | 71.61% / 0.4892 | 72.03% / 0.4897 | 72.62% / 0.4890 | **72.62% / 0.4893** |
-| └ `knowledge-update` QA / UpdDom | 7.14% / 57.14% | 0.00% / 85.71% | 21.43% / 57.14% | 35.71% / 57.14% | 50.00% / 64.29% | 50.00% / 64.29% | 50.00% / 64.29% | **50.00% / 64.29%** |
-| └ `temporal-reasoning` QA | 13.33% | 0.00% | 6.67% | 13.33% | 46.67% | 46.67% | 46.67% | **46.67%** |
-| └ `multi-session` QA / Turn R@10 | 0.00% / 51.79% | 0.00% / 9.52% | 7.14% / 64.52% | 7.14% / 51.79% | 7.14% / 51.79% | 21.43% / 57.98% | 21.43% / 57.98% | **21.43% / 57.98%** |
-| **LoCoMo 整体 QA** | 6.00% | 7.50% | 6.50% | 8.50% | 9.00% | 10.00% | 12.00% | **12.00%** *(可答 15.00%)* |
-| **LoCoMo Turn R@10 / MRR** | 54.61% / 0.4366 | 31.76% / 0.3125 | 42.41% / 0.3516 | 54.61% / 0.4366 | 54.29% / 0.4408 | 53.85% / 0.4397 | 54.64% / 0.4412 | **54.48% / 0.4432** |
-| └ `1 multi-hop` QA | 2.50% | 0.00% | 0.00% | 0.00% | 2.50% | 5.00% | 5.00% | **5.00%** |
-| └ `2 temporal` QA / MRR | 0.00% / 0.7246 | 0.00% / 0.3808 | 0.00% / 0.5169 | 22.50% / 0.7246 | 22.50% / 0.7321 | 22.50% / 0.7321 | 22.50% / 0.7133 | **22.50% / 0.7133** |
-| └ `3 open-domain` QA / Turn R@10 | 5.00% / 36.29% | 2.50% / 21.78% | 2.50% / 21.94% | 2.50% / 36.29% | 2.50% / 36.29% | 2.50% / 36.29% | 10.00% / 38.99% | **10.00% / 38.99%** |
-| **MemBench 整体 QA / MRR** | 51.50% / 0.7068 | 50.50% / 0.6153 | 49.50% / 0.6146 | 51.50% / 0.7068 | 51.50% / 0.7065 | 51.50% / 0.7065 | 53.00% / 0.7649 | **53.00% / 0.7763** |
-| └ `observation_reflective` QA / MRR | 40.00% / 0.7107 | 36.00% / 0.5257 | 36.00% / 0.5257 | 40.00% / 0.7107 | 40.00% / 0.7107 | 40.00% / 0.7107 | 46.00% / 0.8485 | **46.00% / 0.8663** |
-| **6 桶错题归因主因** | `reasoning_error` 占 72–99% | 粗粒度投影退化 | — | `extraction_miss` ≤ 0.6% | 更新与时序大涨 | 多跳/计数大涨 | 反思/开放域大涨 | **MRR 三榜新高，P95 降 14–34%** |
-
-> 完整原始数据与逐项归因表：[M0 基线](eval/results/m0_baseline_report.md) · [M1 统一核](eval/results/m1_unified_report.md) · [M2 槽位与时序](eval/results/m2_unified_report.md) · [M3 图枚举与计算](eval/results/m3_unified_report.md) · [M4 反思做梦](eval/results/m4_unified_dreaming_report.md) · [M5 裁剪默认实测](eval/results/m5_unified_pruned_report.md)
-
-### 2. M5 端到端消融裁决表（去留实证）
-
-在同批 500 题（`seed=42`，`HashedTfidfEmbedder` + `DeterministicReader`，commit `7a20d51`）上逐项关闭单个模块（详见 [eval/results/m5_ablation_report.md](eval/results/m5_ablation_report.md)）：
-
-| 消融变体（相对 `full_m4`） | LME QA (Δ) | LoCoMo QA (Δ) | MemBench QA (Δ) | MemBench MRR@10 (Δ) | **M5 工程裁决** |
-| :--- | ---: | ---: | ---: | ---: | :--- |
-| **`full_m4`（全开基线）** | **31.00%** | **12.00%** | **53.00%** | **0.7649** | 参照基线 |
-| `no_bipolar`（关双极渐近环） | 31.00% *(0.00 pp)* | 12.00% *(0.00 pp)* | 53.00% *(0.00 pp)* | **0.7738 *(+0.0089)*** | **默认关闭**（`enable_bipolar=False`） |
-| `no_recency_tiebreak`（关时效平局） | 31.00% *(0.00 pp)* | 12.00% *(0.00 pp)* | 53.00% *(0.00 pp)* | **0.7674 *(+0.0025)*** | **默认关闭**（`enable_recency_rerank=False`） |
-| `no_graph_enum_calc`（关 M3 图枚举+计算） | **29.00% *(-2.00 pp)*** | **11.50% *(-0.50 pp)*** | 53.00% *(0.00 pp)* | 0.7651 *(+0.0002)* | **保留默认开启**（`multi-session` 暴跌 -14.29 pp） |
-| `no_dreaming`（关 M4 反思做梦） | 31.00% *(0.00 pp)* | **10.00% *(-2.00 pp)*** | **51.50% *(-1.50 pp)*** | **0.7065 *(-0.0584)*** | **保留默认开启**（`open-domain` -7.50 pp，`obs_ref` -6.00 pp） |
-| **`m5_unified_pruned`（双关最终默认）** | **31.00% *(0.00 pp)*** | **12.00% *(0.00 pp)*** | **53.00% *(0.00 pp)*** | **0.7763 *(+0.0114)*** | **上线默认**（三榜 MRR 全升，P95 降 14–34%） |
-
-### 3. 自建技术专项回归门禁（纯 PASS / FAIL，不计入综合分）
-
-自建套件已收敛至 `eval/gates/`，作为 CI 与发版前的硬回归门禁（已饱和在 100%，不充当基准排名分）：
-
-| 门禁套件 | 规模与校验内容 | 状态 |
-| :--- | :--- | :---: |
-| `eval.gates.exact` | 120 题精确代码符号/错误码/路径：`P@1=1.0`、`symbol_confusion=0.0`、`negative_empty=1.0` | **PASS** |
-| `eval.gates.version` | 80 题 8 类版本号精度分级：`P@1=1.0`、`grade_correct=1.0`、`confusion=0.0` | **PASS** |
-| `eval.gates.chrono` | 60 题日历/相对时间区间解析：`pass_rate=1.0` | **PASS** |
-| `eval.gates.stress` | 40 题抗压 + 500/1500/3500 轮（100K Token）长程冷归档门禁：`R@10=1.0`、`false_empty=0` | **PASS** |
-
----
-
-## 快速开始
-
-### 安装
+### 1. 安装
 
 ```bash
-pip install -e ".[dev]"        # 基础版（Python 3.10+、NumPy、SQLite WAL/FTS5）
-pip install -e ".[lance]"      # 嵌入式 LanceDB + PyArrow（RaBitQ IVF_RQ 零拷贝 ANN）
-pip install -e ".[postgres]"   # PostgreSQL 16+ 驱动与连接池（唯一横向扩展档）
-pip install -e ".[server]"     # FastAPI + Uvicorn HTTP 服务
-pip install -e ".[all]"        # 以上全部后端与服务组件
+pip install -e ".[dev]"       # 核心（Python 3.10+、NumPy、SQLite WAL/FTS5、MCP stdio、CC/Codex 宿主）
+pip install -e ".[lance]"     # + 嵌入式 LanceDB
+pip install -e ".[postgres]"  # + PostgreSQL 16+ 横向扩展
+pip install -e ".[server]"    # + FastAPI HTTP 服务
+pip install -e ".[all]"       # 全部可选依赖
 ```
 
-### 统一单核引擎（`UnifiedMemoryEngine`，推荐）
+### 2. 一键接入通用 Coding Agent 宿主（MCP + Hooks）
+
+```bash
+# Claude Code (cc)：自动写入 .mcp.json + .claude/settings.local.json (UserPromptSubmit / PostToolUse / Stop)
+agentmem-core host install cc --repo-root /path/to/your/repo --user-id alice
+
+# OpenAI Codex CLI (codex)：自动写入 .codex/config.toml [mcp_servers.agentmem] 并输出 AGENTS.md 片段
+agentmem-core host install codex --repo-root /path/to/your/repo --user-id alice
+
+# OpenCode：自动写入 opencode.json
+agentmem-core host install opencode --repo-root /path/to/your/repo --user-id alice
+
+# 任意标准 MCP 客户端直接启动 stdio MCP Server
+agentmem-core --db-url /path/to/memory.db mcp-serve --profile coding --repo-id my-repo --repo-root /path/to/your/repo
+```
+
+### 3. 单核同时挂载对话 + Coding 双 Profile（Python SDK）
 
 ```python
-from agentmem_core import UnifiedMemoryEngine
+from agentmem_core import AgentEvent, UnifiedMemoryEngine
 
-# 支持 ":memory:"、本地 SQLite、lancedb:///path（默认推荐）或 postgresql://...（唯一扩展档）
-engine = UnifiedMemoryEngine("lancedb:///tmp/agent_mem")
-scope = {"user_id": "alice", "agent_id": "coder"}
+engine = UnifiedMemoryEngine("memory.db")
 
-# 1. 对话轨道：无门控直落 L0 .jsonl.gz（0 向量）+ FTS5 + 统一双时态事实账本 + 槽位 supersede
-engine.ingest_turn("I've actually watched 4 MCU films so far.", session_id="s1", **scope)
-engine.ingest_turn("I've actually watched 5 MCU films so far.", session_id="s2", **scope)
+# 同一核心同时挂载 conversational 与 coding 两个声明式 profile，写入与检索互不干扰
+chat = engine.bind_profile("conversational", user_id="alice", session_id="chat-1")
+coder = engine.bind_profile("coding", user_id="alice", repo_id="payments", project_id="billing", session_id="code-1")
 
-# 2. 程序性规则轨道：三问显著性门控 + [触发/动作/验证] 状态机 + 行级乐观锁 -> 统一表 kind='rule'
-engine.ingest_rule(
-    "/strategies/db/pool.md",
-    title="PG Pool Sizing",
-    trigger_condition="PostgreSQL connections exceed 80%",
-    action="Cap pool max_size=20 and enable idle timeout",
-    verification_result="P95 latency dropped 40%",
-    always_active=True,
-    expected_version=0,
-    **scope,
+# 1) 用户全局偏好在对话与 coding 间共享
+chat.ingest_turn("I prefer concise bullet answers and pytest.", scope_key="user:alice")
+
+# 2) 项目/仓库规则优先覆盖用户全局偏好，且挂代码锚点防止代码变更后误导
+coder.ingest_rule(
+    "/prefs/test_runner.md",
+    title="Payments Test Runner",
+    trigger_condition="Running unit tests in payments",
+    action="Run `uv run pytest -m unit`",
+    verification_result="All unit tests green",
+    override_key="test_runner",
+    anchors=["pyproject.toml"],
+    repo_root=".",
 )
 
-# 3. 离线/显式反思做梦：生成带 source_turn_ids 证据的 kind='belief'
-engine.consolidate(force=True, **scope)
+# 3) 失败转成功事件自动抽取规则 + 锚点（受 G4 写入成本上限约束）
+coder.ingest_event(AgentEvent(event_type="test_result", command="pytest", exit_code=1, text="OperationalError: database is locked", file_paths=("src/db.py",)))
+coder.ingest_event(AgentEvent(event_type="file_edit", text="Enable WAL + busy_timeout=5000", file_paths=("src/db.py",)))
+coder.ingest_event(AgentEvent(event_type="test_result", command="uv run pytest", exit_code=0, text="passed", file_paths=("src/db.py",)))
 
-# 4. 统一召回、单一 assemble 与证据核验作答（支持 conversational / coding_agent 两种 profile）
-ans = engine.answer("How many MCU films have I watched?", **scope)
-ctx = engine.build_context("PostgreSQL pool", profile="coding_agent", disclosure="progressive", **scope)
-full_rule = engine.read_note("/strategies/db/pool.md", **scope)
+# 4) C3 零 LLM 毫秒级 ambient 上下文注入（P95 < 5ms，llm_calls == 0）
+amb = coder.ambient_context("database is locked", active_files=["src/db.py"])
+assert amb["llm_calls"] == 0
 
-# 5. 单工具注册表派生 OpenAI Tools & MCP Schema
-tools = engine.as_tools(**scope)
-openai_defs = tools.openai_definitions()
-mcp_defs = tools.mcp_definitions()
+# 5) 代码变更后自动将漂移规则标记为 stale（coding profile 默认排除陈旧规则）
+coder.verify_anchors(repo_root=".")
 ```
 
 ---
 
-## CLI 与 HTTP 服务（`/v2/memory/*` 统一接口 & `/v1/*` 兼容层）
+## 四、可复现评测与三层 CI 命令
+
+### 三层 CI 架构（`.github/workflows/`）
+
+- **PR 快速门禁**（[ci.yml](.github/workflows/ci.yml)）：全量单测、G3 双 profile 契约与零分支校验、精确标识符/版本/日历/抗压门禁、Step C 编码复用门禁、Step D 混合场景门禁。
+- **每晚中等规模评测**（[eval-nightly.yml](.github/workflows/eval-nightly.yml)）：含长程 100K 门禁、C3 1,000 事实 Ambient P95 压测、Step C 与 Step D 完整报告产物上传。
+- **每周 / 发版全量评测**（[eval-weekly.yml](.github/workflows/eval-weekly.yml)）：支持通过 `workflow_dispatch` 传入真实 `llm_model`（如 20B 开源模型或前沿模型）、`extractor_model`、`judge_model` 在冻结 [eval/protocol.yaml](eval/protocol.yaml) 上执行多 seed 评测。
+
+### 本地一键运行命令
 
 ```bash
-# 统一 CLI（基于 UnifiedToolRegistry；`agentmem-core`、`agentmem` 与兼容别名 `memengine` 均可用）
-python3 -m agentmem_core.cli --db-url ./memory.db retain "拔牙后一周内禁饮咖啡。" --ttl-seconds 604800
-python3 -m agentmem_core.cli --db-url ./memory.db recall "最近喝咖啡有什么限制？" --mode reconstructive
-
-# 启动 HTTP 服务（同时挂载统一 /v2/memory/* 与带 Deprecation 头的 /v1/* 兼容层）
-AGENTMEM_CORE_DB_URL=./memory.db AGENTMEM_CORE_API_KEY=your-key agentmem-core serve
-```
-
-| 路由组 | 端点 | 状态与说明 |
-| :--- | :--- | :--- |
-| **Unified `/v2/memory/*`** | `POST /v2/memory/retain`、`write-rule`、`recall`、`context`、`answer`、`reflect`、`consolidate` | **主推**：由 `UnifiedToolRegistry` 自动生成 |
-| **Unified `/v2/memory/*`** | `POST /v2/memory/read-note`、`tree`、`compact`、`rollback`、`drilldown`、`history`、`GET /v2/memory/tools` | **主推**：派生 VFS/Profile 视图与工具 Schema |
-| **Legacy `/v1/*`** | `POST /v1/retain`、`/recall`、`/answer`、`/reflect`、`/consolidate`、`/tasks/*` | **已弃用兼容层**（返回 `Deprecation: true` 与 `Sunset` 头） |
-| **Legacy `/v2/vfs/*`** | `POST /v2/vfs/*` | 保留旧 VFS 独立路由供过渡期兼容 |
-
----
-
-## 模型与环境变量配置
-
-默认离线使用 `MockLLMClient`（确定性 Reader）与 `HashedTfidfEmbedder`。配置 OpenAI 兼容环境变量即可切换真实在线 LLM / Embedding / Reranker 与 LLM-as-a-Judge：
-
-| 环境变量 | 含义 |
-| :--- | :--- |
-| `AGENTMEM_CORE_DB_URL` *(兼容 `MEMENGINE_DB_URL`)* | 存储连接地址（SQLite、`lancedb:///...`、`postgresql://...`）。 |
-| `AGENTMEM_CORE_API_KEY` *(兼容 `MEMENGINE_API_KEY`)* | HTTP 服务 Bearer 鉴权密钥。 |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | OpenAI 兼容 Chat 接口（Reader、抽取与做梦共用）。 |
-| `JUDGE_BASE_URL` / `JUDGE_API_KEY` / `JUDGE_MODEL` | 端到端评测 LLM-as-a-Judge 接口。 |
-| `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` | 远程 `/embeddings` 向量编码服务。 |
-| `RERANK_BASE_URL` / `RERANK_MODEL` / `RERANK_API_KEY` | 远程 `/rerank` 精排服务。 |
-
----
-
-## 评测与复现命令
-
-```bash
-# 1. 全量单元测试（设置 MEMENGINE_TEST_PG_DSN / TEST_POSTGRES_DSN 自动纳入实时 PG16 合约测试）
+# 1. 全量单测 + 契约测试 + C1/C2/C3 + MCP/CC/Codex 宿主测试
 python3 -m pytest -q
 
-# 2. 4 项自建技术回归门禁（Exact / Version / Chrono / Stress + 100K Long-Horizon，纯 PASS/FAIL）
+# 2. 确定性 PASS/FAIL 回归门禁
 python3 -m eval.gates.run_gates
 
-# 3. 离线端到端 QA + Turn 级检索 + 6 桶归因（冻结 500 题队列，零 API Key）
-python3 -m eval.qa.run_qa --engines unified --consolidate --workers 4 \
-  --out eval/results/qa_offline.json --md-out eval/results/qa_offline.md
+# 3. C3 零 LLM Ambient 毫秒级压测
+python3 -m eval.ambient_perf_bench --facts 1000 --queries 240
 
-# 4. 在线真实 LLM + LLM-as-a-Judge 端到端全量基准（用于横向对标 Hindsight 等外部系统）
-LLM_BASE_URL=... LLM_API_KEY=... JUDGE_API_KEY=... \
-python3 -m eval.qa.run_qa --engines unified --consolidate \
-  --lme-sample 0 --locomo-sample 0 --membench-per-cat 200 \
-  --llm-model <20b-or-frontier-model> --judge-model <judge-model> \
-  --out eval/results/qa_live_llm.json --md-out eval/results/qa_live_llm.md
+# 4. 步骤 C Coding 经验复用 / 陈旧陷阱 / 误注入评测
+python3 -m eval.coding.run_coding_eval
 
-# 5. M5 端到端消融矩阵（6 组单因子开关对照）
-python3 -m eval.qa.m5_ablation --workers 4
+# 5. 步骤 D 混合场景 (RealMem-style) 评测
+python3 -m eval.hybrid.realmem_eval
+
+# 6. 步骤 A 冻结协议三臂基线（dev 切分 3 seeds；接入真实 LLM/Judge 只需追加 --llm-model / --extractor-model / --judge-model）
+python3 -m eval.qa.run_qa \
+  --protocol eval/protocol.yaml \
+  --engines full_context turn_rrf unified \
+  --benchmarks longmemeval locomo \
+  --split dev --seeds 42 137 2026 \
+  --out eval/results/step_a_3arm_dev_baseline.json
 ```
 
-完整设计文档与评测存档：[设计说明](docs/DESIGN.md) · [规格文档](docs/SPEC.md) · [包名迁移方案](docs/RENAME_PLAN.md) · [M5 消融报告](eval/results/m5_ablation_report.md) · [M5 裁剪实测报告](eval/results/m5_unified_pruned_report.md) · [历史存储与检索报告](eval/results/full_memory_benchmark_report.md)
+---
+
+## 五、迁移指南与弃用时间表
+
+| 遗留接口 / 名称 | 推荐替代 | 当前状态 | 计划移除时间 |
+| :--- | :--- | :--- | :--- |
+| `import memengine` / `memengine` CLI / `MEMENGINE_*` | `import agentmem_core` / `agentmem-core` CLI / `AGENTMEM_CORE_*` | 兼容 shim（发出 `DeprecationWarning`） | `v1.0.0` |
+| HTTP `/v1/*` | HTTP `/v2/memory/*`（由 `UnifiedToolRegistry` 统一派生） | 转发至 `UnifiedMemoryEngine`，带 `Deprecation: true` 与 `Sunset` 头 | `2027-06-01` |
+| HTTP `/v2/vfs/*` | HTTP `/v2/memory/*` + `profile="coding"` | 默认转发至 `UnifiedMemoryEngine.vfs`（零独立 `vfs_nodes` 表） | `2027-06-01` |
+| `enable_bipolar=True` / `enable_recency_rerank=True` | 默认均已关闭（经 M5 消融证实关闭后 QA 零下降、MRR 上升） | 仅保留为显式可选 feature flag | `v1.0.0` 评估清理 |

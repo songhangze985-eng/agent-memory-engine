@@ -13,3 +13,5 @@ eval/longmemeval/.cache/
 *.pem
 *.key
 .DS_Store
+.agentmem/
+node_modules/
