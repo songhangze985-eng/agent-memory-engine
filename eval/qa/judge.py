@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from memengine.llm import OpenAICompatibleClient, loads_json_object
+from agentmem_core.llm import OpenAICompatibleClient, loads_json_object
 
 _STOPWORDS = frozenset(
     "a an the and or but in on at to for of with by from as is are was were be been being "

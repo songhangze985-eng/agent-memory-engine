@@ -1,14 +1,14 @@
 from eval.membench.items import format_question, question_stem, strip_mcq_options
-from memengine.categories import (
+from agentmem_core.categories import (
     CATEGORY_ENUM,
     attach_dual_zkeys,
     normalize_category_key,
     validate_category_keys,
 )
-from memengine.engine import CognitiveMemoryEngine
-from memengine.llm import MockLLMClient
-from memengine.queryparse import parse_query_rules
-from memengine.vector import score_quantiles, weighted_rrf
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.llm import MockLLMClient
+from agentmem_core.queryparse import parse_query_rules
+from agentmem_core.vector import score_quantiles, weighted_rrf
 
 
 def test_category_enum_is_the_fixed_twelve():
@@ -125,7 +125,7 @@ def test_search_uses_question_stem_and_ignores_options():
 
 
 def test_shared_category_does_not_overwrite_different_entities():
-    from memengine.policy import decide_layout
+    from agentmem_core.policy import decide_layout
 
     first = {
         "text": "设计评审的预算改为3000元",

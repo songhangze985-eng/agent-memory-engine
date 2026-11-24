@@ -5,7 +5,7 @@ from pathlib import Path
 
 from eval.paired import make_engine
 from eval.static_report import table, write_result
-from memengine.versioning import parse_version, score_version_match, version_order
+from agentmem_core.versioning import parse_version, score_version_match, version_order
 
 PRODUCTS = ("Python", "CMake", "CUDA", "Ubuntu", "API", "NodeJS", "PostgreSQL", "SQLite", "Java", "Rust")
 

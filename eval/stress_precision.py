@@ -10,8 +10,8 @@ from eval.evidence_ablation import Question, Turn, measure_pair
 from eval.metrics import mean, print_retrieval_reports, retrieval_report
 from eval.paired import LABELS, TOP_K, TOKEN_BUDGET, add_backend_argument, cli_backend, evaluate_pair, make_engine
 from eval.stress_corpus import stress_dialogue
-from memengine.distance import consolidation_count, compute_bipolar_radius, is_noise
-from memengine.llm import build_llm_from_env
+from agentmem_core.distance import consolidation_count, compute_bipolar_radius, is_noise
+from agentmem_core.llm import build_llm_from_env
 
 
 def run(sample=20, seed=42, mode="mock", backend="hashed"):

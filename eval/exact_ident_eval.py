@@ -7,7 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 from eval.paired import LABELS, add_backend_argument, cli_backend, evaluate_pair, make_engine
-from memengine.identifiers import extract_identifiers
+from agentmem_core.identifiers import extract_identifiers
 
 _GROUPS = {
     "version": ("v3.10", "v3.11", "v3.12", "v3.11.1", "3.11.2", "v3.1", "v2.4.1-rc3",

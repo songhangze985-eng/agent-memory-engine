@@ -5,12 +5,12 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
-from memengine import CognitiveMemoryEngine
-from memengine.distance import bipolar_weight, compute_bipolar_radius
-from memengine.store import Store
-from memengine.temporal import parse_temporal_intent
-from memengine.textutil import normalize_entity, tokenize_for_fts
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core import CognitiveMemoryEngine
+from agentmem_core.distance import bipolar_weight, compute_bipolar_radius
+from agentmem_core.store import Store
+from agentmem_core.temporal import parse_temporal_intent
+from agentmem_core.textutil import normalize_entity, tokenize_for_fts
+from agentmem_core.vector import HashedTfidfEmbedder
 
 
 def stamp(date):

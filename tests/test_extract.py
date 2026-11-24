@@ -1,5 +1,5 @@
 from eval.corpus import FACTS, FILLER, NOISE_SENTENCES
-from memengine.extract import extract_facts
+from agentmem_core.extract import extract_facts
 
 
 def test_fact_bank_extracts_the_rare_value():

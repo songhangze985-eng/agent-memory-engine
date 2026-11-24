@@ -1,9 +1,9 @@
 """Tests for Milestone M2: slot-level supersede, as_of/time-window filtering, recency tie-breaker & temporal reasoning."""
 from __future__ import annotations
 
-from memengine.chrono import parse_session_clock
-from memengine.core import RecallConfig, UnifiedMemoryEngine, build_query_plan
-from memengine.core.supersede import extract_state_slot, resolve_relative_occurrence
+from agentmem_core.chrono import parse_session_clock
+from agentmem_core.core import RecallConfig, UnifiedMemoryEngine, build_query_plan
+from agentmem_core.core.supersede import extract_state_slot, resolve_relative_occurrence
 
 
 def test_slot_extraction_and_supersede_chain():

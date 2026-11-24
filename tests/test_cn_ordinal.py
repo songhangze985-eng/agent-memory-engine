@@ -1,9 +1,9 @@
 """Chinese ordinals must agree between time parsing and revision travel."""
 
-from memengine.engine import CognitiveMemoryEngine
-from memengine.policy import travel_revision
-from memengine.temporal import parse_temporal_intent
-from memengine.textutil import parse_cn_number
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.policy import travel_revision
+from agentmem_core.temporal import parse_temporal_intent
+from agentmem_core.textutil import parse_cn_number
 
 NOW = 1000.0
 

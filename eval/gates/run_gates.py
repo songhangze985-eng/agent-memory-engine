@@ -28,7 +28,7 @@ def run_all_gates(*, seed: int = 42, include_long_horizon: bool = True) -> dict:
         "all_passed": all_passed,
         "elapsed_s": round(time.perf_counter() - started, 2),
         "provenance": build_provenance(
-            engine="memengine",
+            engine="agentmem-core",
             embedder="HashedTfidfEmbedder",
             reranker="CalibratedLocalReranker",
             llm="MockLLMClient",

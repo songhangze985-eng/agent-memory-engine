@@ -4,7 +4,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from memengine.core import RecallConfig, UnifiedMemoryEngine
+from agentmem_core.core import RecallConfig, UnifiedMemoryEngine
 
 
 def test_m5_pruned_defaults_disable_bipolar_and_recency_by_default():
@@ -31,12 +31,12 @@ def test_m5_pruned_defaults_disable_bipolar_and_recency_by_default():
 def test_core_packages_have_zero_contrib_dependencies():
     repo_root = Path(__file__).resolve().parents[1]
     core_dirs = [
-        repo_root / "memengine" / "core",
-        repo_root / "memengine" / "views",
-        repo_root / "memengine" / "adapters",
-        repo_root / "memengine" / "storage",
+        repo_root / "agentmem_core" / "core",
+        repo_root / "agentmem_core" / "views",
+        repo_root / "agentmem_core" / "adapters",
+        repo_root / "agentmem_core" / "storage",
     ]
-    forbidden = {"memengine.contrib", "qdrant_client", "boto3"}
+    forbidden = {"agentmem_core.contrib", "qdrant_client", "boto3"}
     offenders: list[str] = []
     for directory in core_dirs:
         for path in sorted(directory.glob("*.py")):

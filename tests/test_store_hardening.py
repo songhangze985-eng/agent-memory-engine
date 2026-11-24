@@ -1,9 +1,9 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
-from memengine.store import Store
-from memengine.textutil import estimate_tokens
-from memengine.timeline import TimelineBook
+from agentmem_core.store import Store
+from agentmem_core.textutil import estimate_tokens
+from agentmem_core.timeline import TimelineBook
 
 
 def test_legacy_database_migrates_idempotently(tmp_path):

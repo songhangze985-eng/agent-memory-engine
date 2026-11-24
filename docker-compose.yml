@@ -1,9 +1,9 @@
 services:
   postgres:
     # Default: VectorChord Suite (PostgreSQL 16 + pgvector + vchord RaBitQ + vchord_bm25 + pg_tokenizer).
-    # Override with MEMENGINE_PG_IMAGE=paradedb/paradedb:latest (ParadeDB pg_search + pgvector)
-    # or MEMENGINE_PG_IMAGE=pgvector/pgvector:pg16 (classic pgvector HNSW).
-    image: ${MEMENGINE_PG_IMAGE:-tensorchord/vchord-suite:pg16-latest}
+    # Override with AGENTMEM_CORE_PG_IMAGE (or MEMENGINE_PG_IMAGE) = paradedb/paradedb:latest
+    # or pgvector/pgvector:pg16 (classic pgvector HNSW).
+    image: ${AGENTMEM_CORE_PG_IMAGE:-${MEMENGINE_PG_IMAGE:-tensorchord/vchord-suite:pg16-latest}}
     environment:
       POSTGRES_DB: memengine
       POSTGRES_USER: memengine
@@ -15,11 +15,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-  memengine:
+  agentmem-core:
     build: .
     environment:
-      MEMENGINE_DB_URL: ${MEMENGINE_DB_URL:?set MEMENGINE_DB_URL}
-      MEMENGINE_API_KEY: ${MEMENGINE_API_KEY:?set MEMENGINE_API_KEY}
+      AGENTMEM_CORE_DB_URL: ${AGENTMEM_CORE_DB_URL:-${MEMENGINE_DB_URL:?set AGENTMEM_CORE_DB_URL or MEMENGINE_DB_URL}}
+      AGENTMEM_CORE_API_KEY: ${AGENTMEM_CORE_API_KEY:-${MEMENGINE_API_KEY:?set AGENTMEM_CORE_API_KEY or MEMENGINE_API_KEY}}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

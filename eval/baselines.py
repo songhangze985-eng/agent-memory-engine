@@ -11,9 +11,9 @@ from collections import deque
 
 import numpy as np
 
-from memengine.embeddings import HashingEmbedder
-from memengine.extract import extract_facts
-from memengine.textutil import estimate_tokens
+from agentmem_core.embeddings import HashingEmbedder
+from agentmem_core.extract import extract_facts
+from agentmem_core.textutil import estimate_tokens
 
 REFUSAL = "根据现有记忆，没有足够的直接关联可以确认这一点。"
 

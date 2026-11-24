@@ -1,4 +1,7 @@
-# Package Rename Migration Plan (`memengine` → Unambiguous Package Name)
+# Package Rename Migration Plan (`memengine` → `agentmem-core` / `agentmem_core`)
+
+> **Status: Phase A EXECUTED (`v0.3.0`)** — Approved by maintainer (`agentmem-core`).
+> Core distribution is now `agentmem-core` (`import agentmem_core`, CLI `agentmem-core` / `agentmem`, env prefix `AGENTMEM_CORE_*`). Legacy `import memengine`, `memengine` CLI, and `MEMENGINE_*` env vars remain 100% functional via `memengine/__init__.py` alias shim through `v0.3.x`.
 
 ## 1. Why Rename
 

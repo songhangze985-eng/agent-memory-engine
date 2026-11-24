@@ -1,5 +1,5 @@
-from memengine.engine import CognitiveMemoryEngine
-from memengine.router import CASUAL, TASK
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.router import CASUAL, TASK
 
 
 def test_isolated_fact_survives_noise_and_reload(tmp_path):

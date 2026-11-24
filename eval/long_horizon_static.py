@@ -7,7 +7,7 @@ from pathlib import Path
 from eval.metrics import mean
 from eval.paired import make_engine
 from eval.static_report import table, write_result
-from memengine.assembler import assemble_context
+from agentmem_core.assembler import assemble_context
 
 DAY = 86400
 SCALES = (500, 1500, 3500)

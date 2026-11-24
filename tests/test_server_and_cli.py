@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from memengine.cli import main
-from memengine.client import MemoryClient
+from agentmem_core.cli import main
+from agentmem_core.client import MemoryClient
 
 
 def test_sqlite_cli(tmp_path, capsys):
@@ -20,8 +20,8 @@ def test_fastapi_and_urllib_client(monkeypatch):
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
     from fastapi.testclient import TestClient
-    from memengine.server import create_app
-    import memengine.client as transport
+    from agentmem_core.server import create_app
+    import agentmem_core.client as transport
 
     headers = {"Authorization": "Bearer service-key"}
     with TestClient(create_app(db_url=":memory:", api_key="service-key")) as server:

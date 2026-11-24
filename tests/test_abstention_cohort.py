@@ -82,7 +82,7 @@ def test_calibration_counts_source_groups_once_and_keeps_threshold_ties():
 
 
 def test_coordinated_queries_reuse_scope_without_matching_a_different_choice():
-    from memengine.retrieval.abstention import abstention_features
+    from agentmem_core.retrieval.abstention import abstention_features
 
     engine = make_engine("mock")
     with closing(engine.store):
@@ -100,7 +100,7 @@ def test_coordinated_queries_reuse_scope_without_matching_a_different_choice():
 
 
 def test_facet_support_requires_one_visible_statement_with_a_value():
-    from memengine.retrieval.coverage import supported_facet
+    from agentmem_core.retrieval.coverage import supported_facet
 
     template = {"role": "user", "status": "active", "source_turn_ids": [1], "speaker": "Alice", "entity_anchor": True}
     target = ["Which book did I choose on the Harbor Line trip"]

@@ -1,13 +1,15 @@
 [project]
-name = "memengine"
-version = "0.2.0"
-description = "认知记忆引擎：规则路由、渐近原点毒圈、平行 Z 轴坍缩与 3D 笔记本。"
+name = "agentmem-core"
+version = "0.3.0"
+description = "统一单核双时态 Agent 记忆引擎（UnifiedMemoryEngine）：L0 冷存 + FTS5、统一双时态事实账本、派生 VFS/画像视图、槽位更新、实体图覆盖打包与反思做梦。"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24"]
 
 [project.scripts]
-memengine = "memengine.cli:main"
+agentmem-core = "agentmem_core.cli:main"
+agentmem = "agentmem_core.cli:main"
+memengine = "agentmem_core.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
@@ -23,10 +25,10 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["memengine*"]
+include = ["agentmem_core*", "memengine*"]
 
 [tool.setuptools.data-files]
-"share/memengine/prompts" = ["prompts/*.txt"]
+"share/agentmem_core/prompts" = ["prompts/*.txt"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

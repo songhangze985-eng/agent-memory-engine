@@ -6,7 +6,7 @@ from pathlib import Path
 
 from eval.paired import make_engine
 from eval.static_report import table, write_result
-from memengine.chrono import days_between, interval_score, parse_session_clock, resolve_temporal_spans
+from agentmem_core.chrono import days_between, interval_score, parse_session_clock, resolve_temporal_spans
 
 ANCHOR = "2024-03-11T13:00:00Z"
 WINDOWS = [

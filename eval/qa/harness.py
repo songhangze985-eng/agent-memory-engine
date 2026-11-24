@@ -20,8 +20,8 @@ from eval.retrieval.turn_level import (
     project_hit_to_turns,
     summarize_turn_retrieval,
 )
-from memengine.textutil import estimate_tokens
-from memengine.vfs import VFSMemoryEngine
+from agentmem_core.textutil import estimate_tokens
+from agentmem_core.vfs import VFSMemoryEngine
 
 TOKEN_BUDGET = 2048
 
@@ -93,7 +93,7 @@ def _eval_v1_group(
 ) -> list[dict[str, Any]]:
     """Run v1_standard, v1_chronicle, or unified engine over one dialogue group."""
     if engine_kind == "unified":
-        from memengine.core import UnifiedMemoryEngine
+        from agentmem_core.core import UnifiedMemoryEngine
 
         engine = UnifiedMemoryEngine(":memory:", config=recall_config)
     else:

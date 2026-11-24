@@ -5,12 +5,12 @@ import numpy as np
 import pytest
 
 from eval import regression_guard
-from memengine import CognitiveMemoryEngine
-from memengine import neural_onnx
-from memengine.neural import NeuralBackendUnavailableError
-from memengine.reranker import CalibratedLocalReranker
-from memengine.store import Store
-from memengine.textutil import estimate_tokens
+from agentmem_core import CognitiveMemoryEngine
+from agentmem_core import neural_onnx
+from agentmem_core.neural import NeuralBackendUnavailableError
+from agentmem_core.reranker import CalibratedLocalReranker
+from agentmem_core.store import Store
+from agentmem_core.textutil import estimate_tokens
 
 
 def put(store, plain, time, *, scope=("default", "default", "conversation"), role="user"):
@@ -98,7 +98,7 @@ def test_onnx_is_normalized_and_calibrated_without_torch(monkeypatch):
 
 
 def test_onnx_preferred_then_torch_fallback(monkeypatch):
-    from memengine import neural
+    from agentmem_core import neural
 
     monkeypatch.setattr(neural_onnx, "OnnxNeuralEmbedder", lambda: "embed")
     monkeypatch.setattr(neural_onnx, "OnnxCrossEncoderReranker", lambda: "rank")

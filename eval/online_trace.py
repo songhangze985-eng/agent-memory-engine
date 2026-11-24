@@ -20,10 +20,10 @@ from eval.metrics import evidence_metrics, mean, percentile
 from eval.packing_replay import replay, replay_table, summarize_replays
 from eval.paired import TOKEN_BUDGET, make_engine
 from eval.static_report import number, table, write_result
-from memengine.assembler import assemble_context
-from memengine.engine import _fit_context
-from memengine.neural_onnx import OnnxCrossEncoderReranker
-from memengine.retrieval.rerank_budget import PAIR_TOKENS
+from agentmem_core.assembler import assemble_context
+from agentmem_core.engine import _fit_context
+from agentmem_core.neural_onnx import OnnxCrossEncoderReranker
+from agentmem_core.retrieval.rerank_budget import PAIR_TOKENS
 
 
 BENCHMARK = "LongMemEval-S"
@@ -133,8 +133,8 @@ def run_group(group, *, backend, mode, packing_replay=False, fusion_ablation=Fal
                 if session is not None:
                     stack.enter_context(observe_onnx(session, batches))
                 if packing_replay:
-                    packer = stack.enter_context(patch("memengine.engine._fit_context", wraps=_fit_context))
-                    assembler = stack.enter_context(patch("memengine.engine.assemble_context", wraps=assemble_context))
+                    packer = stack.enter_context(patch("agentmem_core.engine._fit_context", wraps=_fit_context))
+                    assembler = stack.enter_context(patch("agentmem_core.engine.assemble_context", wraps=assemble_context))
                 start = perf_counter()
                 bundle = engine.build_context(question.text, reference_time=question.timestamp, mode=mode,
                                               token_budget=TOKEN_BUDGET, include_short_term=False, _trace=passes)

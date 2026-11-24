@@ -1,5 +1,5 @@
-from memengine.policy import decide_origin
-from memengine.zaxis import collapse_and_scan_z_axis, order_far_to_near
+from agentmem_core.policy import decide_origin
+from agentmem_core.zaxis import collapse_and_scan_z_axis, order_far_to_near
 
 
 def test_far_to_near_scan_isolates_buckets_and_dedups():

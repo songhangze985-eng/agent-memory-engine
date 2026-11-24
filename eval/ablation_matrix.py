@@ -17,12 +17,12 @@ from eval.metrics import retrieval_report
 from eval.paired import Pair, TOKEN_BUDGET, TOP_K, attach_consolidated_context, evaluate_pair, make_engine
 from eval.static_report import number, table, write_result
 from eval.stress_corpus import stress_dialogue
-from memengine.assembler import assemble_context
-from memengine.engine import _fit_context, baseline_rrf
-from memengine.identifiers import eligible_identifiers
-from memengine.queryparse import parse_query_rules
-from memengine.reranker import anchored_relevance
-from memengine.temporal import parse_temporal_intent
+from agentmem_core.assembler import assemble_context
+from agentmem_core.engine import _fit_context, baseline_rrf
+from agentmem_core.identifiers import eligible_identifiers
+from agentmem_core.queryparse import parse_query_rules
+from agentmem_core.reranker import anchored_relevance
+from agentmem_core.temporal import parse_temporal_intent
 
 LAYERS = ("Pure RRF", "Exact Identifier Pinning", "Turn-Pair Anchoring", "Bipolar Ring & Belt",
           "Bi-temporal Competing Recency", "Compact Consolidation")
@@ -69,11 +69,11 @@ def evaluate_group(engine, questions, raw_ids):
             stack.enter_context(patch.object(engine.store, "search_entity_inverted", return_value=[]))
             if stage < 4:
                 stack.enter_context(patch.object(engine.store, "search_temporal", return_value=[]))
-                stack.enter_context(patch("memengine.engine.temporal_competition", return_value={}))
+                stack.enter_context(patch("agentmem_core.engine.temporal_competition", return_value={}))
             if stage < 2:
                 stack.enter_context(patch.object(engine.store, "search_turn_anchors", return_value=([], [])))
             if stage == 0:
-                stack.enter_context(patch("memengine.engine.extract_identifiers", return_value=[]))
+                stack.enter_context(patch("agentmem_core.engine.extract_identifiers", return_value=[]))
             if stage == 3:
                 stack.enter_context(patch.object(engine, "superseded_weight", 1.0))
             if stage >= 3:

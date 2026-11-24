@@ -6,13 +6,13 @@ import sys
 from time import perf_counter
 from unittest.mock import patch
 
-from memengine.assembler import assemble_context, render_prefix
-from memengine.engine import CognitiveMemoryEngine, _fit_context, baseline_rrf
-from memengine.llm import MockLLMClient, build_llm_from_env
-from memengine.neural import NeuralBackendUnavailableError, load_local_backends
-from memengine.reranker import CalibratedLocalReranker
-from memengine.textutil import estimate_tokens
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core.assembler import assemble_context, render_prefix
+from agentmem_core.engine import CognitiveMemoryEngine, _fit_context, baseline_rrf
+from agentmem_core.llm import MockLLMClient, build_llm_from_env
+from agentmem_core.neural import NeuralBackendUnavailableError, load_local_backends
+from agentmem_core.reranker import CalibratedLocalReranker
+from agentmem_core.textutil import estimate_tokens
+from agentmem_core.vector import HashedTfidfEmbedder
 
 TOP_K = 10
 TOKEN_BUDGET = 2048

@@ -1,7 +1,7 @@
 import json
 
-from memengine.engine import CognitiveMemoryEngine
-from memengine.llm import MockLLMClient
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.llm import MockLLMClient
 
 
 class _Evil(MockLLMClient):

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from memengine import CognitiveMemoryEngine
-from memengine.textutil import estimate_tokens
+from agentmem_core import CognitiveMemoryEngine
+from agentmem_core.textutil import estimate_tokens
 
 
 def keep(engine, text, stamp=1, **kwargs):

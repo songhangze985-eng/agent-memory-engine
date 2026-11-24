@@ -1,4 +1,4 @@
-from memengine.router import CASUAL, TASK, match_entities, route_query
+from agentmem_core.router import CASUAL, TASK, match_entities, route_query
 
 
 KEYS = [

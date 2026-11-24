@@ -4,12 +4,12 @@ from hashlib import sha256
 
 import pytest
 
-from memengine import CognitiveMemoryEngine
-from memengine.distance import BELT, INNER, OUTER, bipolar_weight, compute_bipolar_radius
-from memengine.gate import precision_gate
-from memengine.reranker import CalibratedLocalReranker, OpenAICompatibleReranker
-from memengine.textutil import estimate_tokens
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core import CognitiveMemoryEngine
+from agentmem_core.distance import BELT, INNER, OUTER, bipolar_weight, compute_bipolar_radius
+from agentmem_core.gate import precision_gate
+from agentmem_core.reranker import CalibratedLocalReranker, OpenAICompatibleReranker
+from agentmem_core.textutil import estimate_tokens
+from agentmem_core.vector import HashedTfidfEmbedder
 
 
 def engine(**kwargs):

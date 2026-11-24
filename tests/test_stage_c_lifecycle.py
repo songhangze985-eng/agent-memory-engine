@@ -3,12 +3,12 @@ import json
 
 import pytest
 
-from memengine import CognitiveMemoryEngine
-from memengine.lifecycle import DAY
-from memengine.reranker import CalibratedLocalReranker
-from memengine.store import Store
-from memengine.textutil import estimate_tokens
-from memengine.vector import HashedTfidfEmbedder
+from agentmem_core import CognitiveMemoryEngine
+from agentmem_core.lifecycle import DAY
+from agentmem_core.reranker import CalibratedLocalReranker
+from agentmem_core.store import Store
+from agentmem_core.textutil import estimate_tokens
+from agentmem_core.vector import HashedTfidfEmbedder
 
 
 def engine(**kwargs):

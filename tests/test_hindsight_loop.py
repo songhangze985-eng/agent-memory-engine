@@ -2,11 +2,11 @@ from contextlib import closing
 from dataclasses import replace
 from unittest.mock import Mock
 
-from memengine.chrono import parse_session_clock, resolve_temporal_spans
-from memengine.engine import CognitiveMemoryEngine
-from memengine.retrieval.activation import spreading_activation
-from memengine.storage.base import RecallFilter
-from memengine.verification import supports_claim
+from agentmem_core.chrono import parse_session_clock, resolve_temporal_spans
+from agentmem_core.engine import CognitiveMemoryEngine
+from agentmem_core.retrieval.activation import spreading_activation
+from agentmem_core.storage.base import RecallFilter
+from agentmem_core.verification import supports_claim
 
 
 def retain(engine, text, *, speaker="Alice Chen", mention_time="2024-06-15", session_id="s1", user_id="default"):
@@ -460,13 +460,13 @@ def test_allergy_revocation_across_sessions_uses_current_and_historical_evidence
 
 
 def test_allergy_slots_repair_preexisting_cross_session_statements(tmp_path, monkeypatch):
-    from memengine.storage.sqlite import SQLiteStore
+    from agentmem_core.storage.sqlite import SQLiteStore
 
     path = tmp_path / "legacy-allergy.db"
     engine = CognitiveMemoryEngine(db_path=str(path))
     with closing(engine.store) as store, monkeypatch.context() as legacy:
-        legacy.setattr("memengine.engine.allergy_slot", lambda *_: None)
-        legacy.setattr("memengine.storage.chronicle.allergy_slot", lambda *_: None)
+        legacy.setattr("agentmem_core.engine.allergy_slot", lambda *_: None)
+        legacy.setattr("agentmem_core.storage.chronicle.allergy_slot", lambda *_: None)
         old = retain(engine, "I am allergic to peanuts.", speaker="Alice", mention_time="2024-06-01", session_id="one")
         new = retain(engine, "I am no longer allergic to peanuts.", speaker="Alice", mention_time="2024-06-02", session_id="two")
         assert store.get_line(old, scope=("default", "default", None))["active"]

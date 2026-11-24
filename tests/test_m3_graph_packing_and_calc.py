@@ -1,8 +1,8 @@
 """Tests for Milestone M3: entity-graph enumeration, coverage-first packing & deterministic arithmetic."""
 from __future__ import annotations
 
-from memengine.chrono import parse_session_clock
-from memengine.core import UnifiedMemoryEngine
+from agentmem_core.chrono import parse_session_clock
+from agentmem_core.core import UnifiedMemoryEngine
 
 
 def test_m3_deterministic_sum_and_diff_across_sessions():

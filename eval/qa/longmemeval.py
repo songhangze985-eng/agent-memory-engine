@@ -10,7 +10,7 @@ from eval.evidence_ablation import Turn, sample_rows
 from eval.longmemeval.run import category as lme_category
 from eval.qa.harness import QAItem, evaluate_group_qa, summarize_qa_rows
 from eval.qa.provenance import build_provenance
-from memengine.chrono import parse_session_clock as _stamp
+from agentmem_core.chrono import parse_session_clock as _stamp
 
 LONGMEMEVAL_CATEGORIES = [
     "single-session-user",
