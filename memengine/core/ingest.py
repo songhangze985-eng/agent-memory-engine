@@ -6,6 +6,7 @@ import time
 from memengine.chrono import parse_session_clock
 from memengine.core.episodes import EpisodeLog
 from memengine.core.facts import UnifiedFactLedger
+from memengine.core.supersede import SlotSupersedeTracker, resolve_relative_occurrence
 from memengine.lifecycle import explicit_preference
 from memengine.vfs.models import (
     enforce_rule_state_machine,
@@ -32,6 +33,7 @@ def ingest_conversational_turn(
     ledger: UnifiedFactLedger,
     text: str,
     *,
+    supersede: SlotSupersedeTracker | None = None,
     user_id: str = "default",
     agent_id: str = "default",
     session_id: str = "default",
@@ -102,10 +104,12 @@ def ingest_conversational_turn(
             timestamp=now,
         )
 
-    # Attach unified kind + L0 provenance pointer to every created/updated fact
+    # Attach unified kind + L0 provenance pointer + M2 slot-level supersede & relative occurrence date
     created_ids = [op["line_id"] for op in res.get("operations", ()) if op.get("line_id")]
+    superseded_all: list[str] = []
     if created_ids:
         rows = engine.store.facts_by_ids(created_ids, scope=(user_id, agent_id, None))
+        resolved_occ = resolve_relative_occurrence(text, now if mention is None else mention)
         for fact in rows:
             kind = _infer_conversational_kind(
                 role=role,
@@ -127,11 +131,33 @@ def ingest_conversational_turn(
                 source_transcript_ids=[rec.transcript_id],
                 timestamp=now,
             )
+            # Persist relative occurrence_start when turn uses relative time ("yesterday", "3 weeks ago")
+            if resolved_occ is not None and not fact.get("occurrence_start"):
+                try:
+                    engine.store.conn.execute(
+                        "UPDATE facts SET occurrence_start=? WHERE id=? AND occurrence_start IS NULL",
+                        (float(resolved_occ), fact["id"]),
+                    )
+                except Exception:
+                    pass
+            # Slot-level supersede: atomically mark older conflicting same-slot facts superseded
+            if supersede is not None and role == "user":
+                sup_res = supersede.register_and_supersede(
+                    fact_id=fact["id"],
+                    text=fact["plain"],
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    speaker=speaker or role,
+                    event_ts=float(resolved_occ if resolved_occ is not None else now),
+                )
+                if sup_res and sup_res["superseded_ids"]:
+                    superseded_all.extend(sup_res["superseded_ids"])
     engine.store.commit()
     return {
         **res,
         "deduplicated": False,
         "transcript_id": rec.transcript_id,
+        "superseded_fact_ids": superseded_all,
         "track": "conversational",
     }
 

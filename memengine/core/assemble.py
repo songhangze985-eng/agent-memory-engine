@@ -5,9 +5,11 @@ from hashlib import sha256
 from typing import Literal
 
 from memengine.assembler import assemble_context
+from memengine.chrono import date_iso
 from memengine.core.facts import UnifiedFactLedger
 from memengine.core.plan import QueryPlan, RecallConfig
-from memengine.textutil import estimate_tokens
+from memengine.core.supersede import SlotSupersedeTracker
+from memengine.textutil import estimate_tokens, strip_step_tags
 from memengine.views.profile import ProfileView
 from memengine.views.vfs import VFSView
 
@@ -19,6 +21,7 @@ def unified_assemble(
     profile_view: ProfileView,
     recall_result: dict,
     *,
+    supersede: SlotSupersedeTracker | None = None,
     query: str,
     user_id: str = "default",
     agent_id: str = "default",
@@ -138,9 +141,43 @@ def unified_assemble(
     fallback_turns = list(recall_result.get("episode_fallback_turns") or ())
     extra_snippets: list[str] = []
     seen_turns = set(evidence_turn_ids)
+    seen_fact_ids = {item["id"] for item in items if item.get("kind") in {"fact", "observation"} and item.get("id")}
     for item in items:
         for tid in item.get("source_turn_ids") or ():
             seen_turns.add(int(tid))
+
+    # M2 Historical / change-direction supersede-chain expansion
+    qplan = recall_result.get("query_plan")
+    if supersede is not None and qplan is not None and (qplan.is_historical or qplan.change_direction_ask):
+        chains = supersede.chain_for_facts(list(seen_fact_ids), user_id=user_id, agent_id=agent_id)
+        for skey, members in chains.items():
+            for member in members:
+                fid = member["fact_id"]
+                if fid in seen_fact_ids:
+                    continue
+                d_str = date_iso(member.get("event_ts") or member.get("event_time_start")) or ""
+                tag = "[历史版本" + (f" {d_str}" if d_str else "") + "]"
+                snippet = f"{tag} {strip_step_tags(member['plain']).strip()}"
+                cost = estimate_tokens(snippet) + 1
+                if total_tokens + coding_header_tokens + cost > token_budget:
+                    continue
+                extra_snippets.append(snippet)
+                seen_fact_ids.add(fid)
+                ev_id = f"fact:{fid}"
+                hist_item = {
+                    "id": fid,
+                    "kind": "fact",
+                    "plain": member["plain"],
+                    "text": snippet,
+                    "status": member["status"],
+                    "event_time_start": member["event_time_start"],
+                    "mention_time": member["event_ts"],
+                    "evidence_id": ev_id,
+                    "historical_slot": skey,
+                }
+                items.append(hist_item)
+                evidence_map[ev_id] = hist_item
+                total_tokens += cost
     for ep in fallback_turns:
         tid = int(ep["turn_id"])
         if tid in seen_turns:

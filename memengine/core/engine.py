@@ -12,6 +12,7 @@ from memengine.core.facts import UnifiedFactLedger
 from memengine.core.ingest import ingest_conversational_turn, ingest_procedural_rule
 from memengine.core.plan import QueryPlan, RecallConfig, build_query_plan
 from memengine.core.recall import unified_recall
+from memengine.core.supersede import SlotSupersedeTracker
 from memengine.engine import CognitiveMemoryEngine
 from memengine.storage.base import RecallFilter
 from memengine.views.profile import ProfileView
@@ -68,6 +69,7 @@ class UnifiedMemoryEngine:
             transcript_store=transcript_store,
         )
         self.ledger = UnifiedFactLedger(self.store)
+        self.supersede = SlotSupersedeTracker(self.store)
         self.vfs = VFSView(self._engine, self.ledger)
         self.profile = ProfileView(self.store, self.ledger)
 
@@ -106,6 +108,7 @@ class UnifiedMemoryEngine:
             self.episodes,
             self.ledger,
             text,
+            supersede=self.supersede if self.config.enable_slot_supersede else None,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
@@ -223,6 +226,7 @@ class UnifiedMemoryEngine:
             self.episodes,
             self.ledger,
             query,
+            supersede=self.supersede,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
@@ -282,6 +286,7 @@ class UnifiedMemoryEngine:
             self.vfs,
             self.profile,
             recall_result,
+            supersede=self.supersede,
             query=query,
             user_id=user_id,
             agent_id=agent_id,
