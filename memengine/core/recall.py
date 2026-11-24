@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import math
 import re
-import time
 
 from memengine.core.text import stem_terms
 from memengine.core.episodes import EpisodeLog
@@ -11,8 +10,7 @@ from memengine.core.facts import UnifiedFactLedger
 from memengine.core.graph_enum import coverage_first_session_pack, enumerate_entity_graph_candidates
 from memengine.core.plan import QueryPlan, RecallConfig, build_query_plan
 from memengine.core.supersede import SlotSupersedeTracker, resolve_relative_occurrence
-from memengine.engine import _compact_evidence, _fit_context, baseline_rrf
-from memengine.identifiers import eligible_identifiers
+from memengine.engine import _compact_evidence, _fit_context
 from memengine.storage.base import RecallFilter
 from memengine.textutil import strip_step_tags
 
@@ -183,71 +181,6 @@ def _resolve_cross_session_updates(ranked: list[dict], query: str, qplan: QueryP
     return [*reordered, *tail]
 
 
-def _run_without_bipolar(
-    engine,
-    query: str,
-    plan: QueryPlan,
-    *,
-    scope: tuple[str, str, str | None],
-    top_k: int,
-    token_budget: int,
-    include_cold: bool,
-    filters: RecallFilter | None,
-    _trace: list[dict] | None,
-) -> dict:
-    """Feature-flagged recall path with bipolar ring & belt pruning disabled (for M5 ablation)."""
-    t0 = time.perf_counter()
-    direct = tuple(engine.store.entity_keys(scope=scope, query=query))
-    parsed = dict(plan.parsed)
-    if plan.is_historical:
-        parsed["query_type"] = "TIME_TRAVEL"
-    candidates = engine._recall(
-        query,
-        parsed,
-        plan.temporal,
-        scope,
-        direct,
-        include_cold=include_cold or plan.is_historical,
-        filters=filters,
-    )
-    ranked = baseline_rrf(candidates)
-    ce_scores, backend = engine._rerank(query, ranked)
-    for fact, ce in zip(ranked, ce_scores):
-        fact["ce_score"] = ce
-        fact["final_score"] = 0.55 * min(1.0, fact.get("rrf_norm", 0.0)) + 0.45 * ce + 0.35 * fact.get("exact_hit_ratio", 0.0)
-        if fact.get("version_mismatch"):
-            fact["final_score"] *= 0.30
-    ranked.sort(key=lambda f: (-f.get("version_confidence", 0), -f.get("exact_hit_ratio", 0), -f["final_score"], f["id"]))
-    ranked, ident_mode = eligible_identifiers(ranked, query, plan.is_historical, engine.allow_empty_recall)
-    if plan.exclude_superseded:
-        ranked = [f for f in ranked if f.get("status") == "active"]
-    selected = _fit_context(ranked, top_k, token_budget)
-    gate_stats = {"tau_abs": 0.12, "bipolar_enabled": False, "reranker": type(backend).__name__}
-    if ident_mode == "version" and not ranked:
-        gate_stats["empty_reason"] = "no_exact_version"
-    elif ident_mode == "symbol" and not ranked:
-        gate_stats["empty_reason"] = "no_exact_identifier"
-    if _trace is not None:
-        _trace.append({
-            "fused": [f["id"] for f in candidates],
-            "reranked": [f["id"] for f in ranked],
-            "packed": [f["id"] for f in selected],
-        })
-    return {
-        "route": "TASK",
-        "parsed_query": parsed,
-        "temporal_intent": plan.temporal.__dict__,
-        "matched_entities": list(direct),
-        "ranked": selected,
-        "empty_recall": not selected,
-        "gate_stats": gate_stats,
-        "scope": {"user_id": scope[0], "agent_id": scope[1], "session_id": scope[2]},
-        "validity_as_of": plan.as_of,
-        "packing_mode": "token_budget",
-        "retrieval_ms": (time.perf_counter() - t0) * 1000.0,
-    }
-
-
 def unified_recall(
     engine,
     episodes: EpisodeLog,
@@ -277,37 +210,25 @@ def unified_recall(
     effective_packing = packing_mode or ("token_budget" if top_k is None else "top_k")
 
     # 1. Core 4-channel recall (vector + fact BM25 + entity graph + exact/version)
-    if cfg.enable_bipolar:
-        trace_arg = {"_trace": _trace} if _trace is not None else {}
-        result = engine.retrieve(
-            query,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            token_budget=token_budget,
-            read_only=True,
-            mutate_stats=False,
-            mode=mode if cfg.enable_entity_graph else "single_query",
-            filters=filters,
-            include_cold=include_cold or qplan.is_historical,
-            top_k=top_k,
-            timestamp=reference_time,
-            reference_time=reference_time,
-            packing_mode=effective_packing,
-            **trace_arg,
-        )
-    else:
-        result = _run_without_bipolar(
-            engine,
-            query,
-            qplan,
-            scope=scope,
-            top_k=effective_top_k,
-            token_budget=token_budget,
-            include_cold=include_cold,
-            filters=filters,
-            _trace=_trace,
-        )
+    trace_arg = {"_trace": _trace} if _trace is not None else {}
+    result = engine.retrieve(
+        query,
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        token_budget=token_budget,
+        read_only=True,
+        mutate_stats=False,
+        mode=mode if cfg.enable_entity_graph else "single_query",
+        filters=filters,
+        include_cold=include_cold or qplan.is_historical,
+        top_k=top_k,
+        timestamp=reference_time,
+        reference_time=reference_time,
+        packing_mode=effective_packing,
+        enable_bipolar=cfg.enable_bipolar,
+        **trace_arg,
+    )
 
     # Preserve strict precision gate for exact identifiers & versions (zero confusion / 100% empty on missing)
     empty_reason = (result.get("gate_stats") or {}).get("empty_reason")
@@ -482,7 +403,8 @@ def unified_recall(
                     pin_ids = {f["id"] for f in pinned_head}
                     rest_tail = [f for f in ranked if f["id"] not in p_ids and f["id"] not in pin_ids]
                     ranked = [*pinned_head, *promoted, *rest_tail]
-        ranked = _resolve_cross_session_updates(ranked, query, qplan)
+        if cfg.enable_slot_supersede:
+            ranked = _resolve_cross_session_updates(ranked, query, qplan)
 
     # 5b. M3 Entity-Graph Enumeration & Coverage-First Distinct-Session Packing (aggregate / multi-hop)
     if (

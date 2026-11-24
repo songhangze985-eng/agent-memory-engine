@@ -553,7 +553,8 @@ class CognitiveMemoryEngine(TaskWorkspace):
                  belt_prune_ratio: float | None = None, min_keep: int | None = None,
                  include_raw_turns: bool = False, include_cold: bool = False, filters: RecallFilter | None = None,
                  scopes: list[str] | None = None, mode: Literal["single_query", "reconstructive"] = "single_query",
-                 reference_time=None, packing_mode=None, version_precision=False, mutate_stats=False, _trace=None) -> dict:
+                 reference_time=None, packing_mode=None, version_precision=False, mutate_stats=False,
+                 enable_bipolar: bool = True, _trace=None) -> dict:
         if mode not in ("single_query", "reconstructive"):
             raise ValueError("invalid recall mode")
         if scopes is not None and (isinstance(scopes, str) or not set(scopes) <= SCOPES):
@@ -577,7 +578,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
                     token_budget=budget, timestamp=timestamp, flush_pending=flush_pending,
                     belt_prune_ratio=belt_prune_ratio, min_keep=min_keep, include_cold=include_cold,
                     filters=filters, scopes=scopes, include_raw_turns=include_raw_turns,
-                    mutate_stats=mutate_stats and not read_only)
+                    mutate_stats=mutate_stats and not read_only, enable_bipolar=enable_bipolar)
         if _trace is not None:
             args["_trace"] = _trace
         pair_limit = getattr(self.reranker, "wide_pair_limit", None) if wide else None
@@ -603,7 +604,7 @@ class CognitiveMemoryEngine(TaskWorkspace):
 
     def _retrieve_single(self, query, *, user_id, agent_id, session_id, top_k, token_budget, timestamp, read_only,
                          flush_pending, belt_prune_ratio, min_keep, include_raw_turns, include_cold, filters, scopes, plan,
-                         mutate_stats=False, _passes=None, _bridges=(), _primary=(), _trace=None, _ce_budget=None):
+                         mutate_stats=False, enable_bipolar=True, _passes=None, _bridges=(), _primary=(), _trace=None, _ce_budget=None):
         prune_ratio = self.belt_prune_ratio if belt_prune_ratio is None else float(belt_prune_ratio)
         keep_floor = self.min_keep if min_keep is None else min_keep
         _validate_belt_config(prune_ratio, keep_floor)
@@ -735,11 +736,18 @@ class CognitiveMemoryEngine(TaskWorkspace):
             temporal_weight = 1.12 if role == "latest" else 0.65 if role == "older" and status_weight == 1.0 else 1.0
             attention = 1.15 if (attend_taboo and fact.get("is_taboo") and fact["status"] == "active" and role != "older"
                                  and ce_score >= tau_abs and (not direct or fact["entity_anchor"])) else 1.0
-            tagged = score_bipolar({**fact, "ce_score": ce_score, "attention_weight": attention}, c_max=c_max, radius=radius,
-                                    bipolar_lambda=self.bipolar_lambda, epsilon=self.epsilon,
-                                    status_weight=status_weight,
-                                    decay=1.0 if historical_query or (include_cold and fact["tier"] == "cold") else decay_factor(
-                                        fact, maintenance.get("as_of"), maintenance.get("half_life_days", 30)))
+            decay_val = 1.0 if historical_query or (include_cold and fact["tier"] == "cold") else decay_factor(
+                fact, maintenance.get("as_of"), maintenance.get("half_life_days", 30))
+            if enable_bipolar:
+                tagged = score_bipolar({**fact, "ce_score": ce_score, "attention_weight": attention}, c_max=c_max, radius=radius,
+                                       bipolar_lambda=self.bipolar_lambda, epsilon=self.epsilon,
+                                       status_weight=status_weight, decay=decay_val)
+            else:
+                flat_score = ce_score * status_weight * decay_val
+                tagged = {**fact, "ce_score": ce_score, "attention_weight": attention, "r_m": 0.0,
+                          "bipolar_weight": 1.0, "bipolar_factor": 1.0, "status_weight": status_weight,
+                          "score": flat_score, "bipolar_score": flat_score, "final_score": flat_score,
+                          "zone": INNER, "decay_factor": decay_val}
             score = tagged["final_score"]
             if use_context_score:
                 score += anchor_bonus[index]
@@ -805,9 +813,10 @@ class CognitiveMemoryEngine(TaskWorkspace):
         if wide_evidence:
             ranked = self.local_reranker.rank_long_evidence(ranked, floor)
         kept, gate_stats = precision_gate(ranked, tau_abs=tau_abs, allow_empty_recall=self.allow_empty_recall,
-                                          cliff_ratio=self.cliff_ratio, belt_prune_ratio=0 if evidence_floor else prune_ratio,
+                                          cliff_ratio=self.cliff_ratio, belt_prune_ratio=0 if (evidence_floor or not enable_bipolar) else prune_ratio,
                                           min_keep=max(keep_floor, min(10, top_k)) if blended else keep_floor,
                                           is_calibrated=backend.is_calibrated and not blended, top_k=top_k)
+        gate_stats["bipolar_enabled"] = enable_bipolar
         if _trace is not None:
             gate_kept_ids = [fact["id"] for fact in kept]
         if strict_version and not ranked:

@@ -81,7 +81,7 @@ def parse_longmemeval_qa(row: dict) -> tuple[list[Turn], QAItem]:
 
 
 def _worker(args):
-    turns, qa, engine_kind, llm_model, judge_model, consolidate, token_budget = args
+    turns, qa, engine_kind, llm_model, judge_model, consolidate, token_budget, recall_config = args
     return evaluate_group_qa(
         turns,
         [qa],
@@ -90,6 +90,7 @@ def _worker(args):
         judge_model=judge_model,
         consolidate=consolidate,
         token_budget=token_budget,
+        recall_config=recall_config,
     )
 
 
@@ -104,13 +105,14 @@ def run_longmemeval_qa(
     judge_model: str | None = None,
     consolidate: bool = False,
     token_budget: int = 2048,
+    recall_config=None,
 ) -> dict[str, Any]:
     data = json.loads(dataset_path.read_text(encoding="utf-8"))
     selected = sample_rows(data, sample, seed, lme_category)
     tasks = []
     for row in selected:
         turns, qa = parse_longmemeval_qa(row)
-        tasks.append((turns, qa, engine_kind, llm_model, judge_model, consolidate, token_budget))
+        tasks.append((turns, qa, engine_kind, llm_model, judge_model, consolidate, token_budget, recall_config))
 
     if workers <= 1:
         nested = [_worker(t) for t in tasks]

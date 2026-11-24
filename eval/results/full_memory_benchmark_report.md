@@ -1,22 +1,31 @@
-# 全程记忆评测完整实测报告（MemBench 加权汇总）
+# 历史全程检索评测存档（已由 M0–M5 端到端 QA 评测体系替代）
 
-- **测试日期**：2026-11-23
-- **测试环境**：Apple M1 Pro（8 核 / 16 GB RAM），Python 3.12.15，LanceDB 0.41.0 + PyArrow 26.0.1，Docker 29.9.3（`pgvector/pgvector:pg16`）
-- **数据来源与真实性声明**：全部数值均为本机实时运行官方数据集产出（`locomo10.json` SHA-256 `79fa87e9...` 全量 1,986 题；`longmemeval_s_cleaned.json` SHA-256 `d6f21ea9...` 全量 500 题；官方 `import-myself/Membench` `MemData` 4 大类 18,165 条轨迹中分层抽取 800 / 400 / 99 题），**零估算、零编造**。
+> **重要更新（2026-11-24 · M0–M5 架构整合）**：
+> - 原“MemBench 40/25/20/15 加权综合分”及跨粒度混排表（v2 Session 级 vs v1 Turn 级）**已在 M0 永久移除**，本文件仅作为历史检索基线存档保留。
+> - 全部离线历史数值均使用 `HashedTfidfEmbedder` + `CalibratedLocalReranker` + `MockLLMClient`（零外部 LLM），不包含端到端 QA 准确率。
+> - **最新权威端到端 QA + 同口径 Turn 级检索 + 6 桶错题归因 + 消融裁决**请直接查看：
+>   - [M0 基线报告](m0_baseline_report.md)
+>   - [M5 消融裁决报告](m5_ablation_report.md)
+>   - [M5 裁剪默认最终实测报告](m5_unified_pruned_report.md)（LongMemEval-S QA `31.00%` / Turn R@10 `72.62%` / UpdDom `64.29%`；LoCoMo QA `12.00%` / Turn R@10 `54.48%`；MemBench QA `53.00%` / Step R@10 `82.74%` / MRR `0.7763`）
+> - 原文末尾提及的两处历史 CI 缺陷（`eval/ablation_matrix.py` 缺少 `parsed_query` 与 `regression_guard.py` `long-horizon` 阈值）**已在 M0 全部修复并通过 CI**。
 
 ---
 
-## 一、MemBench 加权全程综合总览
+- **历史测试日期**：2026-11-23
+- **历史测试环境**：Apple M1 Pro（8 核 / 16 GB RAM），Python 3.12.15，LanceDB 0.41.0 + PyArrow 26.0.1，Docker 29.9.3（`pgvector/pgvector:pg16`），Embedder=`HashedTfidfEmbedder`，Reranker=`CalibratedLocalReranker`，LLM=`MockLLMClient`
+- **数据来源**：本机实时运行官方数据集产出（`locomo10.json` SHA-256 `79fa87e9...` 全量 1,986 题；`longmemeval_s_cleaned.json` SHA-256 `d6f21ea9...` 全量 500 题；官方 `import-myself/Membench` `MemData` 分层抽取 800 / 400 / 99 题）。
 
-为突出综合记忆与跨场景推理权重，采用公开透明的 **MemBench 加权综合口径**（**MemBench 40% + LongMemEval-S 全量 25% + LoCoMo 全量 20% + 技术精确/版本/日历/压力 15%**）：
+---
 
-| 引擎与口径 | MemBench 800 题<br>*(权重 40%)* | LongMemEval-S 500 题<br>*(权重 25%)* | LoCoMo 1,986 题<br>*(权重 20%)* | Exact/Version/Tech<br>*(权重 15%)* | **加权综合分** | 查询延迟 P95 |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **v2 VFS (`VFSMemoryEngine`)** | 67.28% *(Step R@10)* | **94.98%** *(Session R@10)* | **88.89%** *(Session R@10)* | **100.00%** *(Exact+Ver)* | **83.43%** | **1.83–3.18 ms** |
-| **v1 Chronicle (`reconstructive`, 2048 Budget)** | **76.56%** *(Step R@10)* | 84.90% *(R@Budget)* | 77.40% *(R@Budget)* | **100.00%** *(4项全满)* | **82.33%** | 69.02–204.88 ms |
-| **v1 标准 Top-10 (`CognitiveMemoryEngine`)** | **76.56%** *(Step R@10)* | 70.87% *(Turn R@10)* | 50.06% *(Turn R@10)* | **100.00%** *(4项全满)* | **73.35%** | 26.52–123.94 ms |
+## 一、历史检索基线汇总（已废除加权综合分，按原粒度分列）
 
-> **口径说明**：v1 标准与 Chronicle 在 LoCoMo / LongMemEval-S 上评估原子轮次级（Turn-level）召回；v2 VFS 在 LoCoMo / LongMemEval-S 上评估会话笔记级（Session-level）召回，在 MemBench 800 题上双方均严格按相同 **Step-level（步级）** 评测。
+| 引擎与口径 | MemBench 800 题 *(Step R@10)* | LongMemEval-S 500 题 *(注粒度)* | LoCoMo 1,986 题 *(注粒度)* | 自建专项门禁 | 查询延迟 P95 |
+| :--- | ---: | ---: | ---: | :---: | ---: |
+| **v2 VFS (`VFSMemoryEngine`)** | 67.28% *(Step)* | 94.98% *(Session 级，不可直比 Turn)* | 88.89% *(Session 级，不可直比 Turn)* | PASS *(Exact+Ver)* | 1.83–3.18 ms |
+| **v1 Chronicle (`reconstructive`, 2048 Budget)** | 76.56% *(Step)* | 84.90% *(Turn R@Budget)* | 77.40% *(Turn R@Budget)* | PASS *(4 项)* | 69.02–204.88 ms |
+| **v1 标准 Top-10 (`CognitiveMemoryEngine`)** | 76.56% *(Step)* | 70.87% *(Turn R@10)* | 50.06% *(Turn R@10)* | PASS *(4 项)* | 26.52–123.94 ms |
+
+> **口径说明**：上表仅作历史检索参考；v2 `session_md` 为会话级召回，与 v1 轮次级（Turn-level）粒度不同，不可直接比较。同口径（Turn/Step 级）端到端 QA 对比请见 [m0_baseline_report.md](m0_baseline_report.md) 与 [m5_unified_pruned_report.md](m5_unified_pruned_report.md)。
 
 ---
 

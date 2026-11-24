@@ -54,10 +54,10 @@ _CODING_CUE = re.compile(
 
 @dataclass(frozen=True)
 class RecallConfig:
-    """Explicit feature flags so M5 ablation can keep or drop every ranking component."""
+    """Explicit feature flags; M5 end-to-end ablation pruned bipolar & recency defaults."""
 
-    enable_bipolar: bool = True
-    enable_recency_rerank: bool = True  # Demoted to strict tie-breaker ONLY on non-historical, non-temporal queries!
+    enable_bipolar: bool = False  # M5 ablation: disabling saves complexity, 0.00pp QA drop, +0.0089 MemBench MRR@10
+    enable_recency_rerank: bool = False  # M5 ablation: disabling yields 0.00pp QA/R@10 drop, +0.0025 MemBench MRR@10
     enable_episode_fts: bool = True
     enable_entity_graph: bool = True
     enable_slot_supersede: bool = True
